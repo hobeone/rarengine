@@ -2,6 +2,7 @@ package rarengine
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -14,8 +15,12 @@ import (
 
 // UnpackOptions configures the high-level archive extraction process.
 type UnpackOptions struct {
-	Password string
-	Logger   *slog.Logger
+	Password         string
+	Logger           *slog.Logger
+	OneFolder        bool
+	OverwriteFiles   bool
+	IgnoreUnrarDates bool
+	OnEntry          func(header *FileHeader)
 }
 
 type volumeInfo struct {
@@ -86,28 +91,33 @@ func readVolumeIndex(r io.Reader) (int, error) {
 
 // UnpackDir automatically discovers, sorts, opens, and extracts a set of RAR5
 // archive volume files from the same directory starting at firstVolumePath.
-func UnpackDir(firstVolumePath string, outputDir string, opts UnpackOptions) error {
+// It returns a slice of absolute paths of all successfully extracted files.
+func UnpackDir(ctx context.Context, firstVolumePath string, outputDir string, opts UnpackOptions) ([]string, error) {
 	logger := opts.Logger
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	logger.Info("rarengine: starting volume discovery", "first_volume", firstVolumePath)
 	vols, err := discoverVolumes(firstVolumePath)
 	if err != nil {
-		return fmt.Errorf("rarengine: discover volumes: %w", err)
+		return nil, fmt.Errorf("rarengine: discover volumes: %w", err)
 	}
 	logger.Info("rarengine: discovered volumes", "count", len(vols), "paths", vols)
 
 	logger.Info("rarengine: sorting volumes by internal headers")
 	sortedVols, err := SortVolumes(vols)
 	if err != nil {
-		return fmt.Errorf("rarengine: sort volumes: %w", err)
+		return nil, fmt.Errorf("rarengine: sort volumes: %w", err)
 	}
 	logger.Info("rarengine: sorted volumes order", "paths", sortedVols)
 
 	if err := os.MkdirAll(outputDir, 0755); err != nil {
-		return fmt.Errorf("rarengine: create output dir: %w", err)
+		return nil, fmt.Errorf("rarengine: create output dir: %w", err)
 	}
 
 	volumesChan := make(chan io.ReadCloser, len(sortedVols))
@@ -118,7 +128,7 @@ func UnpackDir(firstVolumePath string, outputDir string, opts UnpackOptions) err
 			for v := range volumesChan {
 				_ = v.Close()
 			}
-			return fmt.Errorf("rarengine: open volume %s: %w", volPath, err)
+			return nil, fmt.Errorf("rarengine: open volume %s: %w", volPath, err)
 		}
 		volumesChan <- vf
 	}
@@ -129,50 +139,110 @@ func UnpackDir(firstVolumePath string, outputDir string, opts UnpackOptions) err
 		sd.SetPassword(opts.Password)
 	}
 
+	var extractedFiles []string
+
 	logger.Info("rarengine: starting extraction pipeline", "output_dir", outputDir)
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		header, err := sd.Next()
 		if err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, ErrNoNextVolume) {
 				break
 			}
-			return fmt.Errorf("rarengine: read next file: %w", err)
+			return nil, fmt.Errorf("rarengine: read next file: %w", err)
 		}
 
-		targetPath := filepath.Join(outputDir, header.Name)
-		logger.Info("rarengine: extracting entry", "name", header.Name, "size", header.UnpackedSize, "is_dir", header.IsDir)
+		var destRel string
+		if opts.OneFolder {
+			destRel = filepath.Base(header.Name)
+		} else {
+			destRel = header.Name
+		}
+		targetPath := filepath.Join(outputDir, destRel)
+
+		if opts.OneFolder && !opts.OverwriteFiles {
+			targetPath = uniquePath(targetPath)
+		}
+
+		logger.Info("rarengine: extracting entry", "name", header.Name, "target", targetPath, "size", header.UnpackedSize, "is_dir", header.IsDir)
 
 		if header.IsDir {
-			if err := os.MkdirAll(targetPath, 0755); err != nil {
-				return fmt.Errorf("rarengine: mkdir %s: %w", targetPath, err)
+			if !opts.OneFolder {
+				if err := os.MkdirAll(targetPath, 0750); err != nil {
+					return nil, fmt.Errorf("rarengine: mkdir %s: %w", targetPath, err)
+				}
 			}
 			continue
 		}
 
-		if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
-			return fmt.Errorf("rarengine: mkdir parent %s: %w", filepath.Dir(targetPath), err)
+		if !opts.OverwriteFiles {
+			if _, statErr := os.Stat(targetPath); statErr == nil {
+				logger.Info("rarengine: skipping existing file", "path", targetPath)
+				continue
+			}
 		}
 
-		out, err := os.OpenFile(targetPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, header.Mode())
+		if opts.OnEntry != nil {
+			opts.OnEntry(header)
+		}
+
+		if err := os.MkdirAll(filepath.Dir(targetPath), 0750); err != nil {
+			return nil, fmt.Errorf("rarengine: mkdir parent %s: %w", filepath.Dir(targetPath), err)
+		}
+
+		out, err := os.OpenFile(targetPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 		if err != nil {
-			return fmt.Errorf("rarengine: create file %s: %w", targetPath, err)
+			return nil, fmt.Errorf("rarengine: create file %s: %w", targetPath, err)
 		}
 
 		n, err := io.Copy(out, sd)
 		_ = out.Close()
 		if err != nil {
-			return fmt.Errorf("rarengine: write file %s: %w", targetPath, err)
+			return nil, fmt.Errorf("rarengine: write file %s: %w", targetPath, err)
 		}
 
-		if !header.ModificationTime.IsZero() {
+		mode := header.Mode() & 0666
+		if mode != 0 && header.HostOS != 0 {
+			_ = os.Chmod(targetPath, mode)
+		}
+
+		if !opts.IgnoreUnrarDates && !header.ModificationTime.IsZero() {
 			_ = os.Chtimes(targetPath, header.ModificationTime, header.ModificationTime)
 		}
+
+		absPath, err := filepath.Abs(targetPath)
+		if err != nil {
+			absPath = targetPath
+		}
+		extractedFiles = append(extractedFiles, absPath)
 
 		logger.Info("rarengine: extracted entry complete", "name", header.Name, "written_bytes", n)
 	}
 
-	logger.Info("rarengine: extraction pipeline complete")
-	return nil
+	logger.Info("rarengine: extraction pipeline complete", "extracted_count", len(extractedFiles))
+	return extractedFiles, nil
+}
+
+func uniquePath(destPath string) string {
+	if _, err := os.Stat(destPath); err != nil {
+		return destPath // doesn't exist, use as-is
+	}
+
+	dir := filepath.Dir(destPath)
+	base := filepath.Base(destPath)
+	ext := filepath.Ext(base)
+	name := strings.TrimSuffix(base, ext)
+
+	for i := 1; i < 10000; i++ {
+		candidate := filepath.Join(dir, fmt.Sprintf("%s_%d%s", name, i, ext))
+		if _, err := os.Stat(candidate); err != nil {
+			return candidate
+		}
+	}
+
+	return destPath
 }
 
 func discoverVolumes(firstVol string) ([]string, error) {

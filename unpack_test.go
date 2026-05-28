@@ -2,6 +2,7 @@ package rarengine
 
 import (
 	"bytes"
+	"context"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -51,7 +52,7 @@ func TestUnpackDir(t *testing.T) {
 		Logger: logger,
 	}
 
-	err = UnpackDir(firstVolume, tmpDir, opts)
+	_, err = UnpackDir(context.Background(), firstVolume, tmpDir, opts)
 	if err != nil {
 		t.Fatalf("UnpackDir failed: %v", err)
 	}
@@ -84,5 +85,61 @@ func TestUnpackDir(t *testing.T) {
 	}
 	if stat.Size() != 8192 {
 		t.Errorf("expected large.bin to be 8192 bytes, got %d", stat.Size())
+	}
+}
+
+func TestUnpackDir_Options(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "rarengine_options_test")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	firstVolume := filepath.Join("testdata", "rar5_multi.part01.rar")
+
+	// 1. Test basic extraction with returned paths
+	var entries []string
+	opts := UnpackOptions{
+		OneFolder: true,
+		OnEntry: func(h *FileHeader) {
+			entries = append(entries, h.Name)
+		},
+	}
+
+	files, err := UnpackDir(context.Background(), firstVolume, tmpDir, opts)
+	if err != nil {
+		t.Fatalf("UnpackDir failed: %v", err)
+	}
+
+	if len(files) != 1 {
+		t.Errorf("expected 1 extracted file path, got %d: %v", len(files), files)
+	}
+
+	// rar5_multi contains "large.bin"
+	if len(entries) != 1 || entries[0] != "large.bin" {
+		t.Errorf("OnEntry callback failed or had incorrect entries: %v", entries)
+	}
+
+	// Verify the file was flattened to the root of tmpDir
+	flatFile := filepath.Join(tmpDir, "large.bin")
+	if _, err := os.Stat(flatFile); err != nil {
+		t.Errorf("expected flat large.bin to exist at %s: %v", flatFile, err)
+	}
+
+	// 2. Test OneFolder duplicate collision (OverwriteFiles = false)
+	optsCollision := UnpackOptions{
+		OneFolder:      true,
+		OverwriteFiles: false,
+	}
+	filesCollision, err := UnpackDir(context.Background(), firstVolume, tmpDir, optsCollision)
+	if err != nil {
+		t.Fatalf("UnpackDir with collision failed: %v", err)
+	}
+	if len(filesCollision) != 1 {
+		t.Fatalf("expected 1 collision-extracted file path, got %v", filesCollision)
+	}
+	collisionFile := filepath.Join(tmpDir, "large_1.bin")
+	if _, err := os.Stat(collisionFile); err != nil {
+		t.Errorf("expected unique path file %s to exist: %v", collisionFile, err)
 	}
 }
