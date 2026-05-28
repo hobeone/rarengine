@@ -1,0 +1,190 @@
+package rarengine
+
+import (
+	"errors"
+)
+
+const (
+	maxCodeLength = 15 // maximum code length in bits
+	maxQuickBits  = 10
+	maxQuickSize  = 1 << maxQuickBits
+)
+
+var (
+	ErrHuffDecodeFailed   = errors.New("rarengine: huffman decode failed")
+	ErrInvalidLengthTable = errors.New("rarengine: invalid huffman code length table")
+)
+
+type HuffmanDecoder struct {
+	limit     [maxCodeLength + 1]uint16
+	pos       [maxCodeLength + 1]uint16
+	symbol    []uint16
+	min       uint8
+	quickbits uint8
+	quicklen  [maxQuickSize]uint8
+	quicksym  [maxQuickSize]uint16
+}
+
+// Init initializes the Huffman tables using the given code symbol bitlengths.
+func (h *HuffmanDecoder) Init(codeLengths []byte) {
+	count := make([]uint16, maxCodeLength+1)
+
+	for _, n := range codeLengths {
+		if n == 0 {
+			continue
+		}
+		count[n]++
+	}
+
+	h.pos[0] = 0
+	h.limit[0] = 0
+	h.min = 0
+	for i := uint8(1); i <= maxCodeLength; i++ {
+		h.limit[i] = h.limit[i-1] + count[i]<<(maxCodeLength-i)
+		h.pos[i] = h.pos[i-1] + count[i-1]
+		if h.min == 0 && h.limit[i] > 0 {
+			h.min = i
+		}
+	}
+
+	if cap(h.symbol) >= len(codeLengths) {
+		h.symbol = h.symbol[:len(codeLengths)]
+		for i := range h.symbol {
+			h.symbol[i] = 0
+		}
+	} else {
+		h.symbol = make([]uint16, len(codeLengths))
+	}
+
+	copy(count, h.pos[:])
+	for i, n := range codeLengths {
+		if n != 0 {
+			h.symbol[count[n]] = uint16(i)
+			count[n]++
+		}
+	}
+
+	if len(codeLengths) >= 298 {
+		h.quickbits = maxQuickBits
+	} else {
+		h.quickbits = maxQuickBits - 3
+	}
+
+	bits := uint8(1)
+	for i := uint16(0); i < 1<<h.quickbits; i++ {
+		v := i << (maxCodeLength - h.quickbits)
+
+		for v >= h.limit[bits] && bits < maxCodeLength {
+			bits++
+		}
+		h.quicklen[i] = bits
+
+		dist := v - h.limit[bits-1]
+		dist >>= (maxCodeLength - bits)
+
+		pos := int(h.pos[bits]) + int(dist)
+		if pos < len(h.symbol) {
+			h.quicksym[i] = h.symbol[pos]
+		} else {
+			h.quicksym[i] = 0
+		}
+	}
+}
+
+// ReadSym decodes a single symbol from the bit stream using direct lookup tables.
+func (h *HuffmanDecoder) ReadSym(r *BitReader) (int, error) {
+	// Peek up to maxCodeLength bits to perform fast decoding
+	v := uint16(r.PeekBits(maxCodeLength))
+
+	var bits uint8
+	if v < h.limit[h.quickbits] {
+		i := v >> (maxCodeLength - h.quickbits)
+		r.Advance(h.quicklen[i])
+		return int(h.quicksym[i]), nil
+	}
+
+	for bits = h.min; bits < maxCodeLength; bits++ {
+		if v < h.limit[bits] {
+			break
+		}
+	}
+	r.Advance(bits)
+
+	dist := v - h.limit[bits-1]
+	dist >>= maxCodeLength - bits
+
+	pos := int(h.pos[bits]) + int(dist)
+	if pos >= len(h.symbol) {
+		return 0, ErrHuffDecodeFailed
+	}
+
+	return int(h.symbol[pos]), nil
+}
+
+// ReadCodeLengthTable reads a dynamic code length table from the bit stream.
+func ReadCodeLengthTable(br *BitReader, codeLength []byte, addOld bool) error {
+	var bitlength [20]byte
+	for i := 0; i < len(bitlength); i++ {
+		n, err := br.ReadBits(4)
+		if err != nil {
+			return err
+		}
+		if n == 0xf {
+			cnt, err := br.ReadBits(4)
+			if err != nil {
+				return err
+			}
+			if cnt > 0 {
+				i += cnt + 1
+				continue
+			}
+		}
+		bitlength[i] = byte(n)
+	}
+
+	var bl HuffmanDecoder
+	bl.Init(bitlength[:])
+
+	for i := 0; i < len(codeLength); i++ {
+		l, err := bl.ReadSym(br)
+		if err != nil {
+			return err
+		}
+
+		if l < 16 {
+			if addOld {
+				codeLength[i] = (codeLength[i] + byte(l)) & 0xf
+			} else {
+				codeLength[i] = byte(l)
+			}
+			continue
+		}
+
+		var count int
+		var value byte
+
+		switch l {
+		case 16, 18:
+			count, err = br.ReadBits(3)
+			count += 3
+		default:
+			count, err = br.ReadBits(7)
+			count += 11
+		}
+		if err != nil {
+			return err
+		}
+		if l < 18 {
+			if i == 0 {
+				return ErrInvalidLengthTable
+			}
+			value = codeLength[i-1]
+		}
+		for ; count > 0 && i < len(codeLength); i++ {
+			codeLength[i] = value
+			count--
+		}
+		i--
+	}
+	return nil
+}

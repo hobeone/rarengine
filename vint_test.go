@@ -1,0 +1,53 @@
+package rarengine
+
+import (
+	"bytes"
+	"errors"
+	"testing"
+)
+
+func TestVintRoundTrip(t *testing.T) {
+	testCases := []uint64{
+		0, 1, 127, 128, 255, 300, 16383, 16384,
+		0xffffffff, 0x1234567890abcdef, 0xffffffffffffffff,
+	}
+
+	for _, tc := range testCases {
+		encoded := EncodeVint(tc)
+		decoded, n, err := DecodeVint(encoded)
+		if err != nil {
+			t.Errorf("DecodeVint(%d) failed: %v", tc, err)
+			continue
+		}
+		if n != len(encoded) {
+			t.Errorf("DecodeVint(%d) consumed %d bytes, expected %d", tc, n, len(encoded))
+		}
+		if decoded != tc {
+			t.Errorf("DecodeVint(%d) returned %d, expected %d", tc, decoded, tc)
+		}
+	}
+}
+
+func TestDecodeVintTruncated(t *testing.T) {
+	// 1. Empty buffer
+	_, _, err := DecodeVint(nil)
+	if !errors.Is(err, ErrTruncatedVint) {
+		t.Errorf("expected ErrTruncatedVint for empty buffer, got %v", err)
+	}
+
+	// 2. Incomplete sequence
+	buf := []byte{0x80, 0x80, 0x80}
+	_, _, err = DecodeVint(buf)
+	if !errors.Is(err, ErrTruncatedVint) {
+		t.Errorf("expected ErrTruncatedVint for incomplete sequence, got %v", err)
+	}
+}
+
+func TestDecodeVintOversized(t *testing.T) {
+	// 11 bytes of 0x80 (exceeds max length of 10)
+	buf := bytes.Repeat([]byte{0x80}, 11)
+	_, _, err := DecodeVint(buf)
+	if !errors.Is(err, ErrTruncatedVint) {
+		t.Errorf("expected ErrTruncatedVint for 11-byte sequence, got %v", err)
+	}
+}
