@@ -33,9 +33,6 @@ func (w *Window) Reset(keepHistory bool) {
 	if !keepHistory {
 		w.w = 0
 		w.r = 0
-		for i := range w.buf {
-			w.buf[i] = 0
-		}
 	} else {
 		w.r = w.w
 	}
