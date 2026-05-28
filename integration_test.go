@@ -1,10 +1,12 @@
 package rarengine_test
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -209,5 +211,118 @@ func TestIntegration_Encrypted(t *testing.T) {
 	expectedContent := "hello rardecode"
 	if string(data) != expectedContent {
 		t.Errorf("content mismatch: expected %q, got %q", expectedContent, string(data))
+	}
+}
+
+func TestIntegration_Oracle(t *testing.T) {
+	// Verify unrar is available on system
+	unrarPath, err := exec.LookPath("unrar")
+	if err != nil {
+		t.Skip("unrar binary not found on path, skipping oracle test")
+	}
+
+	testArchives := []struct {
+		filename string
+		password string
+	}{
+		{"rar5_store.rar", ""},
+		{"rar5_compress.rar", ""},
+		{"rar5_solid.rar", ""},
+		{"rar5_encrypted.rar", "test"},
+	}
+
+	for _, tc := range testArchives {
+		t.Run(tc.filename, func(t *testing.T) {
+			archivePath := filepath.Join("testdata", tc.filename)
+			tempDir := t.TempDir()
+
+			// Extract using oracle unrar
+			passwordArg := "-p-"
+			if tc.password != "" {
+				passwordArg = "-p" + tc.password
+			}
+
+			// We append / to the end of target directory for unrar destination
+			cmd := exec.Command(unrarPath, "x", "-y", passwordArg, archivePath, tempDir+string(filepath.Separator))
+			var stderr bytes.Buffer
+			cmd.Stderr = &stderr
+			if err := cmd.Run(); err != nil {
+				t.Fatalf("unrar command failed: %v, stderr: %s", err, stderr.String())
+			}
+
+			// Open archive using StreamDecompressor
+			f, err := os.Open(archivePath)
+			if err != nil {
+				t.Fatalf("failed to open archive: %v", err)
+			}
+			defer f.Close()
+
+			volumes := make(chan io.ReadCloser, 1)
+			volumes <- f
+			close(volumes)
+
+			sd := rarengine.NewStreamDecompressor(volumes)
+			if tc.password != "" {
+				sd.SetPassword(tc.password)
+			}
+
+			// Track files extracted by decompressor to match with oracle directory
+			extractedFiles := make(map[string]bool)
+
+			for {
+				fh, err := sd.Next()
+				if err != nil {
+					if errors.Is(err, rarengine.ErrNoNextVolume) || err == io.EOF {
+						break
+					}
+					t.Fatalf("Next() failed: %v", err)
+				}
+
+				if fh.IsDir {
+					continue
+				}
+
+				extractedFiles[fh.Name] = true
+
+				// Read oracle file content
+				oracleFilePath := filepath.Join(tempDir, fh.Name)
+				oracleData, err := os.ReadFile(oracleFilePath)
+				if err != nil {
+					t.Fatalf("failed to read oracle file %q: %v", fh.Name, err)
+				}
+
+				// Decompress content using rarengine
+				data := make([]byte, fh.UnpackedSize)
+				_, err = io.ReadFull(sd, data)
+				if err != nil {
+					t.Fatalf("failed to read content of %s: %v", fh.Name, err)
+				}
+
+				if !bytes.Equal(data, oracleData) {
+					t.Errorf("content mismatch for file %q: expected size %d, got size %d", fh.Name, len(oracleData), len(data))
+				}
+			}
+
+			// Verify all non-empty files in the oracle directory were matched by the decompressor
+			err = filepath.WalkDir(tempDir, func(path string, d os.DirEntry, err error) error {
+				if err != nil {
+					return err
+				}
+				if d.IsDir() {
+					return nil
+				}
+				relPath, err := filepath.Rel(tempDir, path)
+				if err != nil {
+					return err
+				}
+				if !extractedFiles[relPath] {
+					t.Errorf("file %q extracted by oracle but not by decompressor", relPath)
+				}
+				return nil
+			})
+			if err != nil {
+				t.Fatalf("failed to walk oracle directory: %v", err)
+			}
+		})
 	}
 }
