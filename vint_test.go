@@ -51,3 +51,21 @@ func TestDecodeVintOversized(t *testing.T) {
 		t.Errorf("expected ErrTruncatedVint for 11-byte sequence, got %v", err)
 	}
 }
+
+func TestDecodeVint_Padding(t *testing.T) {
+	// Pre-allocated VINT encoding representation for value 5
+	// First byte 0x85 (LSB 5, continuation flag set)
+	// Second byte 0x80 (continuation flag set, value 0)
+	// Third byte 0x00 (no continuation flag set, value 0)
+	buf := []byte{0x85, 0x80, 0x00}
+	val, n, err := DecodeVint(buf)
+	if err != nil {
+		t.Fatalf("DecodeVint failed for padded VINT: %v", err)
+	}
+	if val != 5 {
+		t.Errorf("expected decoded value 5, got %d", val)
+	}
+	if n != 3 {
+		t.Errorf("expected consumed bytes 3, got %d", n)
+	}
+}

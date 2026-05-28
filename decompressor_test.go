@@ -151,3 +151,89 @@ func TestStreamDecompressor_RarBomb(t *testing.T) {
 		t.Errorf("expected ErrRarBombDetected, got %v", err)
 	}
 }
+
+func TestStreamDecompressor_UnknownBlock(t *testing.T) {
+	var volBuf bytes.Buffer
+	volBuf.Write([]byte{0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x01, 0x00}) // Signature
+
+	// 1. Build an Unknown Block (Type = 99)
+	// Flags: HeaderFlagHasExtra (0x0001) | HeaderFlagHasData (0x0002)
+	// Extra record: size 3, type 10, data 2 bytes: [0xaa, 0xbb]
+	var unknownPayload bytes.Buffer
+	unknownPayload.Write(EncodeVint(99)) // Header Type 99
+	unknownPayload.Write(EncodeVint(HeaderFlagHasExtra | HeaderFlagHasData))
+	unknownPayload.Write(EncodeVint(4))  // Extra Area Size (record size 3 + vint len of extra size)
+	unknownPayload.Write(EncodeVint(10)) // Data Size (10 bytes of payload to skip)
+
+	// Extra Area:
+	// exRecSize = 3 (Type vint + data length)
+	// Type = 10 (Unknown record type)
+	// Data = [0xaa, 0xbb]
+	unknownPayload.Write(EncodeVint(3))
+	unknownPayload.Write(EncodeVint(10))
+	unknownPayload.Write([]byte{0xaa, 0xbb})
+
+	unkSize := unknownPayload.Len()
+	unkSizeV := EncodeVint(uint64(unkSize))
+
+	var unkHashed bytes.Buffer
+	unkHashed.Write(unkSizeV)
+	unkHashed.Write(unknownPayload.Bytes())
+	unkCrc := crc32.ChecksumIEEE(unkHashed.Bytes())
+
+	binary.Write(&volBuf, binary.LittleEndian, unkCrc)
+	volBuf.Write(unkHashed.Bytes())
+	volBuf.Write(make([]byte, 10)) // 10 bytes of data area for the unknown block
+
+	// 2. Build a valid File Header (hello.txt, unpacked size 5, method 0, name hello.txt)
+	var filePayload bytes.Buffer
+	filePayload.Write(EncodeVint(0)) // flags
+	filePayload.Write(EncodeVint(5)) // unpacked size
+	filePayload.Write(EncodeVint(0)) // attributes
+	filePayload.Write(EncodeVint(0)) // comp flags
+	filePayload.Write(EncodeVint(1)) // host OS
+	filePayload.Write(EncodeVint(9)) // name len
+	filePayload.WriteString("hello.txt")
+
+	var headerPayload bytes.Buffer
+	headerPayload.Write(EncodeVint(HeaderTypeFile))
+	headerPayload.Write(EncodeVint(HeaderFlagHasData))
+	headerPayload.Write(EncodeVint(5)) // data size
+	headerPayload.Write(filePayload.Bytes())
+
+	fileSize := headerPayload.Len()
+	fileSizeV := EncodeVint(uint64(fileSize))
+	var fileHashed bytes.Buffer
+	fileHashed.Write(fileSizeV)
+	fileHashed.Write(headerPayload.Bytes())
+	fileCrc := crc32.ChecksumIEEE(fileHashed.Bytes())
+
+	binary.Write(&volBuf, binary.LittleEndian, fileCrc)
+	volBuf.Write(fileHashed.Bytes())
+	volBuf.WriteString("world")
+
+	volumes := make(chan io.ReadCloser, 1)
+	volumes <- &mockReadCloser{&volBuf}
+	close(volumes)
+
+	sd := NewStreamDecompressor(volumes)
+
+	// Step 1: Next() should skip the unknown block (Type 99) and successfully parse "hello.txt"
+	fh, err := sd.Next()
+	if err != nil {
+		t.Fatalf("Next() failed: %v", err)
+	}
+
+	if fh.Name != "hello.txt" {
+		t.Errorf("expected 'hello.txt', got '%s'", fh.Name)
+	}
+
+	data := make([]byte, 5)
+	_, err = io.ReadFull(sd, data)
+	if err != nil {
+		t.Fatalf("failed to read data: %v", err)
+	}
+	if string(data) != "world" {
+		t.Errorf("expected 'world', got '%s'", string(data))
+	}
+}
