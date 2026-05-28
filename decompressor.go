@@ -52,6 +52,18 @@ func NewStreamDecompressor(volumes <-chan io.ReadCloser) *StreamDecompressor {
 	}
 }
 
+// Reset reconfigures the decompressor for a new stream, reusing the sliding window and decoder.
+func (sd *StreamDecompressor) Reset(volumes <-chan io.ReadCloser) {
+	if sd.currentVol != nil {
+		_ = sd.currentVol.Close()
+		sd.currentVol = nil
+	}
+	sd.volumes = volumes
+	sd.currHeader = nil
+	sd.currReader = nil
+	sd.win.Reset(false)
+}
+
 // nextVolume fetches the next volume from the channel, closing the previous one if active.
 func (sd *StreamDecompressor) nextVolume() error {
 	if sd.currentVol != nil {
