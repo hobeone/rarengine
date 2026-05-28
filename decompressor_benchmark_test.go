@@ -25,10 +25,9 @@ func BenchmarkDecompress_Store(b *testing.B) {
 
 	buf := make([]byte, 4096)
 
-	b.ResetTimer()
 	b.ReportAllocs()
 
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		f := io.NopCloser(bytes.NewReader(data))
 		volChan := make(chan io.ReadCloser, 1)
 		volChan <- f
@@ -68,10 +67,9 @@ func BenchmarkDecompress_Compress(b *testing.B) {
 
 	buf := make([]byte, 4096)
 
-	b.ResetTimer()
 	b.ReportAllocs()
 
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		f := io.NopCloser(bytes.NewReader(data))
 		volChan := make(chan io.ReadCloser, 1)
 		volChan <- f
@@ -104,7 +102,7 @@ func BenchmarkDecompress_Compress(b *testing.B) {
 }
 
 func BenchmarkDecompress_Solid(b *testing.B) {
-	archivePath := filepath.Join("testdata", "rar5_solid.rar")
+	archivePath := filepath.Join("testdata", "rar5_solid_bench.rar")
 	data, err := os.ReadFile(archivePath)
 	if err != nil {
 		b.Fatal(err)
@@ -118,10 +116,9 @@ func BenchmarkDecompress_Solid(b *testing.B) {
 
 	buf := make([]byte, 4096)
 
-	b.ResetTimer()
 	b.ReportAllocs()
 
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		f := io.NopCloser(bytes.NewReader(data))
 		volChan := make(chan io.ReadCloser, 1)
 		volChan <- f

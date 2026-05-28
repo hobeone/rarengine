@@ -44,6 +44,29 @@ echo "  rar5_compress.rar"
 rar a -m3 -ma5 -s -ep rar5_solid.rar "$TMPDIR/hello.txt" "$TMPDIR/second.txt"
 echo "  rar5_solid.rar"
 
+# 3b. RAR5, solid archive — realistic ~5MB single-file payload for BenchmarkDecompress_Solid.
+# The tiny rar5_solid.rar above is dominated by per-archive setup; this fixture
+# exercises the actual decode hot path (LZ77 + Huffman) at sensible scale.
+# Source is mixed pseudo-English text + deterministic PRNG noise (no /dev/urandom)
+# so regeneration produces archives of similar size and compressibility.
+python3 - "$TMPDIR/solid_bench.bin" <<'PY'
+import random, sys
+random.seed(42)
+words = ['the','quick','brown','fox','jumps','over','lazy','dog','rar','engine',
+         'huffman','decode','window','solid','stream','buffer','offset','length',
+         'symbol','table']
+with open(sys.argv[1], 'wb') as out:
+    size = 0
+    while size < 5 * 1024 * 1024:
+        if random.random() < 0.8:
+            b = (' '.join(random.choices(words, k=20)) + '\n').encode()
+        else:
+            b = bytes(random.getrandbits(8) for _ in range(64))
+        out.write(b); size += len(b)
+PY
+rar a -m3 -ma5 -s -ep rar5_solid_bench.rar "$TMPDIR/solid_bench.bin"
+echo "  rar5_solid_bench.rar"
+
 # 4. RAR5, directories
 rar a -ma5 -r rar5_directory.rar "$TMPDIR/subdir/"
 echo "  rar5_directory.rar"

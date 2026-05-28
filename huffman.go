@@ -28,7 +28,7 @@ type HuffmanDecoder struct {
 
 // Init initializes the Huffman tables using the given code symbol bitlengths.
 func (h *HuffmanDecoder) Init(codeLengths []byte) {
-	count := make([]uint16, maxCodeLength+1)
+	var count [maxCodeLength + 1]uint16
 
 	for _, n := range codeLengths {
 		if n == 0 {
@@ -50,14 +50,12 @@ func (h *HuffmanDecoder) Init(codeLengths []byte) {
 
 	if cap(h.symbol) >= len(codeLengths) {
 		h.symbol = h.symbol[:len(codeLengths)]
-		for i := range h.symbol {
-			h.symbol[i] = 0
-		}
+		clear(h.symbol)
 	} else {
 		h.symbol = make([]uint16, len(codeLengths))
 	}
 
-	copy(count, h.pos[:])
+	copy(count[:], h.pos[:])
 	for i, n := range codeLengths {
 		if n != 0 {
 			h.symbol[count[n]] = uint16(i)
@@ -136,7 +134,9 @@ func (h *HuffmanDecoder) ReadSym(r *BitReader) (int, error) {
 }
 
 // ReadCodeLengthTable reads a dynamic code length table from the bit stream.
-func ReadCodeLengthTable(br *BitReader, codeLength []byte, addOld bool) error {
+// The scratch HuffmanDecoder is used to decode the 20-symbol bit-length table;
+// callers should reuse a single scratch across calls to avoid per-block allocations.
+func ReadCodeLengthTable(br *BitReader, codeLength []byte, addOld bool, scratch *HuffmanDecoder) error {
 	var bitlength [20]byte
 	for i := 0; i < len(bitlength); i++ {
 		n, err := br.ReadBits(4)
@@ -156,11 +156,10 @@ func ReadCodeLengthTable(br *BitReader, codeLength []byte, addOld bool) error {
 		bitlength[i] = byte(n)
 	}
 
-	var bl HuffmanDecoder
-	bl.Init(bitlength[:])
+	scratch.Init(bitlength[:])
 
 	for i := 0; i < len(codeLength); i++ {
-		l, err := bl.ReadSym(br)
+		l, err := scratch.ReadSym(br)
 		if err != nil {
 			return err
 		}

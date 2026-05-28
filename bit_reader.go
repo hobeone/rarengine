@@ -26,6 +26,17 @@ func NewBitReader(buf []byte, limitBits int) *BitReader {
 	}
 }
 
+// Reset reuses an existing BitReader with a new source buffer and bit limit.
+// All internal state (cache, byte offset, bits-read counter) is cleared.
+func (r *BitReader) Reset(buf []byte, limitBits int) {
+	r.buf = buf
+	r.off = 0
+	r.v = 0
+	r.n = 0
+	r.limit = limitBits
+	r.bitsRead = 0
+}
+
 // fill refills the bit buffer v so it contains up to 56 bits.
 func (r *BitReader) fill() {
 	for r.n <= 56 && r.off < len(r.buf) {

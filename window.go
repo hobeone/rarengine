@@ -52,6 +52,24 @@ func (w *Window) writeByte(c byte) {
 	}
 }
 
+// writeBytes writes p to the window using bulk copy, handling ring wraparound.
+// Semantics match repeated writeByte calls: full is set when w lands on r at a
+// chunk boundary. Callers must drain via Read before w overruns r.
+func (w *Window) writeBytes(p []byte) {
+	for len(p) > 0 {
+		n := min(w.size-w.w, len(p))
+		copy(w.buf[w.w:w.w+n], p[:n])
+		w.w += n
+		if w.w >= w.size {
+			w.w = 0
+		}
+		if w.w == w.r {
+			w.full = true
+		}
+		p = p[n:]
+	}
+}
+
 // CopyBytes copies 'length' bytes from 'distance' bytes back in history to the current write pointer.
 // Supports overlapping copies (e.g. repeating patterns where length > distance).
 func (w *Window) CopyBytes(length int, distance int) error {

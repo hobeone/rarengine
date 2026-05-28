@@ -32,7 +32,9 @@ type FilterBlock struct {
 // decoder50 manages the LZ77 dynamic decompression state machine.
 type decoder50 struct {
 	r          io.Reader
-	br         *BitReader
+	br         *BitReader // points to bitReader when a block is loaded; nil between blocks
+	bitReader  BitReader  // reusable bit reader (embedded to avoid per-block allocations)
+	payloadBuf []byte     // reusable scratch buffer for compressed block payload
 	codeLength [tableSize5]byte
 	lastBlock  bool
 	offsetSize int
@@ -41,13 +43,15 @@ type decoder50 struct {
 	offsetDecoder    HuffmanDecoder
 	lowoffsetDecoder HuffmanDecoder
 	lengthDecoder    HuffmanDecoder
+	bitlenDecoder    HuffmanDecoder // scratch for ReadCodeLengthTable
 
 	offset [4]int
 	length int
 
-	fl     []*FilterBlock
-	outbuf []byte // Buffered decompressed output bytes ready for consumption
-	tot    int64  // Total number of bytes read/output so far
+	fl        []*FilterBlock
+	outbuf    []byte // Leftover filter output that didn't fit in the caller's buffer
+	filterBuf []byte // Reusable scratch for filter input; reused once outbuf drains
+	tot       int64  // Total number of bytes read/output so far
 }
 
 func newDecoder50() *decoder50 {
@@ -112,17 +116,22 @@ func (d *decoder50) readBlockHeader() error {
 
 	blockBits += (blockBytes - 1) * 8
 
-	payload := make([]byte, blockBytes)
-	_, err = io.ReadFull(d.r, payload)
+	if cap(d.payloadBuf) < blockBytes {
+		d.payloadBuf = make([]byte, blockBytes)
+	} else {
+		d.payloadBuf = d.payloadBuf[:blockBytes]
+	}
+	_, err = io.ReadFull(d.r, d.payloadBuf)
 	if err != nil {
 		return err
 	}
 
-	d.br = NewBitReader(payload, blockBits)
+	d.bitReader.Reset(d.payloadBuf, blockBits)
+	d.br = &d.bitReader
 	d.lastBlock = flags&0x40 > 0
 
 	if flags&0x80 > 0 {
-		err = ReadCodeLengthTable(d.br, d.codeLength[:], false)
+		err = ReadCodeLengthTable(d.br, d.codeLength[:], false, &d.bitlenDecoder)
 		if err != nil {
 			return err
 		}
@@ -336,57 +345,64 @@ func (d *decoder50) fill(win *Window) error {
 	return nil
 }
 
-// decode executes fill and process filters, populating outbuf with output bytes.
-func (d *decoder50) decode(win *Window) error {
+// Read decompresses the stream into p, reading directly from the sliding window
+// when no filter is pending to avoid intermediate staging allocations.
+func (d *decoder50) Read(win *Window, p []byte) (int, error) {
+	// Drain any leftover filter output from a previous call first.
+	if len(d.outbuf) > 0 {
+		n := copy(p, d.outbuf)
+		d.outbuf = d.outbuf[n:]
+		return n, nil
+	}
+	if len(p) == 0 {
+		return 0, nil
+	}
+
+	// Ensure the window has decoded data ready.
 	if win.Available() == 0 {
 		err := d.fill(win)
 		if err != nil && !errors.Is(err, ErrDecoderOutOfData) && !errors.Is(err, io.EOF) {
-			return err
-		}
-	}
-
-	avail := win.Available()
-	if avail == 0 {
-		return io.EOF
-	}
-
-	if len(d.fl) == 0 {
-		d.outbuf = make([]byte, avail)
-		_, _ = win.Read(d.outbuf)
-		d.tot += int64(len(d.outbuf))
-		return nil
-	}
-
-	f := d.fl[0]
-	if f.offset > 0 {
-		n := min(f.offset, avail)
-		d.outbuf = make([]byte, n)
-		_, _ = win.Read(d.outbuf)
-		f.offset -= n
-		d.tot += int64(n)
-		return nil
-	}
-
-	d.fl = d.fl[1:]
-
-	filterInput := make([]byte, f.length)
-	_, _ = win.Read(filterInput)
-
-	filterOutput := f.filter(filterInput, d.tot)
-	d.outbuf = filterOutput
-	d.tot += int64(len(filterOutput))
-	return nil
-}
-
-// Read decompresses the stream sequentially into p.
-func (d *decoder50) Read(win *Window, p []byte) (int, error) {
-	if len(d.outbuf) == 0 {
-		err := d.decode(win)
-		if err != nil {
 			return 0, err
 		}
+		if win.Available() == 0 {
+			return 0, io.EOF
+		}
 	}
-	n := copy(p, d.outbuf)
-	d.outbuf = d.outbuf[n:]
+
+	// Fast path: no filter queued — copy window → p directly. Window.Read
+	// returns at most len(p) bytes; the caller drives further progress.
+	if len(d.fl) == 0 {
+		n, _ := win.Read(p)
+		d.tot += int64(n)
+		return n, nil
+	}
+
+	// A filter is pending. Drain its pre-filter passthrough first.
+	f := d.fl[0]
+	if f.offset > 0 {
+		limit := min(f.offset, win.Available(), len(p))
+		n, _ := win.Read(p[:limit])
+		f.offset -= n
+		d.tot += int64(n)
+		return n, nil
+	}
+
+	// Apply the filter. Reuse filterBuf for the input. Note: some filter
+	// implementations return a slice aliasing their input, so filterBuf must
+	// stay stable until outbuf drains. That's guaranteed because Read only
+	// reaches this branch when outbuf is empty.
+	d.fl = d.fl[1:]
+	if cap(d.filterBuf) < f.length {
+		d.filterBuf = make([]byte, f.length)
+	} else {
+		d.filterBuf = d.filterBuf[:f.length]
+	}
+	_, _ = win.Read(d.filterBuf)
+	out := f.filter(d.filterBuf, d.tot)
+	d.tot += int64(len(out))
+	n := copy(p, out)
+	if n < len(out) {
+		d.outbuf = out[n:]
+	}
 	return n, nil
 }
