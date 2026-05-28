@@ -9,6 +9,7 @@ Designed specifically for high-throughput Usenet downloaders (like `gonzbd`), `r
 ## Key Features
 
 - **Zero-Allocation Pipeline**: Reuses single `StreamDecompressor` instances and pre-allocated 32MB sliding windows across streams, slashing memory allocations to **under 2 KB per run**.
+- **Automatic Volume Unpacker**: Unpacks directory-based multi-volume archives automatically via `UnpackDir`, discovering and ordering `.partX.rar` files dynamically.
 - **Process In-Process**: Runs entirely within Go—no slow C++ `unrar` binary subprocess forks or shell pipeline parsing.
 - **Spec Conformance**: Fully audited and tested for strict conformance to the official RAR 5.0 technote specifications.
 - **Differential Oracle Tested**: Verified byte-for-byte against the system-installed canonical `unrar` binary for standard, compressed, solid, and password-encrypted archives.
@@ -93,6 +94,46 @@ func main() {
 // Reset the stream decompressor to process a new set of volumes
 // reusing the existing 32MB sliding window memory:
 sd.Reset(newVolumesChan)
+```
+
+### High-Level Directory Decompression (Automatic Volume Discovery & Extraction)
+
+For standard extraction directly to a target directory, `rarengine` provides a robust, sandboxed `UnpackDir` utility. It automatically discovers other volumes (e.g., `.part1.rar`, `.part2.rar`), sorts them by internal headers, sandboxes file generation inside the target directory, and unpacks the contents.
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"os"
+
+	"github.com/hobeone/rarengine"
+)
+
+func main() {
+	ctx := context.Background()
+	firstVolume := "archive.part1.rar"
+	outputDir := "./extracted"
+
+	opts := rarengine.UnpackOptions{
+		Password:       "my-secret-password",             // If password-encrypted
+		Logger:         slog.New(slog.NewTextHandler(os.Stdout, nil)), // Enable internal trace logging
+		OneFolder:      false,                            // Retain internal folder structures
+		OverwriteFiles: true,                             // Overwrite existing files in output directory
+	}
+
+	files, err := rarengine.UnpackDir(ctx, firstVolume, outputDir, opts)
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Printf("Successfully extracted %d files:\n", len(files))
+	for _, file := range files {
+		fmt.Println("-", file)
+	}
+}
 ```
 
 ---
