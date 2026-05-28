@@ -13,6 +13,7 @@ type Window struct {
 	size int    // Capacity of the circular buffer
 	r    int    // Read index (beginning of unread data)
 	w    int    // Write index (end of unread data)
+	full bool   // True if the buffer is completely full
 }
 
 // NewWindow creates a new sliding window of the specified size.
@@ -36,6 +37,7 @@ func (w *Window) Reset(keepHistory bool) {
 	} else {
 		w.r = w.w
 	}
+	w.full = false
 }
 
 // writeByte writes a single byte to the window.
@@ -44,6 +46,9 @@ func (w *Window) writeByte(c byte) {
 	w.w++
 	if w.w >= w.size {
 		w.w = 0
+	}
+	if w.w == w.r {
+		w.full = true
 	}
 }
 
@@ -72,12 +77,18 @@ func (w *Window) CopyBytes(length int, distance int) error {
 		if w.w >= w.size {
 			w.w = 0
 		}
+		if w.w == w.r {
+			w.full = true
+		}
 	}
 	return nil
 }
 
 // Available returns the number of unread bytes in the window.
 func (w *Window) Available() int {
+	if w.full {
+		return w.size
+	}
 	if w.w >= w.r {
 		return w.w - w.r
 	}
@@ -105,6 +116,9 @@ func (w *Window) Read(p []byte) (int, error) {
 		if w.r >= w.size {
 			w.r = 0
 		}
+	}
+	if n > 0 {
+		w.full = false
 	}
 	return copied, nil
 }

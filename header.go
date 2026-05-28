@@ -141,11 +141,14 @@ func ReadBlockHeader(r io.Reader) (*BlockHeader, error) {
 	if err != nil {
 		return nil, err
 	}
+	if sizeV > maxHeaderSize {
+		return nil, ErrBadBlockHeader
+	}
 	size := int(sizeV)
 
 	// bufSize is the size of the rest of the header payload covered by CRC
 	bufSize := size + n
-	if size > maxHeaderSize || bufSize < n {
+	if bufSize < n {
 		return nil, ErrBadBlockHeader
 	}
 

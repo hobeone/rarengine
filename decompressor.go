@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 )
 
@@ -94,7 +95,10 @@ func (sd *StreamDecompressor) nextVolume() error {
 func (sd *StreamDecompressor) Next() (*FileHeader, error) {
 	// 1. Drain the previous file payload if any remains unread to align the stream
 	if sd.currReader != nil {
-		_, _ = io.Copy(io.Discard, sd.currReader)
+		if _, err := io.Copy(io.Discard, sd.currReader); err != nil {
+			sd.currReader = nil
+			return nil, fmt.Errorf("rarengine: draining previous file: %w", err)
+		}
 		sd.currReader = nil
 	}
 
@@ -251,9 +255,18 @@ func (sd *StreamDecompressor) newDecompressionReader(fh *FileHeader, pr io.Reade
 		if sd.password == "" {
 			return &errorReader{err: errors.New("rarengine: password required for encrypted file")}
 		}
+		const maxKdfCount = 24 // RAR5 spec maximum
+		if fh.KdfCount > maxKdfCount {
+			return &errorReader{err: fmt.Errorf("rarengine: KdfCount %d exceeds maximum %d", fh.KdfCount, maxKdfCount)}
+		}
 		iter := 1 << fh.KdfCount
 		passBytes := []byte(sd.password)
-		key := pbkdf2HmacSha256(passBytes, fh.Salt, iter, 32)
+		key, pswCheckVal := pbkdf2HmacSha256(passBytes, fh.Salt, iter)
+		if fh.EncCheck != nil {
+			if err := verifyEncCheck(pswCheckVal, fh.EncCheck); err != nil {
+				return &errorReader{err: err}
+			}
+		}
 		decPr, err := newCBCDecryptReader(pr, key, fh.IV)
 		if err != nil {
 			return &errorReader{err: err}
@@ -309,6 +322,7 @@ type cbcDecryptReader struct {
 	r         io.Reader
 	decrypter cipher.BlockMode
 	inBuf     [4096]byte
+	outBlock  [4096]byte
 	outBuf    []byte
 	err       error
 }
@@ -357,40 +371,67 @@ func (c *cbcDecryptReader) Read(p []byte) (int, error) {
 	}
 
 	decryptLen := (totalRead / 16) * 16
-	c.decrypter.CryptBlocks(c.inBuf[:decryptLen], c.inBuf[:decryptLen])
-	c.outBuf = c.inBuf[:decryptLen]
+	c.decrypter.CryptBlocks(c.outBlock[:decryptLen], c.inBuf[:decryptLen])
+	c.outBuf = c.outBlock[:decryptLen]
 
 	n := copy(p, c.outBuf)
 	c.outBuf = c.outBuf[n:]
 	return n, nil
 }
 
-func pbkdf2HmacSha256(password, salt []byte, iter, keyLen int) []byte {
+func pbkdf2HmacSha256(password, salt []byte, iter int) ([]byte, []byte) {
 	mac := hmac.New(sha256.New, password)
-	var key []byte
 	var block [4]byte
-	for i := 1; keyLen > 0; i++ {
-		binary.BigEndian.PutUint32(block[:], uint32(i))
+	binary.BigEndian.PutUint32(block[:], 1)
+	mac.Reset()
+	mac.Write(salt)
+	mac.Write(block[:])
+	u := mac.Sum(nil)
+
+	fn := append([]byte(nil), u...)
+
+	for j := 1; j < iter; j++ {
 		mac.Reset()
-		mac.Write(salt)
-		mac.Write(block[:])
-		u := mac.Sum(nil)
-		uCopy := append([]byte(nil), u...)
-		for j := 1; j < iter; j++ {
-			mac.Reset()
-			mac.Write(u)
-			u = mac.Sum(nil)
-			for k := range uCopy {
-				uCopy[k] ^= u[k]
-			}
-		}
-		if keyLen >= len(uCopy) {
-			key = append(key, uCopy...)
-			keyLen -= len(uCopy)
-		} else {
-			key = append(key, uCopy[:keyLen]...)
-			keyLen = 0
+		mac.Write(u)
+		u = mac.Sum(nil)
+		for k := range fn {
+			fn[k] ^= u[k]
 		}
 	}
-	return key
+	key := append([]byte(nil), fn...)
+
+	for range 16 {
+		mac.Reset()
+		mac.Write(u)
+		u = mac.Sum(nil)
+		for k := range fn {
+			fn[k] ^= u[k]
+		}
+	}
+
+	for range 16 {
+		mac.Reset()
+		mac.Write(u)
+		u = mac.Sum(nil)
+		for k := range fn {
+			fn[k] ^= u[k]
+		}
+	}
+	pswCheckVal := append([]byte(nil), fn...)
+
+	return key, pswCheckVal
+}
+
+func verifyEncCheck(pswCheckVal, encCheck []byte) error {
+	if len(encCheck) < 8 {
+		return errors.New("rarengine: corrupt encryption check data")
+	}
+	var expected [8]byte
+	for i := range 32 {
+		expected[i%8] ^= pswCheckVal[i]
+	}
+	if !bytes.Equal(encCheck[:8], expected[:]) {
+		return errors.New("rarengine: wrong password or corrupt encryption data")
+	}
+	return nil
 }

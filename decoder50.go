@@ -289,7 +289,9 @@ func (d *decoder50) decodeOffset(win *Window, i int) error {
 			}
 		}
 	}
-	copy(d.offset[1:], d.offset[:])
+	d.offset[3] = d.offset[2]
+	d.offset[2] = d.offset[1]
+	d.offset[1] = d.offset[0]
 	d.offset[0] = offset
 	d.length = length
 	return win.CopyBytes(d.length, d.offset[0])

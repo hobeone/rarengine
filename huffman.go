@@ -94,6 +94,9 @@ func (h *HuffmanDecoder) Init(codeLengths []byte) {
 
 // ReadSym decodes a single symbol from the bit stream using direct lookup tables.
 func (h *HuffmanDecoder) ReadSym(r *BitReader) (int, error) {
+	if h.min == 0 {
+		return 0, ErrHuffDecodeFailed
+	}
 	if r.bitsRead >= r.limit {
 		return 0, io.EOF
 	}
