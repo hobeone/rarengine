@@ -103,11 +103,15 @@ func (w *Window) Read(p []byte) (int, error) {
 	}
 
 	n := min(len(p), avail)
+	wasFull := w.full
+	if n > 0 {
+		w.full = false
+	}
 
 	copied := 0
 	for copied < n {
 		end := w.w
-		if w.w < w.r {
+		if w.w < w.r || (wasFull && copied == 0) {
 			end = w.size
 		}
 		chunk := copy(p[copied:n], w.buf[w.r:end])
@@ -116,9 +120,6 @@ func (w *Window) Read(p []byte) (int, error) {
 		if w.r >= w.size {
 			w.r = 0
 		}
-	}
-	if n > 0 {
-		w.full = false
 	}
 	return copied, nil
 }

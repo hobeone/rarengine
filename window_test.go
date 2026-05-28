@@ -109,3 +109,42 @@ func TestWindow_Wraparound(t *testing.T) {
 		t.Errorf("expected 0123456789, got %s (n=%d)", out, n)
 	}
 }
+
+func TestWindow_CompletelyFull(t *testing.T) {
+	w := NewWindow(10)
+	w.Reset(false)
+	size := w.size
+
+	for i := range size {
+		w.writeByte(byte(i % 256))
+	}
+
+	if !w.full {
+		t.Errorf("expected window to be full")
+	}
+	if w.Available() != size {
+		t.Errorf("expected %d available bytes, got %d", size, w.Available())
+	}
+
+	out := make([]byte, size)
+	n, err := w.Read(out)
+	if err != nil {
+		t.Fatalf("Read failed: %v", err)
+	}
+	if n != size {
+		t.Errorf("expected read of %d bytes, got %d", size, n)
+	}
+	if w.full {
+		t.Errorf("expected window to be no longer full after read")
+	}
+	if w.Available() != 0 {
+		t.Errorf("expected 0 available bytes, got %d", w.Available())
+	}
+
+	for i := range size {
+		if out[i] != byte(i%256) {
+			t.Errorf("data mismatch at index %d: expected %d, got %d", i, byte(i%256), out[i])
+			break
+		}
+	}
+}
