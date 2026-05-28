@@ -115,7 +115,7 @@ func TestIntegration_Compress(t *testing.T) {
 		"second.txt": "second file for testing",
 	}
 
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		fh, err := sd.Next()
 		if err != nil {
 			t.Fatalf("[%d] Next() failed: %v", i, err)
@@ -156,7 +156,7 @@ func TestIntegration_Solid(t *testing.T) {
 		"second.txt": "second file for testing",
 	}
 
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		fh, err := sd.Next()
 		if err != nil {
 			t.Fatalf("[%d] Next() failed: %v", i, err)

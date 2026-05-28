@@ -19,7 +19,7 @@ func TestFilterArm(t *testing.T) {
 	for _, size := range sizes {
 		buf1 := make([]byte, size)
 		buf2 := make([]byte, size)
-		for i := 0; i < size; i++ {
+		for i := range size {
 			if i%4 == 3 && i%8 == 3 {
 				buf1[i] = 0xeb
 			} else {
@@ -51,7 +51,7 @@ func TestFilterE8(t *testing.T) {
 		for _, c := range []byte{0xe8, 0xe9} {
 			for _, v5 := range []bool{false, true} {
 				buf1 := make([]byte, size)
-				for i := 0; i < size; i++ {
+				for i := range size {
 					if i%17 == 3 {
 						buf1[i] = 0xe8
 					} else if i%17 == 7 {

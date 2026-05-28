@@ -100,7 +100,7 @@ func (d *decoder50) readBlockHeader() error {
 		return err
 	}
 
-	for i := byte(0); i < bytecount; i++ {
+	for i := range bytecount {
 		n := blockBytesBuf[i]
 		sum ^= n
 		blockBytes |= int(n) << (i * 8)
@@ -357,10 +357,7 @@ func (d *decoder50) decode(win *Window) error {
 
 	f := d.fl[0]
 	if f.offset > 0 {
-		n := f.offset
-		if n > avail {
-			n = avail
-		}
+		n := min(f.offset, avail)
 		d.outbuf = make([]byte, n)
 		_, _ = win.Read(d.outbuf)
 		f.offset -= n

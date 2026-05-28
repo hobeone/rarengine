@@ -63,7 +63,7 @@ func FuzzHuffman(f *testing.F) {
 		dec.Init(codelen)
 
 		r := NewBitReader(data, len(data)*8)
-		for i := 0; i < 100; i++ {
+		for range 100 {
 			_, err := dec.ReadSym(r)
 			if err != nil {
 				break

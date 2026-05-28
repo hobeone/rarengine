@@ -299,7 +299,7 @@ type storeReader struct {
 func (s *storeReader) Read(p []byte) (int, error) {
 	n, err := s.r.Read(p)
 	if n > 0 {
-		for i := 0; i < n; i++ {
+		for i := range n {
 			s.win.WriteByte(p[i])
 		}
 	}

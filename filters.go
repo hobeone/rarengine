@@ -18,7 +18,7 @@ func FilterDelta(n int, buf []byte) []byte {
 	}
 	res := make([]byte, len(buf))
 	i := 0
-	for j := 0; j < n; j++ {
+	for j := range n {
 		var c byte
 		for k := j; k < len(res); k += n {
 			c -= buf[i]

@@ -59,7 +59,7 @@ func (w *Window) CopyBytes(length int, distance int) error {
 		srcIdx += w.size
 	}
 
-	for i := 0; i < length; i++ {
+	for range length {
 		b := w.buf[srcIdx]
 		w.buf[w.w] = b
 
@@ -91,10 +91,7 @@ func (w *Window) Read(p []byte) (int, error) {
 		return 0, nil
 	}
 
-	n := len(p)
-	if n > avail {
-		n = avail
-	}
+	n := min(len(p), avail)
 
 	copied := 0
 	for copied < n {

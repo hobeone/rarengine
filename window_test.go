@@ -80,7 +80,7 @@ func TestWindow_Wraparound(t *testing.T) {
 	w.Reset(false)
 
 	// Write 262140 bytes
-	for i := 0; i < 262140; i++ {
+	for range 262140 {
 		w.WriteByte('A')
 	}
 
@@ -92,7 +92,7 @@ func TestWindow_Wraparound(t *testing.T) {
 
 	// Write 10 bytes (this will trigger wraparound at 262144)
 	// indices: 262140, 262141, 262142, 262143 (index 0, 1, 2, 3, 4, 5)
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		w.WriteByte(byte('0' + i))
 	}
 
