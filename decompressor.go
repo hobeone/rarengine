@@ -1,6 +1,7 @@
 package rarengine
 
 import (
+	"bytes"
 	"errors"
 	"io"
 )
@@ -18,6 +19,7 @@ type StreamDecompressor struct {
 	currHeader *FileHeader
 	currReader io.Reader
 	win        *Window
+	dec50      *decoder50
 }
 
 // NewStreamDecompressor initializes the decompressor with a channel of incoming volume streams.
@@ -25,6 +27,7 @@ func NewStreamDecompressor(volumes <-chan io.ReadCloser) *StreamDecompressor {
 	return &StreamDecompressor{
 		volumes: volumes,
 		win:     NewWindow(32 * 1024 * 1024), // 32MB sliding window history
+		dec50:   newDecoder50(),
 	}
 }
 
@@ -39,6 +42,18 @@ func (sd *StreamDecompressor) nextVolume() error {
 		return ErrNoNextVolume
 	}
 	sd.currentVol = vol
+
+	// Validate RAR5 magic signature: 0x52 0x61 0x72 0x21 0x1a 0x07 0x01 0x00
+	var magic [8]byte
+	_, err := io.ReadFull(sd.currentVol, magic[:])
+	if err != nil {
+		return err
+	}
+	expectedMagic := []byte{0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x01, 0x00}
+	if !bytes.Equal(magic[:], expectedMagic) {
+		return errors.New("rarengine: invalid RAR5 magic signature")
+	}
+
 	return nil
 }
 
@@ -84,9 +99,16 @@ func (sd *StreamDecompressor) Next() (*FileHeader, error) {
 				return nil, err
 			}
 
-			if fh.FirstBlock {
-				sd.win.Reset(fh.Solid)
+			if !fh.FirstBlock {
+				// Skip the payload of the continuation block and find the next file
+				_, err = io.Copy(io.Discard, io.LimitReader(sd.currentVol, fh.PackedSize))
+				if err != nil {
+					return nil, err
+				}
+				continue
 			}
+
+			sd.win.Reset(fh.Solid)
 
 			// Wrap payload with a limit reader matching packed size
 			limitPr := io.LimitReader(sd.currentVol, fh.PackedSize)
@@ -100,6 +122,13 @@ func (sd *StreamDecompressor) Next() (*FileHeader, error) {
 			if err := sd.nextVolume(); err != nil {
 				return nil, err
 			}
+		default:
+			if h.DataSize > 0 {
+				_, err = io.Copy(io.Discard, io.LimitReader(sd.currentVol, h.DataSize))
+				if err != nil {
+					return nil, err
+				}
+			}
 		}
 	}
 }
@@ -112,18 +141,99 @@ func (sd *StreamDecompressor) Read(p []byte) (int, error) {
 	return sd.currReader.Read(p)
 }
 
+// nextVolumePayload transitions to the next volume and searches for the continuation file header.
+func (sd *StreamDecompressor) nextVolumePayload() (io.Reader, error) {
+	if err := sd.nextVolume(); err != nil {
+		return nil, err
+	}
+	for {
+		h, err := ReadBlockHeader(sd.currentVol)
+		if err != nil {
+			return nil, err
+		}
+		switch h.Type {
+		case HeaderTypeArchive:
+			_, err := ParseArchiveHeader(h)
+			if err != nil {
+				return nil, err
+			}
+		case HeaderTypeFile, HeaderTypeService:
+			fh, err := ParseFileHeader(h)
+			if err != nil {
+				return nil, err
+			}
+			sd.currHeader = fh
+			return io.LimitReader(sd.currentVol, fh.PackedSize), nil
+		case HeaderTypeEnd:
+			if err := sd.nextVolume(); err != nil {
+				return nil, err
+			}
+		default:
+			if h.DataSize > 0 {
+				_, err = io.Copy(io.Discard, io.LimitReader(sd.currentVol, h.DataSize))
+				if err != nil {
+					return nil, err
+				}
+			}
+		}
+	}
+}
+
+type multiVolumePayloadReader struct {
+	sd *StreamDecompressor
+	r  io.Reader
+}
+
+func (mv *multiVolumePayloadReader) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	for {
+		n, err := mv.r.Read(p)
+		if n > 0 {
+			return n, nil
+		}
+		if err == io.EOF {
+			nextR, nextErr := mv.sd.nextVolumePayload()
+			if nextErr != nil {
+				return 0, nextErr
+			}
+			mv.r = nextR
+			continue
+		}
+		return 0, err
+	}
+}
+
 // newDecompressionReader returns the window-integrated reader for the file payload.
 func (sd *StreamDecompressor) newDecompressionReader(fh *FileHeader, pr io.Reader) io.Reader {
+	mv := &multiVolumePayloadReader{
+		sd: sd,
+		r:  pr,
+	}
+	var r io.Reader
 	if fh.Method == 0 {
-		return &storeReader{
-			r:   pr,
+		r = &storeReader{
+			r:   mv,
+			win: sd.win,
+		}
+	} else {
+		sd.dec50.init(mv, fh.FirstBlock)
+		r = &lz50Reader{
+			dec: sd.dec50,
 			win: sd.win,
 		}
 	}
-	return &storeReader{
-		r:   pr,
-		win: sd.win,
-	}
+	return io.LimitReader(r, fh.UnpackedSize)
+}
+
+type lz50Reader struct {
+	dec *decoder50
+	win *Window
+}
+
+func (l *lz50Reader) Read(p []byte) (int, error) {
+	return l.dec.Read(l.win, p)
 }
 
 type storeReader struct {

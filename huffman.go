@@ -2,6 +2,7 @@ package rarengine
 
 import (
 	"errors"
+	"io"
 )
 
 const (
@@ -93,13 +94,20 @@ func (h *HuffmanDecoder) Init(codeLengths []byte) {
 
 // ReadSym decodes a single symbol from the bit stream using direct lookup tables.
 func (h *HuffmanDecoder) ReadSym(r *BitReader) (int, error) {
+	if r.bitsRead >= r.limit {
+		return 0, io.EOF
+	}
 	// Peek up to maxCodeLength bits to perform fast decoding
 	v := uint16(r.PeekBits(maxCodeLength))
 
 	var bits uint8
 	if v < h.limit[h.quickbits] {
 		i := v >> (maxCodeLength - h.quickbits)
-		r.Advance(h.quicklen[i])
+		bits = h.quicklen[i]
+		if r.bitsRead+int(bits) > r.limit {
+			return 0, io.EOF
+		}
+		r.Advance(bits)
 		return int(h.quicksym[i]), nil
 	}
 
@@ -107,6 +115,9 @@ func (h *HuffmanDecoder) ReadSym(r *BitReader) (int, error) {
 		if v < h.limit[bits] {
 			break
 		}
+	}
+	if r.bitsRead+int(bits) > r.limit {
+		return 0, io.EOF
 	}
 	r.Advance(bits)
 
