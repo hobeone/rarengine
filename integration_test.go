@@ -102,7 +102,7 @@ func TestIntegration_Compress(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
+	t.Cleanup(func() { _ = f.Close() })
 
 	volumes := make(chan io.ReadCloser, 1)
 	volumes <- f
@@ -143,7 +143,7 @@ func TestIntegration_Solid(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
+	t.Cleanup(func() { _ = f.Close() })
 
 	volumes := make(chan io.ReadCloser, 1)
 	volumes <- f
@@ -184,7 +184,7 @@ func TestIntegration_Encrypted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
+	t.Cleanup(func() { _ = f.Close() })
 
 	volumes := make(chan io.ReadCloser, 1)
 	volumes <- f
@@ -255,7 +255,7 @@ func TestIntegration_Oracle(t *testing.T) {
 			if err != nil {
 				t.Fatalf("failed to open archive: %v", err)
 			}
-			defer f.Close()
+			t.Cleanup(func() { _ = f.Close() })
 
 			volumes := make(chan io.ReadCloser, 1)
 			volumes <- f

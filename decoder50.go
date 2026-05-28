@@ -307,7 +307,7 @@ func (d *decoder50) fill(win *Window) error {
 		if err == nil {
 			switch {
 			case sym < 256:
-				win.WriteByte(byte(sym))
+				win.writeByte(byte(sym))
 			case sym >= 262:
 				err = d.decodeOffset(win, sym-262)
 			case sym >= 258:

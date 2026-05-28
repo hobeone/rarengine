@@ -32,7 +32,9 @@ func TestStreamDecompressor_TarStyle(t *testing.T) {
 
 	var volBuf bytes.Buffer
 	volBuf.Write([]byte{0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x01, 0x00}) // RAR5 Magic Signature
-	binary.Write(&volBuf, binary.LittleEndian, arcCrc)
+	if err := binary.Write(&volBuf, binary.LittleEndian, arcCrc); err != nil {
+		t.Fatal(err)
+	}
 	volBuf.Write(arcHashed.Bytes())
 
 	// 2. File Header for "hello.txt"
@@ -58,7 +60,9 @@ func TestStreamDecompressor_TarStyle(t *testing.T) {
 	fileHashed.Write(headerPayload.Bytes())
 	fileCrc := crc32.ChecksumIEEE(fileHashed.Bytes())
 
-	binary.Write(&volBuf, binary.LittleEndian, fileCrc)
+	if err := binary.Write(&volBuf, binary.LittleEndian, fileCrc); err != nil {
+		t.Fatal(err)
+	}
 	volBuf.Write(fileHashed.Bytes())
 	volBuf.WriteString("world")
 
@@ -73,7 +77,9 @@ func TestStreamDecompressor_TarStyle(t *testing.T) {
 	endHashed.Write(endPayload.Bytes())
 	endCrc := crc32.ChecksumIEEE(endHashed.Bytes())
 
-	binary.Write(&volBuf, binary.LittleEndian, endCrc)
+	if err := binary.Write(&volBuf, binary.LittleEndian, endCrc); err != nil {
+		t.Fatal(err)
+	}
 	volBuf.Write(endHashed.Bytes())
 
 	volumes := make(chan io.ReadCloser, 2)
@@ -114,18 +120,18 @@ func TestStreamDecompressor_RarBomb(t *testing.T) {
 	// UnpackedSize = 2MB (2 * 1024 * 1024)
 	// PackedSize = 500 bytes (Ratio > 4000x)
 	var filePayload bytes.Buffer
-	filePayload.Write(EncodeVint(0))                     // File flags
-	filePayload.Write(EncodeVint(2 * 1024 * 1024))       // Unpacked size
-	filePayload.Write(EncodeVint(0))                     // Attributes
-	filePayload.Write(EncodeVint(0))                     // Comp flags
-	filePayload.Write(EncodeVint(1))                     // Host OS: Unix
-	filePayload.Write(EncodeVint(8))                     // Name len
-	filePayload.WriteString("bomb.txt")                  // Name
+	filePayload.Write(EncodeVint(0))               // File flags
+	filePayload.Write(EncodeVint(2 * 1024 * 1024)) // Unpacked size
+	filePayload.Write(EncodeVint(0))               // Attributes
+	filePayload.Write(EncodeVint(0))               // Comp flags
+	filePayload.Write(EncodeVint(1))               // Host OS: Unix
+	filePayload.Write(EncodeVint(8))               // Name len
+	filePayload.WriteString("bomb.txt")            // Name
 
 	var headerPayload bytes.Buffer
 	headerPayload.Write(EncodeVint(HeaderTypeFile))
 	headerPayload.Write(EncodeVint(HeaderFlagHasData))
-	headerPayload.Write(EncodeVint(500))                 // Packed size
+	headerPayload.Write(EncodeVint(500)) // Packed size
 	headerPayload.Write(filePayload.Bytes())
 
 	fileSize := headerPayload.Len()
@@ -137,9 +143,11 @@ func TestStreamDecompressor_RarBomb(t *testing.T) {
 
 	var volBuf bytes.Buffer
 	volBuf.Write([]byte{0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x01, 0x00}) // Magic signature
-	binary.Write(&volBuf, binary.LittleEndian, fileCrc)
+	if err := binary.Write(&volBuf, binary.LittleEndian, fileCrc); err != nil {
+		t.Fatal(err)
+	}
 	volBuf.Write(fileHashed.Bytes())
-	volBuf.Write(make([]byte, 500))                     // Dummy packed data
+	volBuf.Write(make([]byte, 500)) // Dummy packed data
 
 	volumes := make(chan io.ReadCloser, 1)
 	volumes <- &mockReadCloser{&volBuf}
@@ -181,7 +189,9 @@ func TestStreamDecompressor_UnknownBlock(t *testing.T) {
 	unkHashed.Write(unknownPayload.Bytes())
 	unkCrc := crc32.ChecksumIEEE(unkHashed.Bytes())
 
-	binary.Write(&volBuf, binary.LittleEndian, unkCrc)
+	if err := binary.Write(&volBuf, binary.LittleEndian, unkCrc); err != nil {
+		t.Fatal(err)
+	}
 	volBuf.Write(unkHashed.Bytes())
 	volBuf.Write(make([]byte, 10)) // 10 bytes of data area for the unknown block
 
@@ -208,7 +218,9 @@ func TestStreamDecompressor_UnknownBlock(t *testing.T) {
 	fileHashed.Write(headerPayload.Bytes())
 	fileCrc := crc32.ChecksumIEEE(fileHashed.Bytes())
 
-	binary.Write(&volBuf, binary.LittleEndian, fileCrc)
+	if err := binary.Write(&volBuf, binary.LittleEndian, fileCrc); err != nil {
+		t.Fatal(err)
+	}
 	volBuf.Write(fileHashed.Bytes())
 	volBuf.WriteString("world")
 

@@ -38,8 +38,8 @@ func (w *Window) Reset(keepHistory bool) {
 	}
 }
 
-// WriteByte writes a single byte to the window.
-func (w *Window) WriteByte(c byte) {
+// writeByte writes a single byte to the window.
+func (w *Window) writeByte(c byte) {
 	w.buf[w.w] = c
 	w.w++
 	if w.w >= w.size {

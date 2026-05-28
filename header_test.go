@@ -15,7 +15,9 @@ func TestReadBlockHeader_CorruptCRC(t *testing.T) {
 
 	var buf bytes.Buffer
 	// Bad CRC
-	binary.Write(&buf, binary.LittleEndian, uint32(0x12345678))
+	if err := binary.Write(&buf, binary.LittleEndian, uint32(0x12345678)); err != nil {
+		t.Fatal(err)
+	}
 	buf.Write(sizeV)
 	buf.Write(payload)
 
@@ -50,7 +52,9 @@ func TestReadAndParseArchiveHeader(t *testing.T) {
 	crc := crc32.ChecksumIEEE(hashed.Bytes())
 
 	var headerBuf bytes.Buffer
-	binary.Write(&headerBuf, binary.LittleEndian, crc)
+	if err := binary.Write(&headerBuf, binary.LittleEndian, crc); err != nil {
+		t.Fatal(err)
+	}
 	headerBuf.Write(hashed.Bytes())
 
 	// Read block header
@@ -87,20 +91,22 @@ func TestReadAndParseFileHeader(t *testing.T) {
 	// Host OS: 1 (Unix)
 	// Name: "test.txt" (len 8)
 	var filePayload bytes.Buffer
-	filePayload.Write(EncodeVint(FileFlagHasCRC32))      // File flags
-	filePayload.Write(EncodeVint(100))                   // Unpacked size
-	filePayload.Write(EncodeVint(0))                     // Attributes
-	binary.Write(&filePayload, binary.LittleEndian, uint32(0x98765432)) // CRC32
-	filePayload.Write(EncodeVint(0))                     // Comp flags
-	filePayload.Write(EncodeVint(1))                     // Host OS: Unix
-	filePayload.Write(EncodeVint(8))                     // Name len
-	filePayload.WriteString("test.txt")                  // Name
+	filePayload.Write(EncodeVint(FileFlagHasCRC32)) // File flags
+	filePayload.Write(EncodeVint(100))              // Unpacked size
+	filePayload.Write(EncodeVint(0))                // Attributes
+	if err := binary.Write(&filePayload, binary.LittleEndian, uint32(0x98765432)); err != nil {
+		t.Fatal(err)
+	} // CRC32
+	filePayload.Write(EncodeVint(0))    // Comp flags
+	filePayload.Write(EncodeVint(1))    // Host OS: Unix
+	filePayload.Write(EncodeVint(8))    // Name len
+	filePayload.WriteString("test.txt") // Name
 
 	var headerPayload bytes.Buffer
-	headerPayload.Write(EncodeVint(HeaderTypeFile))      // Header type
-	headerPayload.Write(EncodeVint(HeaderFlagHasData))   // Header flags (has data, no extra)
-	headerPayload.Write(EncodeVint(50))                  // Packed data size (VINT)
-	headerPayload.Write(filePayload.Bytes())             // File payload
+	headerPayload.Write(EncodeVint(HeaderTypeFile))    // Header type
+	headerPayload.Write(EncodeVint(HeaderFlagHasData)) // Header flags (has data, no extra)
+	headerPayload.Write(EncodeVint(50))                // Packed data size (VINT)
+	headerPayload.Write(filePayload.Bytes())           // File payload
 
 	size := headerPayload.Len()
 	sizeV := EncodeVint(uint64(size))
@@ -113,7 +119,9 @@ func TestReadAndParseFileHeader(t *testing.T) {
 	crc := crc32.ChecksumIEEE(hashed.Bytes())
 
 	var headerBuf bytes.Buffer
-	binary.Write(&headerBuf, binary.LittleEndian, crc)
+	if err := binary.Write(&headerBuf, binary.LittleEndian, crc); err != nil {
+		t.Fatal(err)
+	}
 	headerBuf.Write(hashed.Bytes())
 
 	h, err := ReadBlockHeader(&headerBuf)
@@ -176,14 +184,18 @@ func TestFileHeader_ModeAndMTime(t *testing.T) {
 	// Name: "exec.sh" (len 7)
 	var filePayload bytes.Buffer
 	filePayload.Write(EncodeVint(FileFlagHasUnixMtime | FileFlagHasCRC32)) // flags
-	filePayload.Write(EncodeVint(50))                                    // unpacked size
-	filePayload.Write(EncodeVint(0o755))                                 // attributes (unix permissions)
-	binary.Write(&filePayload, binary.LittleEndian, uint32(1700000000))  // modification time
-	binary.Write(&filePayload, binary.LittleEndian, uint32(0x11223344))  // CRC32
-	filePayload.Write(EncodeVint(0))                                     // comp flags
-	filePayload.Write(EncodeVint(1))                                     // host OS (Unix)
-	filePayload.Write(EncodeVint(7))                                     // name len
-	filePayload.WriteString("exec.sh")                                   // name
+	filePayload.Write(EncodeVint(50))                                      // unpacked size
+	filePayload.Write(EncodeVint(0o755))                                   // attributes (unix permissions)
+	if err := binary.Write(&filePayload, binary.LittleEndian, uint32(1700000000)); err != nil {
+		t.Fatal(err)
+	} // modification time
+	if err := binary.Write(&filePayload, binary.LittleEndian, uint32(0x11223344)); err != nil {
+		t.Fatal(err)
+	} // CRC32
+	filePayload.Write(EncodeVint(0))   // comp flags
+	filePayload.Write(EncodeVint(1))   // host OS (Unix)
+	filePayload.Write(EncodeVint(7))   // name len
+	filePayload.WriteString("exec.sh") // name
 
 	var headerPayload bytes.Buffer
 	headerPayload.Write(EncodeVint(HeaderTypeFile))
@@ -201,7 +213,9 @@ func TestFileHeader_ModeAndMTime(t *testing.T) {
 	crc := crc32.ChecksumIEEE(hashed.Bytes())
 
 	var headerBuf bytes.Buffer
-	binary.Write(&headerBuf, binary.LittleEndian, crc)
+	if err := binary.Write(&headerBuf, binary.LittleEndian, crc); err != nil {
+		t.Fatal(err)
+	}
 	headerBuf.Write(hashed.Bytes())
 
 	h, err := ReadBlockHeader(&headerBuf)

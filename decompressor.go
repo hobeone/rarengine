@@ -9,7 +9,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
-	"unicode/utf16"
 )
 
 var (
@@ -300,7 +299,7 @@ func (s *storeReader) Read(p []byte) (int, error) {
 	n, err := s.r.Read(p)
 	if n > 0 {
 		for i := range n {
-			s.win.WriteByte(p[i])
+			s.win.writeByte(p[i])
 		}
 	}
 	return n, err
@@ -394,15 +393,4 @@ func pbkdf2HmacSha256(password, salt []byte, iter, keyLen int) []byte {
 		}
 	}
 	return key
-}
-
-func stringToUTF16LE(s string) []byte {
-	runes := []rune(s)
-	u16 := utf16.Encode(runes)
-	buf := make([]byte, len(u16)*2)
-	for i, v := range u16 {
-		buf[i*2] = byte(v)
-		buf[i*2+1] = byte(v >> 8)
-	}
-	return buf
 }

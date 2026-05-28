@@ -11,10 +11,10 @@ func TestWindow_WriteAndRead(t *testing.T) {
 	w.Reset(false)
 
 	// Write 4 bytes
-	w.WriteByte('A')
-	w.WriteByte('B')
-	w.WriteByte('C')
-	w.WriteByte('D')
+	w.writeByte('A')
+	w.writeByte('B')
+	w.writeByte('C')
+	w.writeByte('D')
 
 	if w.Available() != 4 {
 		t.Errorf("expected 4 available bytes, got %d", w.Available())
@@ -38,7 +38,7 @@ func TestWindow_CopyBytes_Overlapping(t *testing.T) {
 	w.Reset(false)
 
 	// Write 'X'
-	w.WriteByte('X')
+	w.writeByte('X')
 
 	// Copy 5 bytes from distance 1 (should repeat 'X' 5 times)
 	err := w.CopyBytes(5, 1)
@@ -81,7 +81,7 @@ func TestWindow_Wraparound(t *testing.T) {
 
 	// Write 262140 bytes
 	for range 262140 {
-		w.WriteByte('A')
+		w.writeByte('A')
 	}
 
 	// Read them all to clear read buffer
@@ -93,7 +93,7 @@ func TestWindow_Wraparound(t *testing.T) {
 	// Write 10 bytes (this will trigger wraparound at 262144)
 	// indices: 262140, 262141, 262142, 262143 (index 0, 1, 2, 3, 4, 5)
 	for i := range 10 {
-		w.WriteByte(byte('0' + i))
+		w.writeByte(byte('0' + i))
 	}
 
 	if w.Available() != 10 {

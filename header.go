@@ -13,12 +13,12 @@ import (
 )
 
 var (
-	ErrBadBlockHeader     = errors.New("rarengine: bad block header")
-	ErrBadHeaderCRC       = errors.New("rarengine: bad header CRC")
-	ErrCorruptBlockHeader  = errors.New("rarengine: corrupt block header")
-	ErrCorruptFileHeader   = errors.New("rarengine: corrupt file header")
+	ErrBadBlockHeader       = errors.New("rarengine: bad block header")
+	ErrBadHeaderCRC         = errors.New("rarengine: bad header CRC")
+	ErrCorruptBlockHeader   = errors.New("rarengine: corrupt block header")
+	ErrCorruptFileHeader    = errors.New("rarengine: corrupt file header")
 	ErrUnknownEncryptMethod = errors.New("rarengine: unknown encryption method")
-	ErrCorruptEncryptData  = errors.New("rarengine: corrupt encryption record")
+	ErrCorruptEncryptData   = errors.New("rarengine: corrupt encryption record")
 )
 
 const (
@@ -32,8 +32,8 @@ const (
 	HeaderTypeEnd        = 5
 
 	// General Header Flags
-	HeaderFlagHasExtra    = 0x0001
-	HeaderFlagHasData     = 0x0002
+	HeaderFlagHasExtra     = 0x0001
+	HeaderFlagHasData      = 0x0002
 	HeaderFlagDataNotFirst = 0x0008
 	HeaderFlagDataNotLast  = 0x0010
 
@@ -348,7 +348,6 @@ func ParseFileHeader(h *BlockHeader) (*FileHeader, error) {
 		return nil, ErrCorruptFileHeader
 	}
 	fh.Name = sanitizePath(string(payload[:nameLen]))
-	payload = payload[nameLen:]
 
 	// Parse optional extra records
 	for _, e := range h.Extra {

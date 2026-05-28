@@ -52,11 +52,12 @@ func TestFilterE8(t *testing.T) {
 			for _, v5 := range []bool{false, true} {
 				buf1 := make([]byte, size)
 				for i := range size {
-					if i%17 == 3 {
+					switch i % 17 {
+					case 3:
 						buf1[i] = 0xe8
-					} else if i%17 == 7 {
+					case 7:
 						buf1[i] = 0xe9
-					} else {
+					default:
 						buf1[i] = byte(i * 13)
 					}
 				}
