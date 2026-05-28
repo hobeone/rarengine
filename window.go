@@ -70,8 +70,19 @@ func (w *Window) writeBytes(p []byte) {
 	}
 }
 
-// CopyBytes copies 'length' bytes from 'distance' bytes back in history to the current write pointer.
-// Supports overlapping copies (e.g. repeating patterns where length > distance).
+// CopyBytes copies 'length' bytes from 'distance' bytes back in history to the
+// current write pointer. Supports overlapping copies (e.g. repeating patterns
+// where length > distance).
+//
+// Each iteration performs one runtime.memmove (via copy) of up to
+//
+//	min(remaining, distance, w.size - srcIdx, w.size - w.w)
+//
+// bytes. The `distance` cap preserves LZ77 pattern-repetition semantics: copy()
+// has non-aliasing memmove semantics, so we must not let a single call cross
+// the src/dst boundary. After copying d=distance bytes, src and dst advance by
+// d together and remain exactly distance apart, keeping each subsequent copy
+// non-overlapping.
 func (w *Window) CopyBytes(length int, distance int) error {
 	if distance <= 0 || distance > w.size {
 		return ErrWindowOffsetBounds
@@ -82,22 +93,22 @@ func (w *Window) CopyBytes(length int, distance int) error {
 		srcIdx += w.size
 	}
 
-	for range length {
-		b := w.buf[srcIdx]
-		w.buf[w.w] = b
-
-		srcIdx++
+	remaining := length
+	for remaining > 0 {
+		n := min(remaining, distance, w.size-srcIdx, w.size-w.w)
+		copy(w.buf[w.w:w.w+n], w.buf[srcIdx:srcIdx+n])
+		srcIdx += n
 		if srcIdx >= w.size {
 			srcIdx = 0
 		}
-
-		w.w++
+		w.w += n
 		if w.w >= w.size {
 			w.w = 0
 		}
 		if w.w == w.r {
 			w.full = true
 		}
+		remaining -= n
 	}
 	return nil
 }
