@@ -62,49 +62,49 @@ The resulting codebase passes strict native fuzzing and executes differential te
 
 Any AI agent or developer working on this codebase **must** follow these mandates.
 
-### Building & Testing
+### Tooling Setup
 
 ```bash
-# Build
-go build ./...
+# Install goimports if not present
+go install golang.org/x/tools/cmd/goimports@latest
 
-# Unit tests
-go test ./...
+# Install golangci-lint if not present (see https://golangci-lint.run/welcome/install/)
+```
 
-# Race detector (required before every commit)
-go test -race ./...
+### Per-File Workflow (after every .go file edit)
 
-# Benchmarks
-go test -bench=. -benchmem ./...
+```bash
+goimports -w <file>   # format + resolve imports
+go fix ./...          # adopt new language features automatically
+go build ./...        # verify it compiles
+```
 
-# Fuzz targets (run locally; not in CI by default)
-go test -fuzz=FuzzHuffman ./...
+### Quality Gate (before every commit)
 
-# Format and fix imports (run after every file edit)
+```bash
 goimports -w .
-
-# Apply Go toolchain modernizations
 go fix ./...
-
-# Lint
 go vet ./...
+go test -race ./...
 golangci-lint run ./...
 ```
+
+All five must pass. Do not commit with failing tests, vet errors, or lint warnings.
 
 ### Coding Standards
 
 - **Idioms:** "Accept interfaces, return structs." Define interfaces at the consumer side.
 - **Context:** Every blocking or cancellable operation **must** accept `context.Context` as the first parameter.
-- **Errors:** Wrap errors with `fmt.Errorf("component: ...: %w", err)`. Never use `%v` for errors that will be inspected.
-- **No hacks:** No `init()` functions for setup. No `panic` for control flow (use it only for truly unrecoverable programmer errors). No `time.Sleep` in tests for synchronization — use channels or `sync.WaitGroup`.
-- **Format on every edit:** Run `goimports -w <file>` after every file change to format code and resolve imports. Run `go fix ./...` to adopt new language features automatically.
+- **Errors:** Wrap with `fmt.Errorf("component: ...: %w", err)`. Never use `%v` for errors that will be inspected.
+- **No hacks:** No `init()` for setup. No `panic` for control flow (use it only for truly unrecoverable programmer errors). No `time.Sleep` in tests — use channels or `sync.WaitGroup`.
+- **Standard library first:** Prefer `slices`, `maps`, `errors.Is/As`, `min`/`max` builtins over custom helpers or reflection.
 
 ### Concurrency & Locking
 
 - **Never hold a mutex during I/O.** Snapshot data under the lock, release it, then perform I/O. Pattern: `mu.Lock() → snapshot → mu.Unlock() → useSnapshot()`.
-- **Always use `defer mu.Unlock()`.** Manual unlock-before-return in multiple branches causes deadlocks and double-close panics. The only exception is snapshot-then-release, where unlock is intentional mid-function — mark it with a `// --- no lock held below this line ---` comment.
-- **Every `select` on a channel must also watch `ctx.Done()`.** Goroutines blocked without a context escape route leak forever on shutdown.
-- **Use `sync.Once` or `CompareAndSwap` for idempotent stop/close.** Multiple shutdown paths can race; `closeOnce.Do(...)` prevents double-close panics.
+- **Always `defer mu.Unlock()`.** Only exception: intentional snapshot-then-release, marked with `// --- no lock held below this line ---`.
+- **Every `select` must watch `ctx.Done()`.** Goroutines blocked without a context escape route leak forever on shutdown.
+- **Use `sync.Once` or `CompareAndSwap` for idempotent shutdown.** Prevents double-close panics.
 
 ### Performance & Hot-Path Discipline
 
@@ -122,14 +122,39 @@ rarengine is a zero-allocation streaming library. The hot path processes compres
 - **Rar-bomb guard must remain active.** The >1000× expansion ratio check on files >1 MB prevents disk-depletion attacks. Do not weaken or remove it without explicit user approval.
 - **AES key material must not be logged or exposed.** Password strings and derived key bytes must never appear in error messages, log output, or `fmt.Stringer` implementations.
 
+### Benchmarking & Profiling
+
+All performance-sensitive packages **must** maintain benchmark suites using modern Go 1.24+ `b.Loop()` to guarantee statistical correctness and prevent dead code elimination.
+
+```bash
+# Run all benchmarks in the package
+go test -bench=. -benchmem ./...
+
+# Run benchmarks with statistical rigor (10 runs)
+go test -bench=. -benchmem -count=10 ./...
+
+# Statistically compare baseline vs optimized runs (go install golang.org/x/perf/cmd/benchstat@latest)
+benchstat baseline.txt optimized.txt
+```
+
+To analyze CPU bottlenecks and heap memory allocations, generate and inspect profiling data directly from your benchmarks:
+
+```bash
+# Generate profiles from benchmarks
+go test -bench=BenchmarkDecompress -cpuprofile=cpu.prof ./...
+go test -bench=BenchmarkDecompress -memprofile=mem.prof ./...
+
+# Audit profiles
+go tool pprof cpu.prof
+go tool pprof -alloc_objects mem.prof
+```
+
 ### Commit Convention
 
 All commits must follow [Conventional Commits 1.0.0](https://www.conventionalcommits.org/):
 
 ```
 <type>[optional scope]: <description>
-
-[optional body]
 ```
 
 | Type | When to use |
@@ -137,21 +162,9 @@ All commits must follow [Conventional Commits 1.0.0](https://www.conventionalcom
 | `feat` | New capability (new compression method, new filter, new public API) |
 | `fix` | Bug patch |
 | `perf` | Performance improvement with benchmark evidence |
+| `refactor` | Code restructuring, no behavior change |
 | `test` | Adding or improving tests/fuzz targets |
-| `refactor` | Code restructuring with no behavior change |
 | `docs` | Documentation only |
 | `chore` | Build, CI, dependency updates |
 
-Append `!` or include `BREAKING CHANGE:` in the footer for any change that alters the public API or binary output.
-
-### Quality Gate (before every commit)
-
-```bash
-goimports -w .
-go fix ./...
-go vet ./...
-go test -race ./...
-golangci-lint run ./...
-```
-
-All five must pass. Do not commit with failing tests, vet errors, or lint warnings.
+Append `!` or add `BREAKING CHANGE:` footer for any change that alters the public API or binary output.
