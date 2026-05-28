@@ -2,6 +2,7 @@ package rarengine
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -9,7 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 )
 
@@ -52,8 +53,8 @@ func SortVolumes(paths []string) ([]string, error) {
 		})
 	}
 
-	sort.Slice(vols, func(i, j int) bool {
-		return vols[i].index < vols[j].index
+	slices.SortFunc(vols, func(a, b volumeInfo) int {
+		return cmp.Compare(a.index, b.index)
 	})
 
 	sorted := make([]string, len(vols))
