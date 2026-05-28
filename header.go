@@ -6,8 +6,10 @@ import (
 	"errors"
 	"hash/crc32"
 	"io"
+	"io/fs"
 	"path"
 	"strings"
+	"time"
 )
 
 var (
@@ -78,25 +80,50 @@ type ArchiveHeader struct {
 
 // FileHeader represents a parsed file header inside the archive.
 type FileHeader struct {
-	Name         string
-	IsDir        bool
-	PackedSize   int64
-	UnpackedSize int64
-	Solid        bool
-	FirstBlock   bool // true if this is the first block/volume-part of the file
-	LastBlock    bool // true if this is the last block/volume-part of the file
-	Method       int  // compression method: 0 = store, 1..5 = compress
-	DictSize     int64
-	CRC32        uint32
-	HasCRC32     bool
-	HasBlake2sp  bool
-	Blake2sp     []byte // 32-byte BLAKE2sp hash
-	Encrypted    bool
-	KdfCount     int
-	Salt         []byte
-	IV           []byte
-	UseMac       bool
-	EncCheck     []byte
+	Name             string
+	IsDir            bool
+	PackedSize       int64
+	UnpackedSize     int64
+	Solid            bool
+	FirstBlock       bool // true if this is the first block/volume-part of the file
+	LastBlock        bool // true if this is the last block/volume-part of the file
+	Method           int  // compression method: 0 = store, 1..5 = compress
+	DictSize         int64
+	CRC32            uint32
+	HasCRC32         bool
+	HasBlake2sp      bool
+	Blake2sp         []byte // 32-byte BLAKE2sp hash
+	Encrypted        bool
+	KdfCount         int
+	Salt             []byte
+	IV               []byte
+	UseMac           bool
+	EncCheck         []byte
+	ModificationTime time.Time
+	HostOS           uint64
+	Attributes       uint64
+}
+
+// Mode returns the Go fs.FileMode mapped from the HostOS and Attributes values.
+func (fh *FileHeader) Mode() fs.FileMode {
+	var m fs.FileMode
+	if fh.IsDir {
+		m |= fs.ModeDir
+	}
+	if fh.HostOS == 1 { // Unix
+		m |= fs.FileMode(fh.Attributes & 0o7777)
+	} else { // Windows / default
+		if fh.IsDir {
+			m |= 0o755
+		} else {
+			if fh.Attributes&0x01 > 0 { // Read-only
+				m |= 0o444
+			} else {
+				m |= 0o644
+			}
+		}
+	}
+	return m
 }
 
 // ReadBlockHeader reads and validates a RAR5 block header from the stream.
@@ -271,17 +298,20 @@ func ParseFileHeader(h *BlockHeader) (*FileHeader, error) {
 	fh.UnpackedSize = int64(unpackedSize)
 	payload = payload[nUnp:]
 
-	_, nAttrs, err := DecodeVint(payload) // Attributes
+	attrs, nAttrs, err := DecodeVint(payload) // Attributes
 	if err != nil {
 		return nil, err
 	}
+	fh.Attributes = attrs
 	payload = payload[nAttrs:]
 
 	if flags&FileFlagHasUnixMtime > 0 {
 		if len(payload) < 4 {
 			return nil, ErrCorruptFileHeader
 		}
-		payload = payload[4:] // Skip modification time for now
+		mtime := binary.LittleEndian.Uint32(payload[0:4])
+		fh.ModificationTime = time.Unix(int64(mtime), 0)
+		payload = payload[4:]
 	}
 
 	if flags&FileFlagHasCRC32 > 0 {
@@ -305,7 +335,7 @@ func ParseFileHeader(h *BlockHeader) (*FileHeader, error) {
 	if err != nil {
 		return nil, err
 	}
-	_ = hostOS
+	fh.HostOS = hostOS
 	payload = payload[nOS:]
 
 	nameLen, nName, err := DecodeVint(payload)

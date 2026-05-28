@@ -164,3 +164,66 @@ func TestSanitizePath(t *testing.T) {
 		}
 	}
 }
+
+func TestFileHeader_ModeAndMTime(t *testing.T) {
+	// Build a file header with:
+	// File flags: FileFlagHasUnixMtime (0x02) | FileFlagHasCRC32 (0x04)
+	// Unpacked size: 50
+	// Attributes: 0o755 (493)
+	// Unix Mtime: 1700000000 (2023-11-14T22:13:20Z)
+	// CRC32: 0x11223344
+	// Host OS: 1 (Unix)
+	// Name: "exec.sh" (len 7)
+	var filePayload bytes.Buffer
+	filePayload.Write(EncodeVint(FileFlagHasUnixMtime | FileFlagHasCRC32)) // flags
+	filePayload.Write(EncodeVint(50))                                    // unpacked size
+	filePayload.Write(EncodeVint(0o755))                                 // attributes (unix permissions)
+	binary.Write(&filePayload, binary.LittleEndian, uint32(1700000000))  // modification time
+	binary.Write(&filePayload, binary.LittleEndian, uint32(0x11223344))  // CRC32
+	filePayload.Write(EncodeVint(0))                                     // comp flags
+	filePayload.Write(EncodeVint(1))                                     // host OS (Unix)
+	filePayload.Write(EncodeVint(7))                                     // name len
+	filePayload.WriteString("exec.sh")                                   // name
+
+	var headerPayload bytes.Buffer
+	headerPayload.Write(EncodeVint(HeaderTypeFile))
+	headerPayload.Write(EncodeVint(HeaderFlagHasData))
+	headerPayload.Write(EncodeVint(20))
+	headerPayload.Write(filePayload.Bytes())
+
+	size := headerPayload.Len()
+	sizeV := EncodeVint(uint64(size))
+
+	var hashed bytes.Buffer
+	hashed.Write(sizeV)
+	hashed.Write(headerPayload.Bytes())
+
+	crc := crc32.ChecksumIEEE(hashed.Bytes())
+
+	var headerBuf bytes.Buffer
+	binary.Write(&headerBuf, binary.LittleEndian, crc)
+	headerBuf.Write(hashed.Bytes())
+
+	h, err := ReadBlockHeader(&headerBuf)
+	if err != nil {
+		t.Fatalf("ReadBlockHeader failed: %v", err)
+	}
+
+	fh, err := ParseFileHeader(h)
+	if err != nil {
+		t.Fatalf("ParseFileHeader failed: %v", err)
+	}
+
+	if fh.HostOS != 1 {
+		t.Errorf("expected HostOS 1, got %d", fh.HostOS)
+	}
+	if fh.Attributes != 0o755 {
+		t.Errorf("expected Attributes 0o755, got %o", fh.Attributes)
+	}
+	if fh.ModificationTime.Unix() != 1700000000 {
+		t.Errorf("expected ModificationTime 1700000000, got %d", fh.ModificationTime.Unix())
+	}
+	if fh.Mode() != 0o755 {
+		t.Errorf("expected Mode 0o755, got %o", fh.Mode())
+	}
+}
