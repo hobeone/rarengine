@@ -1,6 +1,7 @@
 package rarengine
 
 import (
+	"encoding/binary"
 	"errors"
 	"io"
 )
@@ -37,8 +38,32 @@ func (r *BitReader) Reset(buf []byte, limitBits int) {
 	r.bitsRead = 0
 }
 
-// fill refills the bit buffer v so it contains up to 56 bits.
+// fill refills the bit buffer v so it contains 57-64 valid bits.
+//
+// Hot path: when at least 8 bytes remain, load them as a single big-endian
+// uint64 (a single MOVBEQ on amd64) and merge the high `bitsToAdd` bits into
+// r.v in one shift/OR. Bytes past `bitsToAdd/8` are not consumed; they're
+// re-read next call. The end-of-buffer fallback (byte-by-byte for the final
+// <8 bytes) lives in fillTail to keep this function focused on the hot case.
 func (r *BitReader) fill() {
+	if r.n > 56 {
+		return
+	}
+	if r.off+8 > len(r.buf) {
+		r.fillTail()
+		return
+	}
+	bytesToAdd := (64 - r.n) >> 3 // in [1, 8]
+	bitsToAdd := bytesToAdd << 3  // in [8, 64]
+	u := binary.BigEndian.Uint64(r.buf[r.off:])
+	r.v = (r.v << bitsToAdd) | (u >> (64 - bitsToAdd))
+	r.n += bitsToAdd
+	r.off += int(bytesToAdd)
+}
+
+// fillTail handles the final <8 bytes of the buffer where the bulk uint64
+// load would read out of bounds.
+func (r *BitReader) fillTail() {
 	for r.n <= 56 && r.off < len(r.buf) {
 		r.v = (r.v << 8) | uint64(r.buf[r.off])
 		r.n += 8
