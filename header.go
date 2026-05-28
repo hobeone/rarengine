@@ -6,6 +6,8 @@ import (
 	"errors"
 	"hash/crc32"
 	"io"
+	"path"
+	"strings"
 )
 
 var (
@@ -315,7 +317,7 @@ func ParseFileHeader(h *BlockHeader) (*FileHeader, error) {
 	if len(payload) < int(nameLen) {
 		return nil, ErrCorruptFileHeader
 	}
-	fh.Name = string(payload[:nameLen])
+	fh.Name = sanitizePath(string(payload[:nameLen]))
 	payload = payload[nameLen:]
 
 	// Parse optional extra records
@@ -370,4 +372,20 @@ func ParseFileHeader(h *BlockHeader) (*FileHeader, error) {
 	}
 
 	return fh, nil
+}
+
+func sanitizePath(p string) string {
+	cleaned := path.Clean(p)
+	if path.IsAbs(cleaned) {
+		cleaned = cleaned[1:]
+	}
+	parts := strings.Split(cleaned, "/")
+	var res []string
+	for _, part := range parts {
+		if part == "" || part == "." || part == ".." {
+			continue
+		}
+		res = append(res, part)
+	}
+	return path.Join(res...)
 }

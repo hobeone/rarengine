@@ -108,3 +108,46 @@ func TestStreamDecompressor_TarStyle(t *testing.T) {
 		t.Errorf("expected ErrNoNextVolume, got %v", err)
 	}
 }
+
+func TestStreamDecompressor_RarBomb(t *testing.T) {
+	// Create a file header with:
+	// UnpackedSize = 2MB (2 * 1024 * 1024)
+	// PackedSize = 500 bytes (Ratio > 4000x)
+	var filePayload bytes.Buffer
+	filePayload.Write(EncodeVint(0))                     // File flags
+	filePayload.Write(EncodeVint(2 * 1024 * 1024))       // Unpacked size
+	filePayload.Write(EncodeVint(0))                     // Attributes
+	filePayload.Write(EncodeVint(0))                     // Comp flags
+	filePayload.Write(EncodeVint(1))                     // Host OS: Unix
+	filePayload.Write(EncodeVint(8))                     // Name len
+	filePayload.WriteString("bomb.txt")                  // Name
+
+	var headerPayload bytes.Buffer
+	headerPayload.Write(EncodeVint(HeaderTypeFile))
+	headerPayload.Write(EncodeVint(HeaderFlagHasData))
+	headerPayload.Write(EncodeVint(500))                 // Packed size
+	headerPayload.Write(filePayload.Bytes())
+
+	fileSize := headerPayload.Len()
+	fileSizeV := EncodeVint(uint64(fileSize))
+	var fileHashed bytes.Buffer
+	fileHashed.Write(fileSizeV)
+	fileHashed.Write(headerPayload.Bytes())
+	fileCrc := crc32.ChecksumIEEE(fileHashed.Bytes())
+
+	var volBuf bytes.Buffer
+	volBuf.Write([]byte{0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x01, 0x00}) // Magic signature
+	binary.Write(&volBuf, binary.LittleEndian, fileCrc)
+	volBuf.Write(fileHashed.Bytes())
+	volBuf.Write(make([]byte, 500))                     // Dummy packed data
+
+	volumes := make(chan io.ReadCloser, 1)
+	volumes <- &mockReadCloser{&volBuf}
+	close(volumes)
+
+	sd := NewStreamDecompressor(volumes)
+	_, err := sd.Next()
+	if !errors.Is(err, ErrRarBombDetected) {
+		t.Errorf("expected ErrRarBombDetected, got %v", err)
+	}
+}

@@ -2,14 +2,21 @@ package rarengine
 
 import (
 	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"io"
+	"unicode/utf16"
 )
 
 var (
 	ErrNoNextVolume          = errors.New("rarengine: expected next volume stream from channel, but channel was closed")
 	ErrUnexpectedVolumeBlock = errors.New("rarengine: unexpected block type in volume split transition")
 	ErrNoActiveFile          = errors.New("rarengine: no active file stream to read from")
+	ErrRarBombDetected       = errors.New("rarengine: possible RAR-bomb detected")
 )
 
 // StreamDecompressor implements a sequential, tar-like reader for extracting RAR archives on-the-fly.
@@ -20,6 +27,20 @@ type StreamDecompressor struct {
 	currReader io.Reader
 	win        *Window
 	dec50      *decoder50
+	password   string
+}
+
+// SetPassword configures the decryption password for encrypted RAR archives.
+func (sd *StreamDecompressor) SetPassword(password string) {
+	sd.password = password
+}
+
+type errorReader struct {
+	err error
+}
+
+func (e *errorReader) Read(p []byte) (int, error) {
+	return 0, e.err
 }
 
 // NewStreamDecompressor initializes the decompressor with a channel of incoming volume streams.
@@ -108,6 +129,11 @@ func (sd *StreamDecompressor) Next() (*FileHeader, error) {
 				continue
 			}
 
+			// Compression Bomb (RAR-bomb) Protection: reject >1000x ratios for files > 1MB
+			if fh.UnpackedSize > 1024*1024 && fh.UnpackedSize > 1000*fh.PackedSize {
+				return nil, ErrRarBombDetected
+			}
+
 			sd.win.Reset(fh.Solid)
 
 			// Wrap payload with a limit reader matching packed size
@@ -194,6 +220,9 @@ func (mv *multiVolumePayloadReader) Read(p []byte) (int, error) {
 			return n, nil
 		}
 		if err == io.EOF {
+			if mv.sd.currHeader != nil && mv.sd.currHeader.LastBlock {
+				return 0, io.EOF
+			}
 			nextR, nextErr := mv.sd.nextVolumePayload()
 			if nextErr != nil {
 				return 0, nextErr
@@ -207,6 +236,20 @@ func (mv *multiVolumePayloadReader) Read(p []byte) (int, error) {
 
 // newDecompressionReader returns the window-integrated reader for the file payload.
 func (sd *StreamDecompressor) newDecompressionReader(fh *FileHeader, pr io.Reader) io.Reader {
+	if fh.Encrypted {
+		if sd.password == "" {
+			return &errorReader{err: errors.New("rarengine: password required for encrypted file")}
+		}
+		iter := 1 << fh.KdfCount
+		passBytes := []byte(sd.password)
+		key := pbkdf2HmacSha256(passBytes, fh.Salt, iter, 32)
+		decPr, err := newCBCDecryptReader(pr, key, fh.IV)
+		if err != nil {
+			return &errorReader{err: err}
+		}
+		pr = decPr
+	}
+
 	mv := &multiVolumePayloadReader{
 		sd: sd,
 		r:  pr,
@@ -249,4 +292,105 @@ func (s *storeReader) Read(p []byte) (int, error) {
 		}
 	}
 	return n, err
+}
+
+type cbcDecryptReader struct {
+	r         io.Reader
+	decrypter cipher.BlockMode
+	inBuf     [4096]byte
+	outBuf    []byte
+	err       error
+}
+
+func newCBCDecryptReader(r io.Reader, key []byte, iv []byte) (io.Reader, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	decrypter := cipher.NewCBCDecrypter(block, iv)
+	return &cbcDecryptReader{
+		r:         r,
+		decrypter: decrypter,
+	}, nil
+}
+
+func (c *cbcDecryptReader) Read(p []byte) (int, error) {
+	if len(c.outBuf) > 0 {
+		n := copy(p, c.outBuf)
+		c.outBuf = c.outBuf[n:]
+		return n, nil
+	}
+	if c.err != nil {
+		return 0, c.err
+	}
+
+	var totalRead int
+	for totalRead < 16 {
+		n, err := c.r.Read(c.inBuf[totalRead:])
+		if n > 0 {
+			totalRead += n
+		}
+		if err != nil {
+			if err == io.EOF {
+				c.err = io.EOF
+				break
+			}
+			return 0, err
+		}
+	}
+	if totalRead < 16 {
+		if totalRead > 0 {
+			return 0, io.ErrUnexpectedEOF
+		}
+		return 0, io.EOF
+	}
+
+	decryptLen := (totalRead / 16) * 16
+	c.decrypter.CryptBlocks(c.inBuf[:decryptLen], c.inBuf[:decryptLen])
+	c.outBuf = c.inBuf[:decryptLen]
+
+	n := copy(p, c.outBuf)
+	c.outBuf = c.outBuf[n:]
+	return n, nil
+}
+
+func pbkdf2HmacSha256(password, salt []byte, iter, keyLen int) []byte {
+	mac := hmac.New(sha256.New, password)
+	var key []byte
+	var block [4]byte
+	for i := 1; keyLen > 0; i++ {
+		binary.BigEndian.PutUint32(block[:], uint32(i))
+		mac.Reset()
+		mac.Write(salt)
+		mac.Write(block[:])
+		u := mac.Sum(nil)
+		uCopy := append([]byte(nil), u...)
+		for j := 1; j < iter; j++ {
+			mac.Reset()
+			mac.Write(u)
+			u = mac.Sum(nil)
+			for k := range uCopy {
+				uCopy[k] ^= u[k]
+			}
+		}
+		if keyLen >= len(uCopy) {
+			key = append(key, uCopy...)
+			keyLen -= len(uCopy)
+		} else {
+			key = append(key, uCopy[:keyLen]...)
+			keyLen = 0
+		}
+	}
+	return key
+}
+
+func stringToUTF16LE(s string) []byte {
+	runes := []rune(s)
+	u16 := utf16.Encode(runes)
+	buf := make([]byte, len(u16)*2)
+	for i, v := range u16 {
+		buf[i*2] = byte(v)
+		buf[i*2+1] = byte(v >> 8)
+	}
+	return buf
 }

@@ -52,3 +52,22 @@ func TestHuffmanDecoder_Basic(t *testing.T) {
 		t.Errorf("expected symbol 2, got %d", s)
 	}
 }
+
+func FuzzHuffman(f *testing.F) {
+	f.Add([]byte{0x58}, []byte{2, 2, 1})
+	f.Fuzz(func(t *testing.T, data []byte, codelen []byte) {
+		if len(codelen) > 306 {
+			codelen = codelen[:306]
+		}
+		var dec HuffmanDecoder
+		dec.Init(codelen)
+
+		r := NewBitReader(data, len(data)*8)
+		for i := 0; i < 100; i++ {
+			_, err := dec.ReadSym(r)
+			if err != nil {
+				break
+			}
+		}
+	})
+}

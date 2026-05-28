@@ -176,3 +176,38 @@ func TestIntegration_Solid(t *testing.T) {
 		}
 	}
 }
+
+func TestIntegration_Encrypted(t *testing.T) {
+	f, err := os.Open(filepath.Join("testdata", "rar5_encrypted.rar"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	volumes := make(chan io.ReadCloser, 1)
+	volumes <- f
+	close(volumes)
+
+	sd := rarengine.NewStreamDecompressor(volumes)
+	sd.SetPassword("test")
+
+	fh, err := sd.Next()
+	if err != nil {
+		t.Fatalf("Next() failed: %v", err)
+	}
+
+	if fh.Name != "hello.txt" {
+		t.Errorf("expected file 'hello.txt', got '%s'", fh.Name)
+	}
+
+	data := make([]byte, fh.UnpackedSize)
+	_, err = io.ReadFull(sd, data)
+	if err != nil {
+		t.Fatalf("failed to read content of %s: %v", fh.Name, err)
+	}
+
+	expectedContent := "hello rardecode"
+	if string(data) != expectedContent {
+		t.Errorf("content mismatch: expected %q, got %q", expectedContent, string(data))
+	}
+}

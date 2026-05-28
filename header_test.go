@@ -140,3 +140,27 @@ func TestReadAndParseFileHeader(t *testing.T) {
 		t.Errorf("expected CRC32 0x98765432, got %x (hasCRC: %v)", fh.CRC32, fh.HasCRC32)
 	}
 }
+
+func TestSanitizePath(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"hello.txt", "hello.txt"},
+		{"/etc/passwd", "etc/passwd"},
+		{"../../etc/passwd", "etc/passwd"},
+		{"a/b/c/../../../etc/passwd", "etc/passwd"},
+		{"a/b/../c", "a/c"},
+		{"", ""},
+		{".", ""},
+		{"..", ""},
+		{"/../..", ""},
+	}
+
+	for _, tc := range tests {
+		got := sanitizePath(tc.input)
+		if got != tc.expected {
+			t.Errorf("sanitizePath(%q) = %q; expected %q", tc.input, got, tc.expected)
+		}
+	}
+}
