@@ -140,13 +140,21 @@ func (d *decoder50) readBlockHeader() error {
 			return err
 		}
 		cl := d.codeLength[:]
-		d.mainDecoder.Init(cl[:mainSize5])
+		if err = d.mainDecoder.Init(cl[:mainSize5]); err != nil {
+			return err
+		}
 		cl = cl[mainSize5:]
-		d.offsetDecoder.Init(cl[:d.offsetSize])
+		if err = d.offsetDecoder.Init(cl[:d.offsetSize]); err != nil {
+			return err
+		}
 		cl = cl[d.offsetSize:]
-		d.lowoffsetDecoder.Init(cl[:lowoffsetSize5])
+		if err = d.lowoffsetDecoder.Init(cl[:lowoffsetSize5]); err != nil {
+			return err
+		}
 		cl = cl[lowoffsetSize5:]
-		d.lengthDecoder.Init(cl)
+		if err = d.lengthDecoder.Init(cl); err != nil {
+			return err
+		}
 	}
 
 	return nil

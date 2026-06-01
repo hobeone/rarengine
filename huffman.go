@@ -27,14 +27,27 @@ type HuffmanDecoder struct {
 }
 
 // Init initializes the Huffman tables using the given code symbol bitlengths.
-func (h *HuffmanDecoder) Init(codeLengths []byte) {
+// It returns an error if the Huffman code length table defines an over-subscribed (invalid) tree.
+func (h *HuffmanDecoder) Init(codeLengths []byte) error {
 	var count [maxCodeLength + 1]uint16
 
 	for _, n := range codeLengths {
 		if n == 0 {
 			continue
 		}
+		if int(n) > maxCodeLength {
+			return ErrInvalidLengthTable
+		}
 		count[n]++
+	}
+
+	// Validate tree completeness (Kraft-McMillan inequality)
+	var sum uint32
+	for i := 1; i <= maxCodeLength; i++ {
+		sum += uint32(count[i]) << (maxCodeLength - i)
+	}
+	if sum > 32768 {
+		return ErrInvalidLengthTable
 	}
 
 	h.pos[0] = 0
@@ -88,6 +101,7 @@ func (h *HuffmanDecoder) Init(codeLengths []byte) {
 			h.quicksym[i] = 0
 		}
 	}
+	return nil
 }
 
 // ReadSym decodes a single symbol from the bit stream using direct lookup tables.
@@ -156,7 +170,9 @@ func ReadCodeLengthTable(br *BitReader, codeLength []byte, addOld bool, scratch 
 		bitlength[i] = byte(n)
 	}
 
-	scratch.Init(bitlength[:])
+	if err := scratch.Init(bitlength[:]); err != nil {
+		return err
+	}
 
 	for i := 0; i < len(codeLength); i++ {
 		l, err := scratch.ReadSym(br)
