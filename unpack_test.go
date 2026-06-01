@@ -224,3 +224,36 @@ func TestDiscoverVolumes_ClassicScheme(t *testing.T) {
 		t.Errorf("expected 3 volumes when called with r00, got %d: %v", len(vols00), vols00)
 	}
 }
+
+func TestSetupSandbox_Error(t *testing.T) {
+	// Create a temp file so that MkdirAll fails on it
+	tmpFile, err := os.CreateTemp("", "rarengine_sandbox_err")
+	if err != nil {
+		t.Fatalf("failed to create temp file: %v", err)
+	}
+	defer func() { _ = os.Remove(tmpFile.Name()) }()
+	_ = tmpFile.Close()
+
+	// MkdirAll should fail because tmpFile.Name() already exists as a non-directory file
+	_, _, err = setupSandbox(tmpFile.Name())
+	if err == nil {
+		t.Errorf("expected setupSandbox to return an error, got nil")
+	}
+}
+
+func TestOpenVolumeChannel_Error(t *testing.T) {
+	// Create one valid temp file
+	tmpFile, err := os.CreateTemp("", "rarengine_open_vol_err")
+	if err != nil {
+		t.Fatalf("failed to create temp file: %v", err)
+	}
+	defer func() { _ = os.Remove(tmpFile.Name()) }()
+	_ = tmpFile.Close()
+
+	// Sequence contains one valid file and one non-existent file
+	vols := []string{tmpFile.Name(), "nonexistent_volume_path.rar"}
+	_, err = openVolumeChannel(vols)
+	if err == nil {
+		t.Errorf("expected openVolumeChannel to return an error, got nil")
+	}
+}
