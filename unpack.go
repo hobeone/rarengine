@@ -34,23 +34,32 @@ type volumeInfo struct {
 // in ascending order.
 func SortVolumes(paths []string) ([]string, error) {
 	var vols []volumeInfo
+	var parseFailed bool
 
 	for _, p := range paths {
 		f, err := os.Open(p) // #nosec G304
 		if err != nil {
-			return nil, fmt.Errorf("rarengine: sort: open %s: %w", p, err)
+			parseFailed = true
+			break
 		}
 
 		volIdx, err := readVolumeIndex(f)
 		_ = f.Close()
 		if err != nil {
-			return nil, fmt.Errorf("rarengine: sort: parse %s: %w", p, err)
+			parseFailed = true
+			break
 		}
 
 		vols = append(vols, volumeInfo{
 			path:  p,
 			index: volIdx,
 		})
+	}
+
+	if parseFailed {
+		sorted := append([]string(nil), paths...)
+		slices.Sort(sorted)
+		return sorted, nil
 	}
 
 	slices.SortFunc(vols, func(a, b volumeInfo) int {
@@ -215,7 +224,7 @@ func UnpackDir(ctx context.Context, firstVolumePath string, outputDir string, op
 			return nil, fmt.Errorf("rarengine: create file %s: %w", destRel, err)
 		}
 
-		n, err := io.Copy(out, sd)
+		n, err := io.Copy(out, &contextReader{ctx: ctx, r: sd})
 		_ = out.Close()
 		if err != nil {
 			return nil, fmt.Errorf("rarengine: write file %s: %w", destRel, err)
@@ -266,10 +275,19 @@ func uniquePath(root *os.Root, destRel string) string {
 }
 
 func discoverVolumes(firstVol string) ([]string, error) {
-	if !strings.Contains(firstVol, ".part") {
-		return []string{firstVol}, nil
+	if strings.Contains(firstVol, ".part") {
+		return discoverPartVolumes(firstVol)
 	}
 
+	ext := strings.ToLower(filepath.Ext(firstVol))
+	if ext == ".rar" || (len(ext) == 4 && ext[1] == 'r' && ext[2] >= '0' && ext[2] <= '9' && ext[3] >= '0' && ext[3] <= '9') {
+		return discoverClassicVolumes(firstVol)
+	}
+
+	return []string{firstVol}, nil
+}
+
+func discoverPartVolumes(firstVol string) ([]string, error) {
 	idx := strings.Index(firstVol, ".part")
 	if idx == -1 {
 		return []string{firstVol}, nil
@@ -322,4 +340,53 @@ func discoverVolumes(firstVol string) ([]string, error) {
 	}
 
 	return volumes, nil
+}
+
+func discoverClassicVolumes(firstVol string) ([]string, error) {
+	ext := filepath.Ext(firstVol)
+	prefix := firstVol[:len(firstVol)-len(ext)]
+
+	var volumes []string
+
+	// Check if archive.rar exists
+	rarPath := prefix + ".rar"
+	if _, err := os.Stat(rarPath); err == nil {
+		volumes = append(volumes, rarPath)
+	}
+
+	// Scan from .r00 up to .r99 contiguous sequence
+	for i := range 100 {
+		volPath := fmt.Sprintf("%s.r%02d", prefix, i)
+		if _, err := os.Stat(volPath); err == nil {
+			alreadyAdded := slices.Contains(volumes, volPath)
+			if !alreadyAdded {
+				volumes = append(volumes, volPath)
+			}
+		} else if os.IsNotExist(err) {
+			if i > 0 || len(volumes) > 0 {
+				break
+			}
+		} else {
+			return nil, err
+		}
+	}
+
+	if len(volumes) == 0 {
+		if _, err := os.Stat(firstVol); err == nil {
+			return []string{firstVol}, nil
+		}
+	}
+	return volumes, nil
+}
+
+type contextReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (cr *contextReader) Read(p []byte) (int, error) {
+	if err := cr.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return cr.r.Read(p)
 }

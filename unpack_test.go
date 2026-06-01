@@ -143,3 +143,84 @@ func TestUnpackDir_Options(t *testing.T) {
 		t.Errorf("expected unique path file %s to exist: %v", collisionFile, err)
 	}
 }
+
+func TestSortVolumes_ResilientFallback(t *testing.T) {
+	input := []string{
+		"rar5_multi.part03.rar",
+		"rar5_multi.part01.rar",
+		"rar5_multi.part02.rar",
+	}
+
+	expected := []string{
+		"rar5_multi.part01.rar",
+		"rar5_multi.part02.rar",
+		"rar5_multi.part03.rar",
+	}
+
+	sorted, err := SortVolumes(input)
+	if err != nil {
+		t.Fatalf("SortVolumes failed: %v", err)
+	}
+
+	if !reflect.DeepEqual(sorted, expected) {
+		t.Errorf("expected %v, got %v", expected, sorted)
+	}
+}
+
+func TestUnpackDir_CancelMidCopy(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "rarengine_cancel_test")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	firstVolume := filepath.Join("testdata", "rar5_multi.part01.rar")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Cancel context immediately
+
+	_, err = UnpackDir(ctx, firstVolume, tmpDir, UnpackOptions{})
+	if err == nil {
+		t.Fatal("expected UnpackDir to fail with context error, but it succeeded")
+	}
+	if !reflect.DeepEqual(err, context.Canceled) && !bytes.Contains([]byte(err.Error()), []byte("context canceled")) {
+		t.Errorf("expected context canceled error, got: %v", err)
+	}
+}
+
+func TestDiscoverVolumes_ClassicScheme(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "rarengine_classic_discover")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	files := []string{
+		filepath.Join(tmpDir, "archive.rar"),
+		filepath.Join(tmpDir, "archive.r00"),
+		filepath.Join(tmpDir, "archive.r01"),
+	}
+	for _, f := range files {
+		if err := os.WriteFile(f, []byte("dummy"), 0644); err != nil {
+			t.Fatalf("failed to write dummy file %s: %v", f, err)
+		}
+	}
+
+	// 1. Call with archive.rar
+	vols, err := discoverVolumes(filepath.Join(tmpDir, "archive.rar"))
+	if err != nil {
+		t.Fatalf("discoverVolumes failed: %v", err)
+	}
+	if len(vols) != 3 {
+		t.Errorf("expected 3 volumes, got %d: %v", len(vols), vols)
+	}
+
+	// 2. Call with archive.r00
+	vols00, err := discoverVolumes(filepath.Join(tmpDir, "archive.r00"))
+	if err != nil {
+		t.Fatalf("discoverVolumes failed: %v", err)
+	}
+	if len(vols00) != 3 {
+		t.Errorf("expected 3 volumes when called with r00, got %d: %v", len(vols00), vols00)
+	}
+}
