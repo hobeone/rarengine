@@ -1,0 +1,136 @@
+package rarengine
+
+import (
+	"errors"
+	"io"
+	"testing"
+)
+
+func TestReadFilter5Data(t *testing.T) {
+	// A bitstream encoding:
+	// - 2 bits for bytesVal (value - 1) -> let's say bytesVal = 2 (so we write 1: 0x01)
+	// - 2 bytes of payload (each 8 bits): 0x34, 0x12 -> represents 0x1234
+	// In bits (MSB first, so we read 2 bits first, then 8, then 8):
+	// Let's create a BitReader from binary sequence
+	// 01 (bytesVal=1, meaning 2 bytes) followed by 0x34 (00110100) and 0x12 (00010010)
+	// Output should be: 0x1234 = 4660
+	// Let's construct the bits:
+	// 01 00110100 00010010 -> 01001101 00000100 10000000 = 0x4D, 0x04, 0x80
+	buf := []byte{0x4d, 0x04, 0x80}
+	br := NewBitReader(buf, len(buf)*8)
+
+	val, err := readFilter5Data(br)
+	if err != nil {
+		t.Fatalf("readFilter5Data failed: %v", err)
+	}
+	expected := 0x1234
+	if val != expected {
+		t.Errorf("expected %d, got %d", expected, val)
+	}
+
+	// Error path: EOF
+	brEOF := NewBitReader([]byte{0x00}, 2) // not enough bits
+	_, err = readFilter5Data(brEOF)
+	if !errors.Is(err, io.EOF) {
+		t.Errorf("expected io.EOF, got %v", err)
+	}
+}
+
+func TestDecoder50_ReadFilter(t *testing.T) {
+	d := newDecoder50()
+	win := NewWindow(1024)
+
+	// Stream contains:
+	// - offset: bytesVal = 1 (1: 0x00), byte = 0x10 -> offset = 0x10 (16)
+	// - length: bytesVal = 1 (1: 0x00), byte = 0x08 -> length = 0x08 (8)
+	// - ftype: 3 bits -> let's say ftype = 0 (Delta filter: 000)
+	// - delta param: 5 bits -> let's say param = 4 (00100), meaning fb.param = 5
+	// In bits:
+	// offset: 00 00010000 (00000100 00)
+	// length: 00 00001000 (00000010 00)
+	// ftype: 000 (000)
+	// param: 00100 (00100)
+	//
+	// Bit sequence:
+	// 00000100 00000000 10000000 01000000 = 0x04, 0x00, 0x80, 0x40
+	buf := []byte{0x04, 0x00, 0x80, 0x40}
+	br := NewBitReader(buf, len(buf)*8)
+	d.br = br
+
+	err := d.readFilter(win)
+	if err != nil {
+		t.Fatalf("readFilter failed: %v", err)
+	}
+
+	if len(d.fl) != 1 {
+		t.Fatalf("expected 1 filter, got %d", len(d.fl))
+	}
+
+	fb := d.fl[0]
+	if fb.ftype != 0 {
+		t.Errorf("expected ftype 0, got %d", fb.ftype)
+	}
+	if fb.param != 5 {
+		t.Errorf("expected param 5, got %d", fb.param)
+	}
+
+	// Test ErrTooManyFilters limit
+	d.fl = make([]FilterBlock, maxQueuedFilters)
+	err = d.readFilter(win)
+	if !errors.Is(err, ErrTooManyFilters) {
+		t.Errorf("expected ErrTooManyFilters, got %v", err)
+	}
+}
+
+func TestDecoder50_DecodeSymbol(t *testing.T) {
+	d := newDecoder50()
+	win := NewWindow(1024)
+
+	// Initialize offset history
+	d.offset = [4]int{10, 20, 30, 40}
+
+	// 1. Literal symbol (< 256)
+	err := d.decodeSymbol(win, 65)
+	if err != nil {
+		t.Fatalf("literal decode failed: %v", err)
+	}
+	if win.Available() != 1 {
+		t.Errorf("expected 1 byte in window, got %d", win.Available())
+	}
+	var out [1]byte
+	n, _ := win.Read(out[:])
+	if n != 1 || out[0] != 65 {
+		t.Errorf("expected 'A' (65), got %d (%v)", out[0], out)
+	}
+
+	// 2. Repetition symbol == 257 (repeats last offset/length)
+	d.length = 3
+	// Write some historical bytes to copy from: "ABC" at offset 0, window pointer win.w is now 1.
+	// Let's reset window and write "hello"
+	win.Reset(false)
+	win.writeByte('h')
+	win.writeByte('e')
+	win.writeByte('l')
+	win.writeByte('l')
+	win.writeByte('o')
+	// win.w is now 5. win.r is 0.
+	// Let's decode symbol 257 to copy 3 bytes from offset d.offset[0] = 10.
+	// Wait, window offset 10 from current w(5) is wrap-around. Let's make offset 2.
+	d.offset[0] = 2 // will copy from w - 2 = 3 (index 3 is 'l')
+	err = d.decodeSymbol(win, 257)
+	if err != nil {
+		t.Fatalf("symbol 257 decode failed: %v", err)
+	}
+
+	// We expect 3 bytes copied from w - 2 = 3.
+	// Indices are:
+	// 0: h, 1: e, 2: l, 3: l, 4: o
+	// Copy 3 bytes starting at index 3: 'l', 'o', 'l' (overlapping/wraparound copy)
+	// Let's read out the new window content.
+	buf := make([]byte, win.Available())
+	_, _ = win.Read(buf)
+	expectedStr := "hellolol"
+	if string(buf) != expectedStr {
+		t.Errorf("expected window content %q, got %q", expectedStr, string(buf))
+	}
+}
