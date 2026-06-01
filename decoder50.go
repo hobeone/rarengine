@@ -26,7 +26,8 @@ const (
 type FilterBlock struct {
 	offset int
 	length int
-	filter func([]byte, int64) []byte
+	ftype  uint8 // 0: Delta, 1: E8, 2: E9, 3: Arm
+	param  uint8 // Stores 'n' for Delta filter
 }
 
 // decoder50 manages the LZ77 dynamic decompression state machine.
@@ -48,7 +49,7 @@ type decoder50 struct {
 	offset [4]int
 	length int
 
-	fl        []*FilterBlock
+	fl        []FilterBlock
 	outbuf    []byte // Leftover filter output that didn't fit in the caller's buffer
 	filterBuf []byte // Reusable scratch for filter input; reused once outbuf drains
 	tot       int64  // Total number of bytes read/output so far
@@ -57,6 +58,7 @@ type decoder50 struct {
 func newDecoder50() *decoder50 {
 	return &decoder50{
 		offsetSize: offsetSize5,
+		fl:         make([]FilterBlock, 0, maxQueuedFilters),
 	}
 }
 
@@ -73,7 +75,9 @@ func (d *decoder50) init(r io.Reader, reset bool) {
 		for i := range d.codeLength {
 			d.codeLength[i] = 0
 		}
-		d.fl = nil
+		if d.fl != nil {
+			d.fl = d.fl[:0]
+		}
 		d.outbuf = nil
 		d.tot = 0
 	}
@@ -187,14 +191,12 @@ func (d *decoder50) readFilter(win *Window) error {
 		return ErrTooManyFilters
 	}
 
-	fb := new(FilterBlock)
 	var err error
-
-	fb.offset, err = readFilter5Data(d.br)
+	offset, err := readFilter5Data(d.br)
 	if err != nil {
 		return err
 	}
-	fb.length, err = readFilter5Data(d.br)
+	length, err := readFilter5Data(d.br)
 	if err != nil {
 		return err
 	}
@@ -203,14 +205,20 @@ func (d *decoder50) readFilter(win *Window) error {
 		return err
 	}
 
-	fb.offset += win.w - win.r
-	fb.offset %= win.size
-	if fb.offset < 0 {
-		fb.offset += win.size
+	offset += win.w - win.r
+	offset %= win.size
+	if offset < 0 {
+		offset += win.size
 	}
-	fb.length %= win.size
-	if fb.length < 0 {
-		fb.length += win.size
+	length %= win.size
+	if length < 0 {
+		length += win.size
+	}
+
+	fb := FilterBlock{
+		offset: offset,
+		length: length,
+		ftype:  uint8(ftype),
 	}
 
 	switch ftype {
@@ -219,13 +227,9 @@ func (d *decoder50) readFilter(win *Window) error {
 		if err != nil {
 			return err
 		}
-		fb.filter = func(buf []byte, offset int64) []byte { return FilterDelta(n+1, buf) }
-	case 1:
-		fb.filter = func(buf []byte, offset int64) []byte { return FilterE8(0xe8, true, buf, offset) }
-	case 2:
-		fb.filter = func(buf []byte, offset int64) []byte { return FilterE8(0xe9, true, buf, offset) }
-	case 3:
-		fb.filter = FilterArm
+		fb.param = uint8(n + 1)
+	case 1, 2, 3:
+		// No extra parameters needed
 	default:
 		return ErrUnknownFilter
 	}
@@ -398,7 +402,19 @@ func (d *decoder50) Read(win *Window, p []byte) (int, error) {
 		d.filterBuf = d.filterBuf[:f.length]
 	}
 	_, _ = win.Read(d.filterBuf)
-	out := f.filter(d.filterBuf, d.tot)
+
+	var out []byte
+	switch f.ftype {
+	case 0:
+		out = FilterDelta(int(f.param), d.filterBuf)
+	case 1:
+		out = FilterE8(0xe8, true, d.filterBuf, d.tot)
+	case 2:
+		out = FilterE8(0xe9, true, d.filterBuf, d.tot)
+	case 3:
+		out = FilterArm(d.filterBuf, d.tot)
+	}
+
 	d.tot += int64(len(out))
 	n := copy(p, out)
 	if n < len(out) {
