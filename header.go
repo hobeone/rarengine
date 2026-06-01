@@ -274,6 +274,73 @@ func ParseArchiveHeader(h *BlockHeader) (*ArchiveHeader, error) {
 	return ah, nil
 }
 
+// parseEncryptionRecord decodes RAR5 encryption extra record details.
+func parseEncryptionRecord(fh *FileHeader, b []byte) error {
+	ver, nVer, err := DecodeVint(b)
+	if err != nil {
+		return err
+	}
+	if ver != 0 {
+		return ErrUnknownEncryptMethod
+	}
+	b = b[nVer:]
+
+	encFlags, nEnc, err := DecodeVint(b)
+	if err != nil {
+		return err
+	}
+	b = b[nEnc:]
+
+	if len(b) < 33 {
+		return ErrCorruptEncryptData
+	}
+	fh.Encrypted = true
+	fh.KdfCount = int(b[0])
+	fh.Salt = append([]byte(nil), b[1:17]...)
+	fh.IV = append([]byte(nil), b[17:33]...)
+	b = b[33:]
+
+	if encFlags&FileEncCheckPresent > 0 {
+		if len(b) < 12 {
+			return ErrCorruptEncryptData
+		}
+		fh.EncCheck = append([]byte(nil), b[:12]...)
+	}
+	fh.UseMac = encFlags&FileEncUseMac > 0
+	return nil
+}
+
+// parseHashRecord decodes RAR5 blake2sp file hash extra record details.
+func parseHashRecord(fh *FileHeader, b []byte) error {
+	hashType, nHash, err := DecodeVint(b)
+	if err != nil {
+		return err
+	}
+	b = b[nHash:]
+	if hashType == 0 && len(b) >= sha256.Size {
+		fh.HasBlake2sp = true
+		fh.Blake2sp = append([]byte(nil), b[:sha256.Size]...)
+	}
+	return nil
+}
+
+// parseExtraRecords iterates over extra records and parses encryption or file hash blocks.
+func parseExtraRecords(fh *FileHeader, extra []ExtraRecord) error {
+	for _, e := range extra {
+		switch e.Type {
+		case 1: // Encryption
+			if err := parseEncryptionRecord(fh, e.Data); err != nil {
+				return err
+			}
+		case 2: // File hash (Blake2sp)
+			if err := parseHashRecord(fh, e.Data); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // ParseFileHeader decodes the file header details from a block header.
 func ParseFileHeader(h *BlockHeader) (*FileHeader, error) {
 	if h.Type != HeaderTypeFile && h.Type != HeaderTypeService {
@@ -353,54 +420,8 @@ func ParseFileHeader(h *BlockHeader) (*FileHeader, error) {
 	fh.Name = sanitizePath(string(payload[:nameLen]))
 
 	// Parse optional extra records
-	for _, e := range h.Extra {
-		switch e.Type {
-		case 1: // Encryption
-			b := e.Data
-			ver, nVer, err := DecodeVint(b)
-			if err != nil {
-				return nil, err
-			}
-			if ver != 0 {
-				return nil, ErrUnknownEncryptMethod
-			}
-			b = b[nVer:]
-
-			encFlags, nEnc, err := DecodeVint(b)
-			if err != nil {
-				return nil, err
-			}
-			b = b[nEnc:]
-
-			if len(b) < 33 {
-				return nil, ErrCorruptEncryptData
-			}
-			fh.Encrypted = true
-			fh.KdfCount = int(b[0])
-			fh.Salt = append([]byte(nil), b[1:17]...)
-			fh.IV = append([]byte(nil), b[17:33]...)
-			b = b[33:]
-
-			if encFlags&FileEncCheckPresent > 0 {
-				if len(b) < 12 {
-					return nil, ErrCorruptEncryptData
-				}
-				fh.EncCheck = append([]byte(nil), b[:12]...)
-			}
-			fh.UseMac = encFlags&FileEncUseMac > 0
-
-		case 2: // File hash (Blake2sp)
-			b := e.Data
-			hashType, nHash, err := DecodeVint(b)
-			if err != nil {
-				return nil, err
-			}
-			b = b[nHash:]
-			if hashType == 0 && len(b) >= sha256.Size {
-				fh.HasBlake2sp = true
-				fh.Blake2sp = append([]byte(nil), b[:sha256.Size]...)
-			}
-		}
+	if err := parseExtraRecords(fh, h.Extra); err != nil {
+		return nil, err
 	}
 
 	return fh, nil

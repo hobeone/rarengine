@@ -95,16 +95,76 @@ func (sd *StreamDecompressor) nextVolume() error {
 	return nil
 }
 
+// drainPrevious discards any remaining unread bytes of the previous file payload.
+func (sd *StreamDecompressor) drainPrevious() error {
+	if sd.currReader != nil {
+		if _, err := io.Copy(io.Discard, sd.currReader); err != nil {
+			sd.currReader = nil
+			return fmt.Errorf("rarengine: draining previous file: %w", err)
+		}
+		sd.currReader = nil
+	}
+	return nil
+}
+
+// processHeader handles a single parsed block header in the main Next loop.
+func (sd *StreamDecompressor) processHeader(h *BlockHeader) (*FileHeader, bool, error) {
+	switch h.Type {
+	case HeaderTypeArchive:
+		if _, err := ParseArchiveHeader(h); err != nil {
+			return nil, false, err
+		}
+
+	case HeaderTypeFile, HeaderTypeService:
+		fh, err := ParseFileHeader(h)
+		if err != nil {
+			return nil, false, err
+		}
+
+		if !fh.FirstBlock {
+			// Skip the payload of the continuation block and find the next file
+			if _, err = io.Copy(io.Discard, io.LimitReader(sd.currentVol, fh.PackedSize)); err != nil {
+				return nil, false, err
+			}
+			return nil, true, nil
+		}
+
+		// Compression Bomb (RAR-bomb) Protection: reject >1000x ratios for files > 1MB
+		if fh.UnpackedSize > 1024*1024 && fh.UnpackedSize > 1000*fh.PackedSize {
+			return nil, false, ErrRarBombDetected
+		}
+
+		sd.win.Reset(fh.Solid)
+
+		sd.limitPr.R = sd.currentVol
+		sd.limitPr.N = fh.PackedSize
+
+		sd.currHeader = fh
+		sd.bytesRemaining = fh.UnpackedSize
+		sd.currReader = sd.newDecompressionReader(fh, &sd.limitPr)
+		return fh, false, nil
+
+	case HeaderTypeEnd:
+		// Transition directly to the next volume
+		if err := sd.nextVolume(); err != nil {
+			return nil, false, err
+		}
+	default:
+		if h.DataSize > 0 {
+			if _, err := io.Copy(io.Discard, io.LimitReader(sd.currentVol, h.DataSize)); err != nil {
+				return nil, false, err
+			}
+		}
+	}
+	return nil, true, nil
+}
+
 // Next advances to the next file in the RAR archive stream, returning its header.
 // It returns io.EOF when all files in all volumes have been fully decompressed.
 func (sd *StreamDecompressor) Next() (*FileHeader, error) {
 	// 1. Drain the previous file payload if any remains unread to align the stream
-	if sd.currReader != nil {
-		if _, err := io.Copy(io.Discard, sd.currReader); err != nil {
-			sd.currReader = nil
-			return nil, fmt.Errorf("rarengine: draining previous file: %w", err)
-		}
-		sd.currReader = nil
+	if err := sd.drainPrevious(); err != nil {
+		return nil, err
 	}
 
 	// 2. Fetch the first volume if we haven't started yet
@@ -127,56 +187,14 @@ func (sd *StreamDecompressor) Next() (*FileHeader, error) {
 			return nil, err
 		}
 
-		switch h.Type {
-		case HeaderTypeArchive:
-			_, err := ParseArchiveHeader(h)
-			if err != nil {
-				return nil, err
-			}
-
-		case HeaderTypeFile, HeaderTypeService:
-			fh, err := ParseFileHeader(h)
-			if err != nil {
-				return nil, err
-			}
-
-			if !fh.FirstBlock {
-				// Skip the payload of the continuation block and find the next file
-				_, err = io.Copy(io.Discard, io.LimitReader(sd.currentVol, fh.PackedSize))
-				if err != nil {
-					return nil, err
-				}
-				continue
-			}
-
-			// Compression Bomb (RAR-bomb) Protection: reject >1000x ratios for files > 1MB
-			if fh.UnpackedSize > 1024*1024 && fh.UnpackedSize > 1000*fh.PackedSize {
-				return nil, ErrRarBombDetected
-			}
-
-			sd.win.Reset(fh.Solid)
-
-			sd.limitPr.R = sd.currentVol
-			sd.limitPr.N = fh.PackedSize
-
-			sd.currHeader = fh
-			sd.bytesRemaining = fh.UnpackedSize
-			sd.currReader = sd.newDecompressionReader(fh, &sd.limitPr)
-			return fh, nil
-
-		case HeaderTypeEnd:
-			// Transition directly to the next volume
-			if err := sd.nextVolume(); err != nil {
-				return nil, err
-			}
-		default:
-			if h.DataSize > 0 {
-				_, err = io.Copy(io.Discard, io.LimitReader(sd.currentVol, h.DataSize))
-				if err != nil {
-					return nil, err
-				}
-			}
+		fh, shouldContinue, err := sd.processHeader(h)
+		if err != nil {
+			return nil, err
 		}
+		if shouldContinue {
+			continue
+		}
+		return fh, nil
 	}
 }
 
@@ -199,6 +217,34 @@ func (sd *StreamDecompressor) Read(p []byte) (int, error) {
 	return n, err
 }
 
+// processVolumePayloadHeader handles block headers while aligning continuation payloads.
+func (sd *StreamDecompressor) processVolumePayloadHeader(h *BlockHeader) (io.Reader, bool, error) {
+	switch h.Type {
+	case HeaderTypeArchive:
+		if _, err := ParseArchiveHeader(h); err != nil {
+			return nil, false, err
+		}
+	case HeaderTypeFile, HeaderTypeService:
+		fh, err := ParseFileHeader(h)
+		if err != nil {
+			return nil, false, err
+		}
+		sd.currHeader = fh
+		return io.LimitReader(sd.currentVol, fh.PackedSize), false, nil
+	case HeaderTypeEnd:
+		if err := sd.nextVolume(); err != nil {
+			return nil, false, err
+		}
+	default:
+		if h.DataSize > 0 {
+			if _, err := io.Copy(io.Discard, io.LimitReader(sd.currentVol, h.DataSize)); err != nil {
+				return nil, false, err
+			}
+		}
+	}
+	return nil, true, nil
+}
+
 // nextVolumePayload transitions to the next volume and searches for the continuation file header.
 func (sd *StreamDecompressor) nextVolumePayload() (io.Reader, error) {
 	if err := sd.nextVolume(); err != nil {
@@ -209,31 +255,14 @@ func (sd *StreamDecompressor) nextVolumePayload() (io.Reader, error) {
 		if err != nil {
 			return nil, err
 		}
-		switch h.Type {
-		case HeaderTypeArchive:
-			_, err := ParseArchiveHeader(h)
-			if err != nil {
-				return nil, err
-			}
-		case HeaderTypeFile, HeaderTypeService:
-			fh, err := ParseFileHeader(h)
-			if err != nil {
-				return nil, err
-			}
-			sd.currHeader = fh
-			return io.LimitReader(sd.currentVol, fh.PackedSize), nil
-		case HeaderTypeEnd:
-			if err := sd.nextVolume(); err != nil {
-				return nil, err
-			}
-		default:
-			if h.DataSize > 0 {
-				_, err = io.Copy(io.Discard, io.LimitReader(sd.currentVol, h.DataSize))
-				if err != nil {
-					return nil, err
-				}
-			}
+		r, shouldContinue, err := sd.processVolumePayloadHeader(h)
+		if err != nil {
+			return nil, err
 		}
+		if shouldContinue {
+			continue
+		}
+		return r, nil
 	}
 }
 

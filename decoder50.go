@@ -319,6 +319,23 @@ func (d *decoder50) decodeOffset(win *Window, i int) error {
 	return win.CopyBytes(d.length, d.offset[0])
 }
 
+// decodeSymbol maps a decoded symbol to its sliding window or filter action.
+func (d *decoder50) decodeSymbol(win *Window, sym int) error {
+	switch {
+	case sym < 256:
+		win.writeByte(byte(sym))
+		return nil
+	case sym >= 262:
+		return d.decodeOffset(win, sym-262)
+	case sym >= 258:
+		return d.decodeLength(win, sym-258)
+	case sym == 257:
+		return win.CopyBytes(d.length, d.offset[0])
+	default: // sym == 256:
+		return d.readFilter(win)
+	}
+}
+
 // fill decodes LZ literals and back-references into the circular window.
 func (d *decoder50) fill(win *Window) error {
 	for win.Available() < win.size/2 {
@@ -328,27 +345,18 @@ func (d *decoder50) fill(win *Window) error {
 			}
 		}
 		sym, err := d.mainDecoder.ReadSym(d.br)
-		if err == nil {
-			switch {
-			case sym < 256:
-				win.writeByte(byte(sym))
-			case sym >= 262:
-				err = d.decodeOffset(win, sym-262)
-			case sym >= 258:
-				err = d.decodeLength(win, sym-258)
-			case sym == 257:
-				err = win.CopyBytes(d.length, d.offset[0])
-			default: // sym == 256:
-				err = d.readFilter(win)
-			}
-		} else if err == io.EOF {
-			if d.lastBlock {
-				return io.EOF
-			}
-			d.br = nil
-			continue
-		}
 		if err != nil {
+			if err == io.EOF {
+				if d.lastBlock {
+					return io.EOF
+				}
+				d.br = nil
+				continue
+			}
+			return err
+		}
+
+		if err = d.decodeSymbol(win, sym); err != nil {
 			if err == io.EOF {
 				return ErrDecoderOutOfData
 			}
