@@ -163,6 +163,8 @@ func TestSanitizePath(t *testing.T) {
 		{".", ""},
 		{"..", ""},
 		{"/../..", ""},
+		{"..\\..\\etc\\passwd", "etc/passwd"},
+		{"a\\b\\..\\c", "a/c"},
 	}
 
 	for _, tc := range tests {

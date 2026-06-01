@@ -407,6 +407,7 @@ func ParseFileHeader(h *BlockHeader) (*FileHeader, error) {
 }
 
 func sanitizePath(p string) string {
+	p = strings.ReplaceAll(p, "\\", "/")
 	cleaned := path.Clean(p)
 	if path.IsAbs(cleaned) {
 		cleaned = cleaned[1:]
