@@ -243,3 +243,45 @@ func TestFileHeader_ModeAndMTime(t *testing.T) {
 		t.Errorf("expected Mode 0o755, got %o", fh.Mode())
 	}
 }
+
+func TestParseHashRecord(t *testing.T) {
+	// Test success path: hashType = 0, 32 bytes of hash data
+	fh := &FileHeader{}
+	hashData := make([]byte, 33) // 1 byte for hashType (0) + 32 bytes of hash
+	hashData[0] = 0              // hashType = 0
+	for i := 1; i <= 32; i++ {
+		hashData[i] = byte(i)
+	}
+
+	err := parseHashRecord(fh, hashData)
+	if err != nil {
+		t.Fatalf("parseHashRecord failed: %v", err)
+	}
+	if !fh.HasBlake2sp {
+		t.Errorf("expected HasBlake2sp to be true")
+	}
+	if len(fh.Blake2sp) != 32 {
+		t.Errorf("expected Blake2sp length 32, got %d", len(fh.Blake2sp))
+	}
+	for i := range 32 {
+		if fh.Blake2sp[i] != byte(i+1) {
+			t.Errorf("expected Blake2sp[%d] to be %d, got %d", i, i+1, fh.Blake2sp[i])
+		}
+	}
+
+	// Test DecodeVint error (truncated)
+	err = parseHashRecord(&FileHeader{}, []byte{})
+	if err == nil {
+		t.Errorf("expected error for empty data")
+	}
+
+	// Test short hash data (ignored or returns nil)
+	fhShort := &FileHeader{}
+	err = parseHashRecord(fhShort, []byte{0, 1, 2}) // too short
+	if err != nil {
+		t.Fatalf("expected no error for short hash record, got %v", err)
+	}
+	if fhShort.HasBlake2sp {
+		t.Errorf("expected HasBlake2sp to be false for short hash record")
+	}
+}

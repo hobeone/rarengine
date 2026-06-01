@@ -249,3 +249,74 @@ func TestStreamDecompressor_UnknownBlock(t *testing.T) {
 		t.Errorf("expected 'world', got '%s'", string(data))
 	}
 }
+
+func TestMultiVolumePayloadReader_Direct(t *testing.T) {
+	sd := NewStreamDecompressor(nil)
+
+	// 1. Test empty buffer p
+	mv := &multiVolumePayloadReader{sd: sd, r: bytes.NewReader([]byte("test"))}
+	n, err := mv.Read([]byte{})
+	if n != 0 || err != nil {
+		t.Errorf("expected 0, nil for empty buffer, got %d, %v", n, err)
+	}
+
+	// 2. Test normal read from underlying reader
+	buf := make([]byte, 4)
+	n, err = mv.Read(buf)
+	if n != 4 || string(buf) != "test" || err != nil {
+		t.Errorf("expected 4 bytes 'test', got %d %q %v", n, buf, err)
+	}
+
+	// 3. Test EOF when LastBlock is true
+	sd.currHeader = &FileHeader{LastBlock: true}
+	mv.r = bytes.NewReader([]byte{}) // EOF
+	n, err = mv.Read(buf)
+	if n != 0 || err != io.EOF {
+		t.Errorf("expected 0, io.EOF, got %d, %v", n, err)
+	}
+
+	// 4. Test transition to next volume payload when LastBlock is false
+	sd.currHeader = &FileHeader{LastBlock: false}
+	volumes := make(chan io.ReadCloser, 1)
+
+	var volBuf bytes.Buffer
+	volBuf.Write([]byte{0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x01, 0x00}) // Signature
+
+	var filePayload bytes.Buffer
+	filePayload.Write(EncodeVint(0)) // flags
+	filePayload.Write(EncodeVint(5)) // unpacked size
+	filePayload.Write(EncodeVint(0)) // attributes
+	filePayload.Write(EncodeVint(0)) // comp flags
+	filePayload.Write(EncodeVint(1)) // host OS
+	filePayload.Write(EncodeVint(9)) // name len
+	filePayload.WriteString("hello.txt")
+
+	var headerPayload bytes.Buffer
+	headerPayload.Write(EncodeVint(HeaderTypeFile))
+	headerPayload.Write(EncodeVint(HeaderFlagDataNotFirst | HeaderFlagHasData)) // FirstBlock = false, HasData = true
+	headerPayload.Write(EncodeVint(4))                                          // data size (PackedSize = 4)
+	headerPayload.Write(filePayload.Bytes())
+
+	fileSize := headerPayload.Len()
+	fileSizeV := EncodeVint(uint64(fileSize))
+	var fileHashed bytes.Buffer
+	fileHashed.Write(fileSizeV)
+	fileHashed.Write(headerPayload.Bytes())
+	fileCrc := crc32.ChecksumIEEE(fileHashed.Bytes())
+
+	_ = binary.Write(&volBuf, binary.LittleEndian, fileCrc)
+	volBuf.Write(fileHashed.Bytes())
+	volBuf.WriteString("next") // 4 bytes of continuation payload
+
+	volumes <- &mockReadCloser{&volBuf}
+	close(volumes)
+
+	sd.volumes = volumes
+	mv.r = bytes.NewReader([]byte{}) // trigger transition
+
+	buf = make([]byte, 4)
+	n, err = mv.Read(buf)
+	if n != 4 || string(buf) != "next" || err != nil {
+		t.Errorf("expected 4 bytes 'next' from next volume, got %d %q %v", n, buf, err)
+	}
+}
