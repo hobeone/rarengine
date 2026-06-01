@@ -21,13 +21,18 @@ var (
 
 // StreamDecompressor implements a sequential, tar-like reader for extracting RAR archives on-the-fly.
 type StreamDecompressor struct {
-	volumes    <-chan io.ReadCloser
-	currentVol io.ReadCloser
-	currHeader *FileHeader
-	currReader io.Reader
-	win        *Window
-	dec50      *decoder50
-	password   string
+	volumes        <-chan io.ReadCloser
+	currentVol     io.ReadCloser
+	currHeader     *FileHeader
+	currReader     io.Reader
+	win            *Window
+	dec50          *decoder50
+	password       string
+	lzReader       lz50Reader
+	stReader       storeReader
+	mvReader       multiVolumePayloadReader
+	limitPr        io.LimitedReader
+	bytesRemaining int64
 }
 
 // SetPassword configures the decryption password for encrypted RAR archives.
@@ -151,11 +156,12 @@ func (sd *StreamDecompressor) Next() (*FileHeader, error) {
 
 			sd.win.Reset(fh.Solid)
 
-			// Wrap payload with a limit reader matching packed size
-			limitPr := io.LimitReader(sd.currentVol, fh.PackedSize)
+			sd.limitPr.R = sd.currentVol
+			sd.limitPr.N = fh.PackedSize
 
 			sd.currHeader = fh
-			sd.currReader = sd.newDecompressionReader(fh, limitPr)
+			sd.bytesRemaining = fh.UnpackedSize
+			sd.currReader = sd.newDecompressionReader(fh, &sd.limitPr)
 			return fh, nil
 
 		case HeaderTypeEnd:
@@ -179,7 +185,18 @@ func (sd *StreamDecompressor) Read(p []byte) (int, error) {
 	if sd.currReader == nil {
 		return 0, ErrNoActiveFile
 	}
-	return sd.currReader.Read(p)
+	if sd.bytesRemaining <= 0 {
+		return 0, io.EOF
+	}
+	if int64(len(p)) > sd.bytesRemaining {
+		p = p[:sd.bytesRemaining]
+	}
+	n, err := sd.currReader.Read(p)
+	sd.bytesRemaining -= int64(n)
+	if err == nil && sd.bytesRemaining <= 0 {
+		return n, io.EOF
+	}
+	return n, err
 }
 
 // nextVolumePayload transitions to the next volume and searches for the continuation file header.
@@ -274,24 +291,21 @@ func (sd *StreamDecompressor) newDecompressionReader(fh *FileHeader, pr io.Reade
 		pr = decPr
 	}
 
-	mv := &multiVolumePayloadReader{
-		sd: sd,
-		r:  pr,
-	}
+	sd.mvReader.sd = sd
+	sd.mvReader.r = pr
+
 	var r io.Reader
 	if fh.Method == 0 {
-		r = &storeReader{
-			r:   mv,
-			win: sd.win,
-		}
+		sd.stReader.r = &sd.mvReader
+		sd.stReader.win = sd.win
+		r = &sd.stReader
 	} else {
-		sd.dec50.init(mv, fh.FirstBlock)
-		r = &lz50Reader{
-			dec: sd.dec50,
-			win: sd.win,
-		}
+		sd.dec50.init(&sd.mvReader, fh.FirstBlock)
+		sd.lzReader.dec = sd.dec50
+		sd.lzReader.win = sd.win
+		r = &sd.lzReader
 	}
-	return io.LimitReader(r, fh.UnpackedSize)
+	return r
 }
 
 type lz50Reader struct {

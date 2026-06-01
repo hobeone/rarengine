@@ -7,7 +7,7 @@ import (
 
 func TestFilterDelta(t *testing.T) {
 	buf := []byte{1, 2, 3, 4}
-	got := FilterDelta(2, buf)
+	got := FilterDelta(2, buf, nil)
 	expected := []byte{255, 253, 253, 249}
 	if !bytes.Equal(got, expected) {
 		t.Errorf("expected %x, got %x", expected, got)

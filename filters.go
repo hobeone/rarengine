@@ -12,21 +12,25 @@ var (
 const fileSize = 0x1000000
 
 // FilterDelta computes cumulative striped byte differences.
-func FilterDelta(n int, buf []byte) []byte {
+func FilterDelta(n int, buf []byte, out []byte) []byte {
 	if n <= 0 || n > len(buf) {
 		return buf
 	}
-	res := make([]byte, len(buf))
+	if len(out) < len(buf) {
+		out = make([]byte, len(buf))
+	} else {
+		out = out[:len(buf)]
+	}
 	i := 0
 	for j := range n {
 		var c byte
-		for k := j; k < len(res); k += n {
+		for k := j; k < len(out); k += n {
 			c -= buf[i]
 			i++
-			res[k] = c
+			out[k] = c
 		}
 	}
-	return res
+	return out
 }
 
 // FilterArm relocates branch offsets in ARM machine code.

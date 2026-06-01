@@ -49,10 +49,11 @@ type decoder50 struct {
 	offset [4]int
 	length int
 
-	fl        []FilterBlock
-	outbuf    []byte // Leftover filter output that didn't fit in the caller's buffer
-	filterBuf []byte // Reusable scratch for filter input; reused once outbuf drains
-	tot       int64  // Total number of bytes read/output so far
+	fl           []FilterBlock
+	outbuf       []byte // Leftover filter output that didn't fit in the caller's buffer
+	filterBuf    []byte // Reusable scratch for filter input; reused once outbuf drains
+	filterOutBuf []byte // Reusable scratch for filter output
+	tot          int64  // Total number of bytes read/output so far
 }
 
 func newDecoder50() *decoder50 {
@@ -414,7 +415,12 @@ func (d *decoder50) Read(win *Window, p []byte) (int, error) {
 	var out []byte
 	switch f.ftype {
 	case 0:
-		out = FilterDelta(int(f.param), d.filterBuf)
+		if cap(d.filterOutBuf) < f.length {
+			d.filterOutBuf = make([]byte, f.length)
+		} else {
+			d.filterOutBuf = d.filterOutBuf[:f.length]
+		}
+		out = FilterDelta(int(f.param), d.filterBuf, d.filterOutBuf)
 	case 1:
 		out = FilterE8(0xe8, true, d.filterBuf, d.tot)
 	case 2:
