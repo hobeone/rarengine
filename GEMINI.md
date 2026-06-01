@@ -168,3 +168,40 @@ All commits must follow [Conventional Commits 1.0.0](https://www.conventionalcom
 | `chore` | Build, CI, dependency updates |
 
 Append `!` or add `BREAKING CHANGE:` footer for any change that alters the public API or binary output.
+
+---
+
+## Codebase Intelligence & MCP Tooling
+
+This repository is fully indexed by **Repowise** and supports MCP (Model Context Protocol) tools for accelerated orientation, architectural discovery, and deep-dive context retrieval.
+
+### Architectural Layers
+
+| Layer | Description | Key Files |
+| :--- | :--- | :--- |
+| **Stream Decompression** | Public API, multi-volume sequential stitching, AES-256-CBC decryption, and reader orchestration. | [decompressor.go](file:///home/hobe/software/rarengine/decompressor.go) |
+| **Decoding & Decompression** | LZ77 sliding window history, 10-bit direct-lookup Huffman tables, MSB bit reader, and V5 dynamic state-machine. | [decoder50.go](file:///home/hobe/software/rarengine/decoder50.go), [huffman.go](file:///home/hobe/software/rarengine/huffman.go), [bit_reader.go](file:///home/hobe/software/rarengine/bit_reader.go), [window.go](file:///home/hobe/software/rarengine/window.go) |
+| **Post-Processing Filters** | SIMD/Assembly x86 relative E8 branch relocation, ARM relocations, and byte-striping delta filters. | [filters.go](file:///home/hobe/software/rarengine/filters.go), `filter_arm_amd64.s`, `filter_e8_amd64.s` |
+| **Header Parsing & Traversal Safe** | RAR5 block, file, and archive header parsers. OS-independent traversal sanitization. | [header.go](file:///home/hobe/software/rarengine/header.go), [vint.go](file:///home/hobe/software/rarengine/vint.go) |
+| **High-Level Unpack Utility** | Sandboxed directory extraction using Go 1.24+ `os.OpenRoot` safe directory jails. | [unpack.go](file:///home/hobe/software/rarengine/unpack.go) |
+
+### Churn Hotspots & Biomarkers
+
+- **`decompressor.go`**: Sequential volume orchestrator (High Churn).
+- **`decoder50.go`**: Core decompression hot-path loop. Most complex engine logic.
+- **`unpack.go`**: High-level sandboxed directory unpacking (`UnpackDir`).
+- **`header.go`**: Complex block and file header parsing (`ParseFileHeader`, `ReadBlockHeader`).
+
+### Repowise MCP Server Usage
+
+If the Repowise MCP server is loaded, use the following specialized tools instead of manual grepping when resolving architectural or dependency questions:
+
+- `get_answer(question)`: Synthesizes high-level explanations with citations.
+- `get_context(targets=[...])`: Checks file/symbol summaries, signatures, and decision record associations.
+- `get_symbol("file::Name")`: Extracts raw source code bytes of a specific symbol.
+- `search_codebase(query, kind?)`: Finds code segments using conceptual embedding-based search.
+- `get_why(query, targets?)`: Retrieves historical architectural decisions and ADR rationales.
+- `get_risk(targets, changed_files?)`: Analyzes churn, blast radius, and potential regressions.
+- `get_dead_code(...)`: Identifies unused exports and dead code fragments.
+- `get_overview()`: Maps out the overall layout of the codebase.
+
