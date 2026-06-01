@@ -102,6 +102,114 @@ func readVolumeIndex(r io.Reader) (int, error) {
 // UnpackDir automatically discovers, sorts, opens, and extracts a set of RAR5
 // archive volume files from the same directory starting at firstVolumePath.
 // It returns a slice of absolute paths of all successfully extracted files.
+// setupSandbox prepares the target output directory and opens a sandboxed os.Root jail.
+func setupSandbox(outputDir string) (*os.Root, string, error) {
+	// Resolve canonical absolute outputDir path (handles symlinks safely)
+	absOutputDir, err := filepath.EvalSymlinks(outputDir)
+	if err != nil {
+		absOutputDir, err = filepath.Abs(outputDir)
+		if err != nil {
+			return nil, "", fmt.Errorf("rarengine: resolve output path: %w", err)
+		}
+	}
+
+	if err := os.MkdirAll(absOutputDir, 0755); err != nil { // #nosec G301
+		return nil, "", fmt.Errorf("rarengine: create output dir: %w", err)
+	}
+
+	root, err := os.OpenRoot(absOutputDir)
+	if err != nil {
+		return nil, "", fmt.Errorf("rarengine: sandbox output dir: %w", err)
+	}
+	return root, absOutputDir, nil
+}
+
+// openVolumeChannel opens volume file handles sequentially and pushes them to a buffered channel.
+func openVolumeChannel(sortedVols []string) (chan io.ReadCloser, error) {
+	volumesChan := make(chan io.ReadCloser, len(sortedVols))
+	for _, volPath := range sortedVols {
+		vf, err := os.Open(volPath) // #nosec G304
+		if err != nil {
+			close(volumesChan)
+			for v := range volumesChan {
+				_ = v.Close()
+			}
+			return nil, fmt.Errorf("rarengine: open volume %s: %w", volPath, err)
+		}
+		volumesChan <- vf
+	}
+	close(volumesChan)
+	return volumesChan, nil
+}
+
+// extractEntry extracts a single decompressed entry into the sandboxed root.
+func extractEntry(ctx context.Context, root *os.Root, sd *StreamDecompressor, header *FileHeader, opts UnpackOptions, absOutputDir string, logger *slog.Logger) (string, error) {
+	var destRel string
+	if opts.OneFolder {
+		destRel = filepath.Base(header.Name)
+	} else {
+		destRel = header.Name
+	}
+
+	if opts.OneFolder && !opts.OverwriteFiles {
+		destRel = uniquePath(root, destRel)
+	}
+
+	// Convert slashes to host-native separators for relative path (needed for Windows)
+	destRel = filepath.FromSlash(destRel)
+
+	logger.Info("rarengine: extracting entry", "name", header.Name, "target_rel", destRel, "size", header.UnpackedSize, "is_dir", header.IsDir)
+
+	if header.IsDir {
+		if !opts.OneFolder {
+			if err := root.MkdirAll(destRel, 0750); err != nil {
+				return "", fmt.Errorf("rarengine: mkdir %s: %w", destRel, err)
+			}
+		}
+		return "", nil
+	}
+
+	if !opts.OverwriteFiles {
+		if _, statErr := root.Stat(destRel); statErr == nil {
+			logger.Info("rarengine: skipping existing file", "path", destRel)
+			return "", nil
+		}
+	}
+
+	if opts.OnEntry != nil {
+		opts.OnEntry(header)
+	}
+
+	if err := root.MkdirAll(filepath.Dir(destRel), 0750); err != nil {
+		return "", fmt.Errorf("rarengine: mkdir parent %s: %w", filepath.Dir(destRel), err)
+	}
+
+	out, err := root.OpenFile(destRel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+	if err != nil {
+		return "", fmt.Errorf("rarengine: create file %s: %w", destRel, err)
+	}
+
+	n, err := io.Copy(out, &contextReader{ctx: ctx, r: sd})
+	_ = out.Close()
+	if err != nil {
+		return "", fmt.Errorf("rarengine: write file %s: %w", destRel, err)
+	}
+
+	mode := header.Mode() & 0666
+	if mode != 0 && header.HostOS != 0 {
+		_ = root.Chmod(destRel, mode)
+	}
+
+	if !opts.IgnoreUnrarDates && !header.ModificationTime.IsZero() {
+		_ = root.Chtimes(destRel, header.ModificationTime, header.ModificationTime)
+	}
+
+	absPath := filepath.Join(absOutputDir, destRel)
+	logger.Info("rarengine: extracted entry complete", "name", header.Name, "written_bytes", n)
+	return absPath, nil
+}
+
+// UnpackDir extracts a RAR archive sequentially from the first volume path into the output directory.
 func UnpackDir(ctx context.Context, firstVolumePath string, outputDir string, opts UnpackOptions) ([]string, error) {
 	logger := opts.Logger
 	if logger == nil {
@@ -126,38 +234,16 @@ func UnpackDir(ctx context.Context, firstVolumePath string, outputDir string, op
 	}
 	logger.Info("rarengine: sorted volumes order", "paths", sortedVols)
 
-	// Resolve canonical absolute outputDir path (handles symlinks safely)
-	absOutputDir, err := filepath.EvalSymlinks(outputDir)
+	root, absOutputDir, err := setupSandbox(outputDir)
 	if err != nil {
-		absOutputDir, err = filepath.Abs(outputDir)
-		if err != nil {
-			return nil, fmt.Errorf("rarengine: resolve output path: %w", err)
-		}
-	}
-
-	if err := os.MkdirAll(absOutputDir, 0755); err != nil { // #nosec G301
-		return nil, fmt.Errorf("rarengine: create output dir: %w", err)
-	}
-
-	root, err := os.OpenRoot(absOutputDir)
-	if err != nil {
-		return nil, fmt.Errorf("rarengine: sandbox output dir: %w", err)
+		return nil, err
 	}
 	defer func() { _ = root.Close() }()
 
-	volumesChan := make(chan io.ReadCloser, len(sortedVols))
-	for _, volPath := range sortedVols {
-		vf, err := os.Open(volPath) // #nosec G304
-		if err != nil {
-			close(volumesChan)
-			for v := range volumesChan {
-				_ = v.Close()
-			}
-			return nil, fmt.Errorf("rarengine: open volume %s: %w", volPath, err)
-		}
-		volumesChan <- vf
+	volumesChan, err := openVolumeChannel(sortedVols)
+	if err != nil {
+		return nil, err
 	}
-	close(volumesChan)
 
 	sd := NewStreamDecompressor(volumesChan)
 	if opts.Password != "" {
@@ -179,70 +265,13 @@ func UnpackDir(ctx context.Context, firstVolumePath string, outputDir string, op
 			return nil, fmt.Errorf("rarengine: read next file: %w", err)
 		}
 
-		var destRel string
-		if opts.OneFolder {
-			destRel = filepath.Base(header.Name)
-		} else {
-			destRel = header.Name
-		}
-
-		if opts.OneFolder && !opts.OverwriteFiles {
-			destRel = uniquePath(root, destRel)
-		}
-
-		// Convert slashes to host-native separators for relative path (needed for Windows)
-		destRel = filepath.FromSlash(destRel)
-
-		logger.Info("rarengine: extracting entry", "name", header.Name, "target_rel", destRel, "size", header.UnpackedSize, "is_dir", header.IsDir)
-
-		if header.IsDir {
-			if !opts.OneFolder {
-				if err := root.MkdirAll(destRel, 0750); err != nil {
-					return nil, fmt.Errorf("rarengine: mkdir %s: %w", destRel, err)
-				}
-			}
-			continue
-		}
-
-		if !opts.OverwriteFiles {
-			if _, statErr := root.Stat(destRel); statErr == nil {
-				logger.Info("rarengine: skipping existing file", "path", destRel)
-				continue
-			}
-		}
-
-		if opts.OnEntry != nil {
-			opts.OnEntry(header)
-		}
-
-		if err := root.MkdirAll(filepath.Dir(destRel), 0750); err != nil {
-			return nil, fmt.Errorf("rarengine: mkdir parent %s: %w", filepath.Dir(destRel), err)
-		}
-
-		out, err := root.OpenFile(destRel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+		filePath, err := extractEntry(ctx, root, sd, header, opts, absOutputDir, logger)
 		if err != nil {
-			return nil, fmt.Errorf("rarengine: create file %s: %w", destRel, err)
+			return nil, err
 		}
-
-		n, err := io.Copy(out, &contextReader{ctx: ctx, r: sd})
-		_ = out.Close()
-		if err != nil {
-			return nil, fmt.Errorf("rarengine: write file %s: %w", destRel, err)
+		if filePath != "" {
+			extractedFiles = append(extractedFiles, filePath)
 		}
-
-		mode := header.Mode() & 0666
-		if mode != 0 && header.HostOS != 0 {
-			_ = root.Chmod(destRel, mode)
-		}
-
-		if !opts.IgnoreUnrarDates && !header.ModificationTime.IsZero() {
-			_ = root.Chtimes(destRel, header.ModificationTime, header.ModificationTime)
-		}
-
-		absPath := filepath.Join(absOutputDir, destRel)
-		extractedFiles = append(extractedFiles, absPath)
-
-		logger.Info("rarengine: extracted entry complete", "name", header.Name, "written_bytes", n)
 	}
 
 	logger.Info("rarengine: extraction pipeline complete", "extracted_count", len(extractedFiles))
