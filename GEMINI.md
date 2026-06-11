@@ -149,17 +149,24 @@ go tool pprof cpu.prof
 go tool pprof -alloc_objects mem.prof
 ```
 
-### Red-Green Discipline (write the failing test first)
+### Red-Green Discipline & Manual Mutation Proof
 
-**Every bug fix and every regression test MUST be proven to fail on the unpatched code before the fix lands.** A test that already passes against the buggy code does not test the fix — it is a change-detector that will silently let the bug return. A passing test is not evidence until you have seen it fail for the right reason.
+**Every bug fix, regression test, and new feature path MUST be proven to fail under mutation or unpatched states before the code is finalized.** A test that passes against both the original and mutated/buggy code does not test the logic — it is a false positive that will silently permit regressions.
 
+#### 1. For Bug Fixes and Regressions (Red-Green)
 The required order for any fix:
+1. **Write the test first**, encoding the *correct* expected behavior (not the current buggy output — assert what the code *should* do, with an independent oracle where possible).
+2. **Run it against the unfixed code and watch it FAIL.** The failure message must fail because of the targeted bug, not a configuration issue or a compilation error.
+3. **Apply the fix**, confirm the test now passes, and verify the rest of the test suite stays green.
 
-1. **Write the test first**, encoding the *correct* expected behavior (not the current output — assert what the code *should* do, with an independent oracle where possible).
-2. **Run it against the unfixed code and watch it FAIL.** For a pre-existing bug, write the test before touching the code. For a regression guard added alongside a fix, stash or revert the fix and confirm the test goes red. Read the failure message — it must fail because of the bug, not a typo or wrong setup.
-3. **Apply the fix**, confirm the test now passes, and confirm the rest of the suite stays green.
+**The pre-commit check**: Mentally (or actually) revert the fix and confirm the new test fails. If it still passes, the test is exercising the wrong branch or input — fix the *test*, not just the code.
 
-**The cheap pre-commit check for any `fix:` + `test:` pair:** mentally (or actually) revert the fix and confirm the new test fails. If it still passes, the test is exercising the wrong branch or input — fix the *test*, not just the code. The fix and its test belong in the same change so this is verifiable.
+#### 2. For New Features and Logic Paths (Manual Mutation Proof)
+For new features (`feat`), there is no pre-existing bug to reproduce. To ensure new logic is actually covered and asserted:
+1. **Write the code and tests** covering all normal, boundary, and error branches.
+2. **Introduce manual mutations**: Temporarily break the new code logic (e.g., flip comparison operators, shift length check boundaries by 1, comment out side-effects or timestamp writes).
+3. **Run the new tests and watch them FAIL (go red).** If the tests still pass, you have a test gap. Improve your assertions until the mutated logic causes a test failure.
+4. **Restore the code** to confirm the tests pass (go green).
 
 **For de-flaking concurrency/timing tests**, the analogous proof is `go test -race -count=N` (N ≥ 50, ideally also under `GOMAXPROCS=1`): a single green run does not prove a flaky test is fixed, because a flaky test passes most of the time by definition. Replace synchronization `time.Sleep` calls with a deterministic signal (channel, `sync.WaitGroup`, or a poll-until-condition helper); leave only genuine timing windows (mock latency, negative-observation windows) and document each as intentional.
 
