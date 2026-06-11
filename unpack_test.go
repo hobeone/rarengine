@@ -144,6 +144,78 @@ func TestUnpackDir_Options(t *testing.T) {
 	}
 }
 
+func TestUnpackDir_OverwriteAndDates(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "rarengine_overwrite_test")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	firstVolume := filepath.Join("testdata", "rar5_multi.part01.rar")
+
+	// 1. Extract with default options (OverwriteFiles = false, IgnoreUnrarDates = false)
+	opts := UnpackOptions{
+		OverwriteFiles:   false,
+		IgnoreUnrarDates: false,
+	}
+
+	files, err := UnpackDir(context.Background(), firstVolume, tmpDir, opts)
+	if err != nil {
+		t.Fatalf("UnpackDir failed: %v", err)
+	}
+
+	if len(files) != 1 {
+		t.Fatalf("expected 1 file, got %v", files)
+	}
+
+	extractedFile := files[0]
+	stat, err := os.Stat(extractedFile)
+	if err != nil {
+		t.Fatalf("failed to stat extracted file: %v", err)
+	}
+
+	// The modification time should be non-zero
+	if stat.ModTime().IsZero() {
+		t.Error("expected non-zero modification time")
+	}
+
+	// 2. Try to extract again with OverwriteFiles = false. It should skip and return an empty slice.
+	filesSkip, err := UnpackDir(context.Background(), firstVolume, tmpDir, opts)
+	if err != nil {
+		t.Fatalf("UnpackDir failed: %v", err)
+	}
+	if len(filesSkip) != 0 {
+		t.Errorf("expected 0 files (skipped), got %v", filesSkip)
+	}
+
+	// 3. Extract to a new folder with IgnoreUnrarDates = true. ModTime should be different from archive metadata.
+	tmpDir2, err := os.MkdirTemp("", "rarengine_dates_test")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir2) }()
+
+	optsIgnoreDates := UnpackOptions{
+		IgnoreUnrarDates: true,
+	}
+	filesDates, err := UnpackDir(context.Background(), firstVolume, tmpDir2, optsIgnoreDates)
+	if err != nil {
+		t.Fatalf("UnpackDir failed: %v", err)
+	}
+	if len(filesDates) != 1 {
+		t.Fatalf("expected 1 file, got %v", filesDates)
+	}
+
+	statDates, err := os.Stat(filesDates[0])
+	if err != nil {
+		t.Fatalf("failed to stat extracted file: %v", err)
+	}
+
+	if statDates.ModTime().Equal(stat.ModTime()) {
+		t.Errorf("expected mod times to be different under IgnoreUnrarDates, got equal mod times: %v", statDates.ModTime())
+	}
+}
+
 func TestSortVolumes_ResilientFallback(t *testing.T) {
 	input := []string{
 		"rar5_multi.part03.rar",
@@ -255,5 +327,32 @@ func TestOpenVolumeChannel_Error(t *testing.T) {
 	_, err = openVolumeChannel(vols)
 	if err == nil {
 		t.Errorf("expected openVolumeChannel to return an error, got nil")
+	}
+}
+
+func TestSortVolumes_Classic(t *testing.T) {
+	input := []string{
+		"archive.r01",
+		"archive.rar",
+		"archive.r00",
+		"archive.r10",
+		"archive.r09",
+	}
+
+	expected := []string{
+		"archive.rar",
+		"archive.r00",
+		"archive.r01",
+		"archive.r09",
+		"archive.r10",
+	}
+
+	sorted, err := SortVolumes(input)
+	if err != nil {
+		t.Fatalf("SortVolumes failed: %v", err)
+	}
+
+	if !reflect.DeepEqual(sorted, expected) {
+		t.Errorf("SortVolumes output mismatch:\nexpected: %v\ngot:      %v", expected, sorted)
 	}
 }
