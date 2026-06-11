@@ -1,0 +1,25 @@
+# Build / coverage artifacts
+*.test
+*.out
+coverage.txt
+coverage.html
+
+# Editor / OS metadata
+.idea/
+.vscode/
+.DS_Store
+*.swp
+
+/Downloads
+/.jet*
+.antigravitycli
+/vendor/
+
+# repowise
+.repowise/
+.agents/
+.claude/
+.mcp.json
+
+# repowise API keys (local)
+.repowise/.env
