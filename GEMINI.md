@@ -149,6 +149,20 @@ go tool pprof cpu.prof
 go tool pprof -alloc_objects mem.prof
 ```
 
+### Red-Green Discipline (write the failing test first)
+
+**Every bug fix and every regression test MUST be proven to fail on the unpatched code before the fix lands.** A test that already passes against the buggy code does not test the fix — it is a change-detector that will silently let the bug return. A passing test is not evidence until you have seen it fail for the right reason.
+
+The required order for any fix:
+
+1. **Write the test first**, encoding the *correct* expected behavior (not the current output — assert what the code *should* do, with an independent oracle where possible).
+2. **Run it against the unfixed code and watch it FAIL.** For a pre-existing bug, write the test before touching the code. For a regression guard added alongside a fix, stash or revert the fix and confirm the test goes red. Read the failure message — it must fail because of the bug, not a typo or wrong setup.
+3. **Apply the fix**, confirm the test now passes, and confirm the rest of the suite stays green.
+
+**The cheap pre-commit check for any `fix:` + `test:` pair:** mentally (or actually) revert the fix and confirm the new test fails. If it still passes, the test is exercising the wrong branch or input — fix the *test*, not just the code. The fix and its test belong in the same change so this is verifiable.
+
+**For de-flaking concurrency/timing tests**, the analogous proof is `go test -race -count=N` (N ≥ 50, ideally also under `GOMAXPROCS=1`): a single green run does not prove a flaky test is fixed, because a flaky test passes most of the time by definition. Replace synchronization `time.Sleep` calls with a deterministic signal (channel, `sync.WaitGroup`, or a poll-until-condition helper); leave only genuine timing windows (mock latency, negative-observation windows) and document each as intentional.
+
 ### Commit Convention
 
 All commits must follow [Conventional Commits 1.0.0](https://www.conventionalcommits.org/):
