@@ -1,0 +1,139 @@
+package rarengine_test
+
+import (
+	"bytes"
+	"io"
+	"net/http"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/hobeone/rarengine"
+)
+
+func downloadTestFile(t *testing.T, filename string) []byte {
+	t.Helper()
+	url := "https://raw.githubusercontent.com/ssokolow/rar-test-files/master/build/" + filename
+	client := &http.Client{
+		Timeout: 15 * time.Second,
+	}
+	resp, err := client.Get(url)
+	if err != nil {
+		t.Skipf("Skipping test; network request failed: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Skipf("Skipping test; server returned status: %s", resp.Status)
+	}
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("Failed to read downloaded data: %v", err)
+	}
+	return data
+}
+
+func TestIntegration_Download_RAR5(t *testing.T) {
+	data := downloadTestFile(t, "testfile.rar5.rar")
+
+	volumes := make(chan io.ReadCloser, 1)
+	volumes <- io.NopCloser(bytes.NewReader(data))
+	close(volumes)
+
+	sd := rarengine.NewStreamDecompressor(volumes)
+	fh, err := sd.Next()
+	if err != nil {
+		t.Fatalf("Next() failed: %v", err)
+	}
+
+	if sd.Version() != rarengine.VersionRAR5 {
+		t.Errorf("expected version RAR5, got %v", sd.Version())
+	}
+	if sd.Version().String() != "RAR5" {
+		t.Errorf("expected version string 'RAR5', got %q", sd.Version().String())
+	}
+
+	if fh.Name != "testfile.txt" {
+		t.Errorf("expected filename 'testfile.txt', got %q", fh.Name)
+	}
+
+	buf, err := io.ReadAll(sd)
+	if err != nil {
+		t.Fatalf("ReadAll failed: %v", err)
+	}
+
+	expectedContent := "Testing 123\n"
+	if string(buf) != expectedContent {
+		t.Errorf("expected content %q, got %q", expectedContent, string(buf))
+	}
+}
+
+func TestIntegration_Download_RAR5_Solid(t *testing.T) {
+	data := downloadTestFile(t, "testfile.rar5.solid.rar")
+
+	volumes := make(chan io.ReadCloser, 1)
+	volumes <- io.NopCloser(bytes.NewReader(data))
+	close(volumes)
+
+	sd := rarengine.NewStreamDecompressor(volumes)
+	fh, err := sd.Next()
+	if err != nil {
+		t.Fatalf("Next() failed: %v", err)
+	}
+
+	if fh.Name != "testfile.txt" {
+		t.Errorf("expected filename 'testfile.txt', got %q", fh.Name)
+	}
+
+	buf, err := io.ReadAll(sd)
+	if err != nil {
+		t.Fatalf("ReadAll failed: %v", err)
+	}
+
+	expectedContent := "Testing 123\n"
+	if string(buf) != expectedContent {
+		t.Errorf("expected content %q, got %q", expectedContent, string(buf))
+	}
+}
+
+func TestIntegration_Download_RAR3(t *testing.T) {
+	data := downloadTestFile(t, "testfile.rar3.rar")
+
+	volumes := make(chan io.ReadCloser, 1)
+	volumes <- io.NopCloser(bytes.NewReader(data))
+	close(volumes)
+
+	sd := rarengine.NewStreamDecompressor(volumes)
+	fh, err := sd.Next()
+	if err != nil {
+		t.Fatalf("Next() failed: %v", err)
+	}
+
+	if sd.Version() != rarengine.VersionRAR3 {
+		t.Errorf("expected version RAR3, got %v", sd.Version())
+	}
+	if sd.Version().String() != "RAR3" {
+		t.Errorf("expected version string 'RAR3', got %q", sd.Version().String())
+	}
+
+	if fh.Name != "testfile.txt" {
+		t.Errorf("expected filename 'testfile.txt', got %q", fh.Name)
+	}
+	if fh.UnpackedSize != 12 {
+		t.Errorf("expected UnpackedSize 12, got %d", fh.UnpackedSize)
+	}
+	if fh.PackedSize != 27 {
+		t.Errorf("expected PackedSize 27, got %d", fh.PackedSize)
+	}
+
+	// Because Method is 5 (compressed), reading should return an error indicating method not implemented
+	buf, err := io.ReadAll(sd)
+	if err == nil {
+		t.Fatalf("expected Read to fail for Method 5, but succeeded with content: %q", string(buf))
+	}
+
+	if !strings.Contains(err.Error(), "compression method 5 not implemented") {
+		t.Errorf("expected 'compression method 5 not implemented' error, got %q", err.Error())
+	}
+}

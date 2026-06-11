@@ -8,7 +8,6 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
-	"fmt"
 	"io"
 )
 
@@ -19,25 +18,50 @@ var (
 	ErrRarBombDetected       = errors.New("rarengine: possible RAR-bomb detected")
 )
 
+type ArchiveVersion int
+
+const (
+	VersionUnknown ArchiveVersion = iota
+	VersionRAR3
+	VersionRAR5
+)
+
+func (v ArchiveVersion) String() string {
+	switch v {
+	case VersionRAR3:
+		return "RAR3"
+	case VersionRAR5:
+		return "RAR5"
+	default:
+		return "Unknown"
+	}
+}
+
+type versionedEngine interface {
+	Next() (*FileHeader, error)
+	Read(p []byte) (int, error)
+}
+
 // StreamDecompressor implements a sequential, tar-like reader for extracting RAR archives on-the-fly.
 type StreamDecompressor struct {
-	volumes        <-chan io.ReadCloser
-	currentVol     io.ReadCloser
-	currHeader     *FileHeader
-	currReader     io.Reader
-	win            *Window
-	dec50          *decoder50
-	password       string
-	lzReader       lz50Reader
-	stReader       storeReader
-	mvReader       multiVolumePayloadReader
-	limitPr        io.LimitedReader
-	bytesRemaining int64
+	volumes    <-chan io.ReadCloser
+	currentVol io.ReadCloser
+	currHeader *FileHeader
+	currReader io.Reader
+	version    ArchiveVersion
+	engine     versionedEngine
+	win        *Window
+	password   string
 }
 
 // SetPassword configures the decryption password for encrypted RAR archives.
 func (sd *StreamDecompressor) SetPassword(password string) {
 	sd.password = password
+}
+
+// Version returns the detected archive version (RAR3 or RAR5) of the active stream.
+func (sd *StreamDecompressor) Version() ArchiveVersion {
+	return sd.version
 }
 
 type errorReader struct {
@@ -53,11 +77,10 @@ func NewStreamDecompressor(volumes <-chan io.ReadCloser) *StreamDecompressor {
 	return &StreamDecompressor{
 		volumes: volumes,
 		win:     NewWindow(32 * 1024 * 1024), // 32MB sliding window history
-		dec50:   newDecoder50(),
 	}
 }
 
-// Reset reconfigures the decompressor for a new stream, reusing the sliding window and decoder.
+// Reset reconfigures the decompressor for a new stream, reusing the sliding window.
 func (sd *StreamDecompressor) Reset(volumes <-chan io.ReadCloser) {
 	if sd.currentVol != nil {
 		_ = sd.currentVol.Close()
@@ -66,6 +89,8 @@ func (sd *StreamDecompressor) Reset(volumes <-chan io.ReadCloser) {
 	sd.volumes = volumes
 	sd.currHeader = nil
 	sd.currReader = nil
+	sd.version = VersionUnknown
+	sd.engine = nil
 	sd.win.Reset(false)
 }
 
@@ -81,260 +106,67 @@ func (sd *StreamDecompressor) nextVolume() error {
 	}
 	sd.currentVol = vol
 
-	// Validate RAR5 magic signature: 0x52 0x61 0x72 0x21 0x1a 0x07 0x01 0x00
-	var magic [8]byte
-	_, err := io.ReadFull(sd.currentVol, magic[:])
+	version, err := detectVersion(sd.currentVol)
 	if err != nil {
 		return err
 	}
-	expectedMagic := []byte{0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x01, 0x00}
-	if !bytes.Equal(magic[:], expectedMagic) {
-		return errors.New("rarengine: invalid RAR5 magic signature")
+
+	sd.version = version
+	if sd.engine == nil {
+		switch version {
+		case VersionRAR5:
+			sd.engine = newRAR5Engine(sd)
+		case VersionRAR3:
+			sd.engine = newRAR3Engine(sd)
+		}
 	}
 
 	return nil
 }
 
-// drainPrevious discards any remaining unread bytes of the previous file payload.
-func (sd *StreamDecompressor) drainPrevious() error {
-	if sd.currReader != nil {
-		if _, err := io.Copy(io.Discard, sd.currReader); err != nil {
-			sd.currReader = nil
-			return fmt.Errorf("rarengine: draining previous file: %w", err)
-		}
-		sd.currReader = nil
+func detectVersion(r io.Reader) (ArchiveVersion, error) {
+	var magic [7]byte
+	_, err := io.ReadFull(r, magic[:])
+	if err != nil {
+		return VersionUnknown, err
 	}
-	return nil
-}
+	expectedMagicStart := []byte{0x52, 0x61, 0x72, 0x21, 0x1a, 0x07}
+	if !bytes.Equal(magic[:6], expectedMagicStart) {
+		return VersionUnknown, errors.New("rarengine: invalid RAR magic signature")
+	}
 
-// processHeader handles a single parsed block header in the main Next loop.
-func (sd *StreamDecompressor) processHeader(h *BlockHeader) (*FileHeader, bool, error) {
-	switch h.Type {
-	case HeaderTypeArchive:
-		if _, err := ParseArchiveHeader(h); err != nil {
-			return nil, false, err
-		}
-
-	case HeaderTypeFile, HeaderTypeService:
-		fh, err := ParseFileHeader(h)
+	if magic[6] == 0x00 {
+		return VersionRAR3, nil
+	}
+	if magic[6] == 0x01 {
+		var lastByte [1]byte
+		_, err = io.ReadFull(r, lastByte[:])
 		if err != nil {
-			return nil, false, err
+			return VersionUnknown, err
 		}
-
-		if !fh.FirstBlock {
-			// Skip the payload of the continuation block and find the next file
-			if _, err = io.Copy(io.Discard, io.LimitReader(sd.currentVol, fh.PackedSize)); err != nil {
-				return nil, false, err
-			}
-			return nil, true, nil
-		}
-
-		// Compression Bomb (RAR-bomb) Protection: reject >1000x ratios for files > 1MB
-		if fh.UnpackedSize > 1024*1024 && fh.UnpackedSize > 1000*fh.PackedSize {
-			return nil, false, ErrRarBombDetected
-		}
-
-		sd.win.Reset(fh.Solid)
-
-		sd.limitPr.R = sd.currentVol
-		sd.limitPr.N = fh.PackedSize
-
-		sd.currHeader = fh
-		sd.bytesRemaining = fh.UnpackedSize
-		sd.currReader = sd.newDecompressionReader(fh, &sd.limitPr)
-		return fh, false, nil
-
-	case HeaderTypeEnd:
-		// Transition directly to the next volume
-		if err := sd.nextVolume(); err != nil {
-			return nil, false, err
-		}
-	default:
-		if h.DataSize > 0 {
-			if _, err := io.Copy(io.Discard, io.LimitReader(sd.currentVol, h.DataSize)); err != nil {
-				return nil, false, err
-			}
+		if lastByte[0] == 0x00 {
+			return VersionRAR5, nil
 		}
 	}
-	return nil, true, nil
+	return VersionUnknown, errors.New("rarengine: invalid RAR magic signature")
 }
 
 // Next advances to the next file in the RAR archive stream, returning its header.
-// It returns io.EOF when all files in all volumes have been fully decompressed.
 func (sd *StreamDecompressor) Next() (*FileHeader, error) {
-	// 1. Drain the previous file payload if any remains unread to align the stream
-	if err := sd.drainPrevious(); err != nil {
-		return nil, err
-	}
-
-	// 2. Fetch the first volume if we haven't started yet
 	if sd.currentVol == nil {
 		if err := sd.nextVolume(); err != nil {
 			return nil, err
 		}
 	}
-
-	for {
-		h, err := ReadBlockHeader(sd.currentVol)
-		if err != nil {
-			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-				// Reached end of current volume stream, transition to next volume
-				if err := sd.nextVolume(); err != nil {
-					return nil, err // Returns ErrNoNextVolume (mapped to io.EOF by standard readers)
-				}
-				continue
-			}
-			return nil, err
-		}
-
-		fh, shouldContinue, err := sd.processHeader(h)
-		if err != nil {
-			return nil, err
-		}
-		if shouldContinue {
-			continue
-		}
-		return fh, nil
-	}
+	return sd.engine.Next()
 }
 
 // Read reads decompressed bytes from the current active file block.
 func (sd *StreamDecompressor) Read(p []byte) (int, error) {
-	if sd.currReader == nil {
+	if sd.engine == nil {
 		return 0, ErrNoActiveFile
 	}
-	if sd.bytesRemaining <= 0 {
-		return 0, io.EOF
-	}
-	if int64(len(p)) > sd.bytesRemaining {
-		p = p[:sd.bytesRemaining]
-	}
-	n, err := sd.currReader.Read(p)
-	sd.bytesRemaining -= int64(n)
-	if err == nil && sd.bytesRemaining <= 0 {
-		return n, io.EOF
-	}
-	return n, err
-}
-
-// processVolumePayloadHeader handles block headers while aligning continuation payloads.
-func (sd *StreamDecompressor) processVolumePayloadHeader(h *BlockHeader) (io.Reader, bool, error) {
-	switch h.Type {
-	case HeaderTypeArchive:
-		if _, err := ParseArchiveHeader(h); err != nil {
-			return nil, false, err
-		}
-	case HeaderTypeFile, HeaderTypeService:
-		fh, err := ParseFileHeader(h)
-		if err != nil {
-			return nil, false, err
-		}
-		sd.currHeader = fh
-		return io.LimitReader(sd.currentVol, fh.PackedSize), false, nil
-	case HeaderTypeEnd:
-		if err := sd.nextVolume(); err != nil {
-			return nil, false, err
-		}
-	default:
-		if h.DataSize > 0 {
-			if _, err := io.Copy(io.Discard, io.LimitReader(sd.currentVol, h.DataSize)); err != nil {
-				return nil, false, err
-			}
-		}
-	}
-	return nil, true, nil
-}
-
-// nextVolumePayload transitions to the next volume and searches for the continuation file header.
-func (sd *StreamDecompressor) nextVolumePayload() (io.Reader, error) {
-	if err := sd.nextVolume(); err != nil {
-		return nil, err
-	}
-	for {
-		h, err := ReadBlockHeader(sd.currentVol)
-		if err != nil {
-			return nil, err
-		}
-		r, shouldContinue, err := sd.processVolumePayloadHeader(h)
-		if err != nil {
-			return nil, err
-		}
-		if shouldContinue {
-			continue
-		}
-		return r, nil
-	}
-}
-
-type multiVolumePayloadReader struct {
-	sd *StreamDecompressor
-	r  io.Reader
-}
-
-func (mv *multiVolumePayloadReader) Read(p []byte) (int, error) {
-	if len(p) == 0 {
-		return 0, nil
-	}
-	for {
-		n, err := mv.r.Read(p)
-		if n > 0 {
-			return n, nil
-		}
-		if err == io.EOF {
-			if mv.sd.currHeader != nil && mv.sd.currHeader.LastBlock {
-				return 0, io.EOF
-			}
-			nextR, nextErr := mv.sd.nextVolumePayload()
-			if nextErr != nil {
-				return 0, nextErr
-			}
-			mv.r = nextR
-			continue
-		}
-		return 0, err
-	}
-}
-
-// newDecompressionReader returns the window-integrated reader for the file payload.
-func (sd *StreamDecompressor) newDecompressionReader(fh *FileHeader, pr io.Reader) io.Reader {
-	if fh.Encrypted {
-		if sd.password == "" {
-			return &errorReader{err: errors.New("rarengine: password required for encrypted file")}
-		}
-		const maxKdfCount = 24 // RAR5 spec maximum
-		if fh.KdfCount > maxKdfCount {
-			return &errorReader{err: fmt.Errorf("rarengine: KdfCount %d exceeds maximum %d", fh.KdfCount, maxKdfCount)}
-		}
-		iter := 1 << fh.KdfCount
-		passBytes := []byte(sd.password)
-		key, pswCheckVal := pbkdf2HmacSha256(passBytes, fh.Salt, iter)
-		if fh.EncCheck != nil {
-			if err := verifyEncCheck(pswCheckVal, fh.EncCheck); err != nil {
-				return &errorReader{err: err}
-			}
-		}
-		decPr, err := newCBCDecryptReader(pr, key, fh.IV)
-		if err != nil {
-			return &errorReader{err: err}
-		}
-		pr = decPr
-	}
-
-	sd.mvReader.sd = sd
-	sd.mvReader.r = pr
-
-	var r io.Reader
-	if fh.Method == 0 {
-		sd.stReader.r = &sd.mvReader
-		sd.stReader.win = sd.win
-		r = &sd.stReader
-	} else {
-		sd.dec50.init(&sd.mvReader, fh.FirstBlock)
-		sd.lzReader.dec = sd.dec50
-		sd.lzReader.win = sd.win
-		r = &sd.lzReader
-	}
-	return r
+	return sd.engine.Read(p)
 }
 
 type lz50Reader struct {

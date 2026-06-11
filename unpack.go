@@ -1,7 +1,6 @@
 package rarengine
 
 import (
-	"bytes"
 	"cmp"
 	"context"
 	"errors"
@@ -37,6 +36,14 @@ func SortVolumes(paths []string) ([]string, error) {
 	var parseFailed bool
 
 	for _, p := range paths {
+		if idx, ok := getClassicVolumeIndex(p); ok {
+			vols = append(vols, volumeInfo{
+				path:  p,
+				index: idx,
+			})
+			continue
+		}
+
 		f, err := os.Open(p) // #nosec G304
 		if err != nil {
 			parseFailed = true
@@ -73,30 +80,57 @@ func SortVolumes(paths []string) ([]string, error) {
 	return sorted, nil
 }
 
+func getClassicVolumeIndex(path string) (int, bool) {
+	if strings.Contains(strings.ToLower(path), ".part") {
+		return -1, false
+	}
+	ext := strings.ToLower(filepath.Ext(path))
+	if ext == ".rar" {
+		return 0, true
+	}
+	if len(ext) == 4 && ext[1] == 'r' && ext[2] >= '0' && ext[2] <= '9' && ext[3] >= '0' && ext[3] <= '9' {
+		var idx int
+		_, _ = fmt.Sscanf(ext[2:], "%d", &idx)
+		return idx + 1, true
+	}
+	return -1, false
+}
+
 func readVolumeIndex(r io.Reader) (int, error) {
-	var magic [8]byte
-	if _, err := io.ReadFull(r, magic[:]); err != nil {
-		return 0, err
-	}
-	expectedMagic := []byte{0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x01, 0x00}
-	if !bytes.Equal(magic[:], expectedMagic) {
-		return 0, errors.New("invalid RAR5 magic signature")
-	}
-
-	h, err := ReadBlockHeader(r)
+	version, err := detectVersion(r)
 	if err != nil {
 		return 0, err
 	}
 
-	ah, err := ParseArchiveHeader(h)
+	var h *BlockHeader
+	switch version {
+	case VersionRAR5:
+		h, err = ReadBlockHeader(r)
+	case VersionRAR3:
+		h, err = ReadRAR3BlockHeader(r)
+	default:
+		return 0, fmt.Errorf("unsupported RAR version: %v", version)
+	}
+
 	if err != nil {
 		return 0, err
 	}
 
-	if ah.VolumeNumber < 0 {
+	if version == VersionRAR5 {
+		ah, err := ParseArchiveHeader(h)
+		if err != nil {
+			return 0, err
+		}
+		if ah.VolumeNumber < 0 {
+			return 0, nil
+		}
+		return ah.VolumeNumber, nil
+	} else {
+		if h.Type != 0x73 {
+			return 0, errors.New("invalid archive header type")
+		}
 		return 0, nil
 	}
-	return ah.VolumeNumber, nil
 }
 
 // UnpackDir automatically discovers, sorts, opens, and extracts a set of RAR5
