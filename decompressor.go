@@ -16,6 +16,13 @@ var (
 	ErrUnexpectedVolumeBlock = errors.New("rarengine: unexpected block type in volume split transition")
 	ErrNoActiveFile          = errors.New("rarengine: no active file stream to read from")
 	ErrRarBombDetected       = errors.New("rarengine: possible RAR-bomb detected")
+
+	// ErrCRCMismatch is returned by Read once a file's fully decompressed
+	// content has been read, if its CRC32 doesn't match the value recorded
+	// in the RAR file header. Only checked when the header carries a CRC32
+	// (FileFlagHasCRC32) and VerifyCRC is enabled (the default). See
+	// SetVerifyCRC.
+	ErrCRCMismatch = errors.New("rarengine: decompressed content CRC32 does not match file header")
 )
 
 type ArchiveVersion int
@@ -52,11 +59,25 @@ type StreamDecompressor struct {
 	engine     versionedEngine
 	win        *Window
 	password   string
+	verifyCRC  bool
 }
 
 // SetPassword configures the decryption password for encrypted RAR archives.
 func (sd *StreamDecompressor) SetPassword(password string) {
 	sd.password = password
+}
+
+// SetVerifyCRC controls whether Read returns ErrCRCMismatch when a file's
+// decompressed content doesn't match the CRC32 recorded in its RAR header.
+// Enabled by default: a RAR archive's per-file CRC32 is the only signal
+// this library has that the bytes it decoded are actually correct — without
+// it, a structurally well-formed but content-corrupt archive (e.g. assembled
+// from an incomplete download) decodes "successfully" while silently
+// producing wrong data. Callers that want best-effort extraction regardless
+// of content correctness (e.g. salvaging whatever is recoverable from a
+// damaged archive) can disable verification explicitly.
+func (sd *StreamDecompressor) SetVerifyCRC(verify bool) {
+	sd.verifyCRC = verify
 }
 
 // Version returns the detected archive version (RAR3 or RAR5) of the active stream.
@@ -75,8 +96,9 @@ func (e *errorReader) Read(p []byte) (int, error) {
 // NewStreamDecompressor initializes the decompressor with a channel of incoming volume streams.
 func NewStreamDecompressor(volumes <-chan io.ReadCloser) *StreamDecompressor {
 	return &StreamDecompressor{
-		volumes: volumes,
-		win:     NewWindow(32 * 1024 * 1024), // 32MB sliding window history
+		volumes:   volumes,
+		win:       NewWindow(32 * 1024 * 1024), // 32MB sliding window history
+		verifyCRC: true,
 	}
 }
 

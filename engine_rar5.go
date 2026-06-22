@@ -3,6 +3,7 @@ package rarengine
 import (
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"io"
 )
 
@@ -14,6 +15,7 @@ type rar5Engine struct {
 	mvReader       multiVolumePayloadReader
 	limitPr        io.LimitedReader
 	bytesRemaining int64
+	crc            uint32
 }
 
 func newRAR5Engine(sd *StreamDecompressor) *rar5Engine {
@@ -62,11 +64,33 @@ func (re *rar5Engine) Read(p []byte) (int, error) {
 		p = p[:re.bytesRemaining]
 	}
 	n, err := re.sd.currReader.Read(p)
+	re.crc = crc32.Update(re.crc, crc32.IEEETable, p[:n])
 	re.bytesRemaining -= int64(n)
 	if err == nil && re.bytesRemaining <= 0 {
+		if crcErr := re.checkCRC(); crcErr != nil {
+			return n, crcErr
+		}
 		return n, io.EOF
 	}
 	return n, err
+}
+
+// checkCRC compares the running CRC32 of this file's decompressed content
+// against the value recorded in its RAR header, once all bytes have been
+// read. A no-op when verification is disabled or the header carries no
+// CRC32 (FileFlagHasCRC32 unset).
+func (re *rar5Engine) checkCRC() error {
+	if !re.sd.verifyCRC {
+		return nil
+	}
+	fh := re.sd.currHeader
+	if fh == nil || !fh.HasCRC32 {
+		return nil
+	}
+	if re.crc != fh.CRC32 {
+		return fmt.Errorf("%w: file %q: computed=%08x header=%08x", ErrCRCMismatch, fh.Name, re.crc, fh.CRC32)
+	}
+	return nil
 }
 
 func (re *rar5Engine) drainPrevious() error {
@@ -111,6 +135,7 @@ func (re *rar5Engine) processHeader(h *BlockHeader) (*FileHeader, bool, error) {
 
 		re.sd.currHeader = fh
 		re.bytesRemaining = fh.UnpackedSize
+		re.crc = 0
 		re.sd.currReader = re.newDecompressionReader(fh, &re.limitPr)
 		return fh, false, nil
 
