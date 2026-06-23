@@ -248,7 +248,7 @@ func (mv *multiVolumePayloadReader) Read(p []byte) (int, error) {
 func (re *rar5Engine) newDecompressionReader(fh *FileHeader, pr io.Reader) io.Reader {
 	if fh.Encrypted {
 		if re.sd.password == "" {
-			return &errorReader{err: errors.New("rarengine: password required for encrypted file")}
+			return &errorReader{err: ErrPasswordRequired}
 		}
 		const maxKdfCount = 24
 		if fh.KdfCount > maxKdfCount {

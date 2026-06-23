@@ -23,6 +23,18 @@ var (
 	// (FileFlagHasCRC32) and VerifyCRC is enabled (the default). See
 	// SetVerifyCRC.
 	ErrCRCMismatch = errors.New("rarengine: decompressed content CRC32 does not match file header")
+
+	// ErrWrongPassword is returned when an encrypted file's password check
+	// value (PSWCHECK) doesn't match the supplied password. Wrap-checked
+	// via errors.Is so callers can distinguish a bad password from other
+	// decompression failures without parsing error text.
+	ErrWrongPassword = errors.New("rarengine: wrong password or corrupt encryption data")
+
+	// ErrPasswordRequired is returned when a file's header is encrypted but
+	// no password was supplied. Callers that want to treat "no password
+	// given" the same as "wrong password" (e.g. to prompt for one) can
+	// check for either with errors.Is.
+	ErrPasswordRequired = errors.New("rarengine: password required for encrypted file")
 )
 
 type ArchiveVersion int
@@ -326,7 +338,7 @@ func verifyEncCheck(pswCheckVal, encCheck []byte) error {
 		expected[i%8] ^= pswCheckVal[i]
 	}
 	if !bytes.Equal(encCheck[:8], expected[:]) {
-		return errors.New("rarengine: wrong password or corrupt encryption data")
+		return ErrWrongPassword
 	}
 	return nil
 }
