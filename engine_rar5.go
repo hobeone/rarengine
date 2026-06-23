@@ -16,6 +16,11 @@ type rar5Engine struct {
 	limitPr        io.LimitedReader
 	bytesRemaining int64
 	crc            uint32
+	// headerDec decrypts subsequent header blocks once a HEAD_CRYPT header
+	// (archive-level header encryption) has been seen. nil means headers
+	// are plaintext. Not reset across volumes -- multi-volume archives with
+	// header encryption are not currently supported.
+	headerDec *headerDecrypter
 }
 
 func newRAR5Engine(sd *StreamDecompressor) *rar5Engine {
@@ -31,7 +36,7 @@ func (re *rar5Engine) Next() (*FileHeader, error) {
 	}
 
 	for {
-		h, err := ReadBlockHeader(re.sd.currentVol)
+		h, err := re.readBlockHeader()
 		if err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 				if err := re.sd.nextVolume(); err != nil {
@@ -51,6 +56,16 @@ func (re *rar5Engine) Next() (*FileHeader, error) {
 		}
 		return fh, nil
 	}
+}
+
+// readBlockHeader reads the next header block, transparently decrypting it
+// if the archive's headers are encrypted (a HEAD_CRYPT header was already
+// seen and parsed by processHeader).
+func (re *rar5Engine) readBlockHeader() (*BlockHeader, error) {
+	if re.headerDec != nil {
+		return re.headerDec.readEncryptedBlockHeader(re.sd.currentVol)
+	}
+	return ReadBlockHeader(re.sd.currentVol)
 }
 
 func (re *rar5Engine) Read(p []byte) (int, error) {
@@ -138,6 +153,17 @@ func (re *rar5Engine) processHeader(h *BlockHeader) (*FileHeader, bool, error) {
 		re.crc = 0
 		re.sd.currReader = re.newDecompressionReader(fh, &re.limitPr)
 		return fh, false, nil
+
+	case HeaderTypeEncryption:
+		ch, err := ParseCryptHeader(h)
+		if err != nil {
+			return nil, false, err
+		}
+		key, err := headerKeyFromPassword(ch, re.sd.password)
+		if err != nil {
+			return nil, false, err
+		}
+		re.headerDec = &headerDecrypter{key: key}
 
 	case HeaderTypeEnd:
 		if err := re.sd.nextVolume(); err != nil {

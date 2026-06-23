@@ -171,7 +171,15 @@ func ReadBlockHeader(r io.Reader) (*BlockHeader, error) {
 		return nil, ErrBadHeaderCRC
 	}
 
-	// Parse fields
+	return parseBlockHeaderFields(buf, n)
+}
+
+// parseBlockHeaderFields decodes type, flags, payload, and extra records
+// from a header's already CRC-validated byte buffer (everything after the
+// CRC32 field). n is the byte length of the leading size vint within buf,
+// shared by both ReadBlockHeader's plaintext path and headerDecrypter's
+// decrypted-header path so the two don't duplicate this parsing logic.
+func parseBlockHeaderFields(buf []byte, n int) (*BlockHeader, error) {
 	payload := buf[n:]
 
 	hType, nType, err := DecodeVint(payload)
