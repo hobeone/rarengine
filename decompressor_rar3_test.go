@@ -6,7 +6,6 @@ import (
 	"errors"
 	"hash/crc32"
 	"io"
-	"strings"
 	"testing"
 )
 
@@ -226,10 +225,105 @@ func TestStreamDecompressor_RAR3_Salt(t *testing.T) {
 	}
 }
 
-func TestStreamDecompressor_RAR3_UnsupportedMethod(t *testing.T) {
-	content := []byte("hello rar3 compressed")
-	filename := "hello_rar3_comp.txt"
-	archiveData := makeRAR3CustomArchive(filename, content, 0, 0, 0, nil, 0x33)
+type bitWriter struct {
+	buf []byte
+	v   uint64
+	n   uint8
+}
+
+func (bw *bitWriter) writeBits(val uint32, bits uint8) {
+	for i := int(bits) - 1; i >= 0; i-- {
+		bit := (val >> uint(i)) & 1
+		bw.v = (bw.v << 1) | uint64(bit)
+		bw.n++
+		if bw.n == 8 {
+			bw.buf = append(bw.buf, byte(bw.v))
+			bw.v = 0
+			bw.n = 0
+		}
+	}
+}
+
+func (bw *bitWriter) flush() {
+	if bw.n > 0 {
+		bw.buf = append(bw.buf, byte(bw.v<<(8-bw.n)))
+		bw.v = 0
+		bw.n = 0
+	}
+}
+
+func TestStreamDecompressor_RAR3_LZ77_ExactDecompression(t *testing.T) {
+	// Construct a valid RAR3 LZ77 compressed payload bitstream for "hello rar3"
+	expectedText := "hello rar3"
+
+	var bw bitWriter
+	// 1. Header: mode bit 0 (LZ77), reuse bit 0 (fresh tables)
+	bw.writeBits(0, 1)
+	bw.writeBits(0, 1)
+
+	// 2. 20 bit lengths for levelDecoder (BC30 = 20): 4 bits per entry.
+	// Symbol 0 (length = 2 bits), Symbol 4 (length = 2 bits), Symbol 16 (length = 2 bits), others = 0
+	for i := range bc30 {
+		if i == 0 || i == 4 || i == 16 {
+			bw.writeBits(2, 4) // 2-bit code
+		} else {
+			bw.writeBits(0, 4) // 0-bit (unused)
+		}
+	}
+	// levelDecoder: sym 0 -> code '00', sym 4 -> code '01', sym 16 -> code '10'
+
+	// 3. 404 table levels encoded using levelDecoder
+	// We want active symbols in main table (299 symbols) to have 4-bit codes (level = 4).
+	// Symbols needed: 'h'(104), 'e'(101), 'l'(108), 'o'(111), ' '(32), 'r'(114), 'a'(97), '3'(51), end-of-block (256).
+	// Target main table levels:
+	targetMain := make([]byte, 299)
+	activeSyms := []int{104, 101, 108, 111, 32, 114, 97, 51, 256}
+	for _, s := range activeSyms {
+		targetMain[s] = 4
+	}
+
+	targetAll := make([]byte, 404)
+	copy(targetAll[0:299], targetMain)
+
+	// Encode targetAll using sym 0 (code 00) and sym 4 (code 01)
+	for i := range targetAll {
+		switch targetAll[i] {
+		case 0:
+			bw.writeBits(0, 2) // sym 0 (code 00)
+		case 4:
+			bw.writeBits(1, 2) // sym 4 (code 01)
+		}
+	}
+
+	// 4. Encode literal symbols for "hello rar3" + symbol 256 (EOF)
+	// Canonical Canonical Huffman tree for the 9 active symbols (all length 4):
+	// Canonical code assignment for sorted symbols:
+	// sym 32 (' '): 0000 (0)
+	// sym 51 ('3'): 0001 (1)
+	// sym 97 ('a'): 0010 (2)
+	// sym 101('e'): 0011 (3)
+	// sym 104('h'): 0100 (4)
+	// sym 108('l'): 0101 (5)
+	// sym 111('o'): 0110 (6)
+	// sym 114('r'): 0111 (7)
+	// sym 256(EOF): 1000 (8)
+	codeMap := map[byte]uint32{
+		' ': 0, '3': 1, 'a': 2, 'e': 3, 'h': 4, 'l': 5, 'o': 6, 'r': 7,
+	}
+
+	for _, ch := range []byte(expectedText) {
+		code := codeMap[ch]
+		bw.writeBits(code, 4)
+	}
+	// Write end of block symbol 256 (code 8, 4 bits)
+	bw.writeBits(8, 4)
+
+	bw.flush()
+
+	compressedPayload := bw.buf
+
+	// Create custom RAR3 archive with compressed payload
+	archiveData := makeRAR3CustomArchive("hello_lz77.txt", compressedPayload, 0, 0, 0, nil, 0x33)
 
 	volumes := make(chan io.ReadCloser, 1)
 	volumes <- &mockReadCloser{bytes.NewReader(archiveData)}
@@ -241,16 +335,103 @@ func TestStreamDecompressor_RAR3_UnsupportedMethod(t *testing.T) {
 		t.Fatalf("Next() failed: %v", err)
 	}
 
-	if fh.Method != 3 {
-		t.Errorf("expected method 3, got %d", fh.Method)
+	if fh.Name != "hello_lz77.txt" {
+		t.Errorf("expected filename 'hello_lz77.txt', got %q", fh.Name)
 	}
 
-	buf := make([]byte, 10)
-	_, err = sd.Read(buf)
-	if err == nil {
-		t.Fatalf("expected Read to fail for Method 3, but it succeeded")
+	buf, err := io.ReadAll(sd)
+	if err != nil {
+		t.Fatalf("ReadAll failed for RAR3 LZ77 stream: %v", err)
 	}
-	if !strings.Contains(err.Error(), "compression method 3 not implemented") {
-		t.Errorf("expected 'compression method 3 not implemented' error, got %q", err.Error())
+
+	if string(buf) != expectedText {
+		t.Errorf("expected decompressed output %q, got %q", expectedText, string(buf))
+	}
+}
+
+func TestStreamDecompressor_RAR3_LZ77_IntegrationFixture(t *testing.T) {
+	// Construct a real RAR3 LZ77 archive fixture for "testfile.txt" containing "Testing RAR3 LZ77 Decompression Stream"
+	expectedContent := "Testing RAR3 LZ77 Decompression Stream"
+
+	var bw bitWriter
+	// 1. Header: mode bit 0 (LZ77), reuse bit 0 (fresh tables)
+	bw.writeBits(0, 1)
+	bw.writeBits(0, 1)
+
+	// 2. 20 bit lengths for levelDecoder (BC30 = 20)
+	for i := range bc30 {
+		if i == 0 || i == 5 || i == 16 {
+			bw.writeBits(2, 4) // 2-bit code
+		} else {
+			bw.writeBits(0, 4)
+		}
+	}
+
+	// 3. 404 table levels encoded using levelDecoder (sym 0=code 00, sym 5=code 01)
+	// Active symbols sorted numerically for canonical code assignment
+	targetMain := make([]byte, 299)
+	activeSyms := []int{32, 51, 55, 65, 68, 76, 82, 83, 84, 90, 97, 99, 101, 103, 105, 109, 110, 111, 112, 114, 115, 116, 256}
+	for _, s := range activeSyms {
+		targetMain[s] = 5
+	}
+
+	targetAll := make([]byte, 404)
+	copy(targetAll[0:299], targetMain)
+
+	for i := range targetAll {
+		switch targetAll[i] {
+		case 0:
+			bw.writeBits(0, 2)
+		case 5:
+			bw.writeBits(1, 2)
+		}
+	}
+
+	codeMap := make(map[byte]uint32)
+	for idx, s := range activeSyms {
+		if s < 256 {
+			codeMap[byte(s)] = uint32(idx)
+		}
+	}
+	eofCode := uint32(len(activeSyms) - 1)
+
+	for _, ch := range []byte(expectedContent) {
+		code := codeMap[ch]
+		bw.writeBits(code, 5) // 5-bit codes
+	}
+	bw.writeBits(eofCode, 5)
+	bw.flush()
+
+	// Wrap payload in RAR3 Archive File Header
+	archiveData := makeRAR3CustomArchive("testfile.txt", bw.buf, 0, 0, 0, nil, 0x33)
+
+	volumes := make(chan io.ReadCloser, 1)
+	volumes <- &mockReadCloser{bytes.NewReader(archiveData)}
+	close(volumes)
+
+	sd := NewStreamDecompressor(volumes)
+	fh, err := sd.Next()
+	if err != nil {
+		t.Fatalf("Next() failed: %v", err)
+	}
+
+	if sd.Version() != VersionRAR3 {
+		t.Errorf("expected version RAR3, got %v", sd.Version())
+	}
+	if sd.Version().String() != "RAR3" {
+		t.Errorf("expected version string 'RAR3', got %q", sd.Version().String())
+	}
+
+	if fh.Name != "testfile.txt" {
+		t.Errorf("expected filename 'testfile.txt', got %q", fh.Name)
+	}
+
+	buf, err := io.ReadAll(sd)
+	if err != nil {
+		t.Fatalf("ReadAll failed for RAR3 LZ77 integration fixture: %v", err)
+	}
+
+	if string(buf) != expectedContent {
+		t.Errorf("expected content %q, got %q", expectedContent, string(buf))
 	}
 }

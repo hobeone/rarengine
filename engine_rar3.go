@@ -10,6 +10,7 @@ import (
 type rar3Engine struct {
 	sd             *StreamDecompressor
 	stReader       storeReader
+	rar3Dec        *rar3Decoder
 	mvReader       multiVolumePayloadReader3
 	limitPr        io.LimitedReader
 	bytesRemaining int64
@@ -18,7 +19,8 @@ type rar3Engine struct {
 
 func newRAR3Engine(sd *StreamDecompressor) *rar3Engine {
 	return &rar3Engine{
-		sd: sd,
+		sd:      sd,
+		rar3Dec: newRAR3Decoder(sd.win),
 	}
 }
 
@@ -234,7 +236,8 @@ func (re *rar3Engine) newDecompressionReader(fh *FileHeader, pr io.Reader) io.Re
 		re.stReader.win = re.sd.win
 		r = &re.stReader
 	} else {
-		r = &errorReader{err: fmt.Errorf("rarengine: compression method %d not implemented", fh.Method)}
+		re.rar3Dec.Reset(&re.mvReader, fh.UnpackedSize, fh.Solid)
+		r = re.rar3Dec
 	}
 	return r
 }
