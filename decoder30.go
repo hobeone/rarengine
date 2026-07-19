@@ -72,10 +72,11 @@ func init() {
 type rar3Decoder struct {
 	r              io.Reader
 	unpackedSize   int64
-	written        int64
+	produced       int64 // Total bytes produced into sliding window for current file
+	written        int64 // Total bytes read out by caller via Read(p)
 	win            *Window
 	br             BitReader
-	inBuf          []byte
+	payloadBuf     []byte
 	mainDecoder    HuffmanDecoder
 	distDecoder    HuffmanDecoder
 	lowDistDecoder HuffmanDecoder
@@ -89,25 +90,31 @@ type rar3Decoder struct {
 	lastLevels      [huffTableSize30]byte
 	tablesRead      bool
 	isPPM           bool
-	eof             bool
-	readErr         error
+	solid           bool
 }
 
 func newRAR3Decoder(win *Window) *rar3Decoder {
 	return &rar3Decoder{
-		win:   win,
-		inBuf: make([]byte, 64*1024),
+		win: win,
 	}
 }
 
 func (d *rar3Decoder) Reset(r io.Reader, unpackedSize int64, solid bool) {
 	d.r = r
 	d.unpackedSize = unpackedSize
+	d.produced = 0
 	d.written = 0
 	d.tablesRead = false
 	d.isPPM = false
-	d.eof = false
-	d.readErr = nil
+	d.solid = solid
+
+	// Read full file payload into payloadBuf for seamless bit-reader streaming
+	payload, err := io.ReadAll(r)
+	if err == nil || len(payload) > 0 {
+		d.payloadBuf = payload
+		d.br.Reset(d.payloadBuf, len(d.payloadBuf)*8)
+	}
+
 	if !solid {
 		d.oldDist = [4]int{0, 0, 0, 0}
 		d.lastLength = 0
@@ -117,20 +124,12 @@ func (d *rar3Decoder) Reset(r io.Reader, unpackedSize int64, solid bool) {
 	}
 }
 
-func (d *rar3Decoder) refillBitReader() error {
-	n, err := io.ReadFull(d.r, d.inBuf)
-	if n > 0 {
-		d.br.Reset(d.inBuf[:n], n*8)
-		return nil
-	}
-	if err != nil {
-		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-			d.eof = true
-			return io.EOF
-		}
-		return err
-	}
-	return nil
+func (d *rar3Decoder) readBits(n uint8) (int, error) {
+	return d.br.ReadBits(n)
+}
+
+func (d *rar3Decoder) readSym(h *HuffmanDecoder) (int, error) {
+	return h.ReadSym(&d.br)
 }
 
 func (d *rar3Decoder) readBlockHeader() error {
@@ -138,19 +137,9 @@ func (d *rar3Decoder) readBlockHeader() error {
 	d.br.AlignByte()
 
 	// 2. Read 1st bit: block mode (0=LZ, 1=PPMd)
-	modeBit, err := d.br.ReadBits(1)
+	modeBit, err := d.readBits(1)
 	if err != nil {
-		if errors.Is(err, io.EOF) || errors.Is(err, ErrDecoderOutOfData) {
-			if refillErr := d.refillBitReader(); refillErr != nil {
-				return refillErr
-			}
-			modeBit, err = d.br.ReadBits(1)
-			if err != nil {
-				return err
-			}
-		} else {
-			return err
-		}
+		return err
 	}
 
 	if modeBit != 0 {
@@ -160,7 +149,7 @@ func (d *rar3Decoder) readBlockHeader() error {
 	d.isPPM = false
 
 	// 3. Read 2nd bit: table reuse flag (0=fresh/reset, 1=keep/delta)
-	reuseBit, err := d.br.ReadBits(1)
+	reuseBit, err := d.readBits(1)
 	if err != nil {
 		return err
 	}
@@ -172,12 +161,12 @@ func (d *rar3Decoder) readBlockHeader() error {
 	// 4. Decode 20 bit-length levels (BC30 = 20)
 	var bitlength [bc30]byte
 	for i := 0; i < bc30; i++ {
-		length, err := d.br.ReadBits(4)
+		length, err := d.readBits(4)
 		if err != nil {
 			return err
 		}
 		if length == 15 {
-			zeroCount, err := d.br.ReadBits(4)
+			zeroCount, err := d.readBits(4)
 			if err != nil {
 				return err
 			}
@@ -202,7 +191,7 @@ func (d *rar3Decoder) readBlockHeader() error {
 	// 5. Decode 404 table levels using levelDecoder
 	var tableLevels [huffTableSize30]byte
 	for i := 0; i < huffTableSize30; {
-		sym, err := d.levelDecoder.ReadSym(&d.br)
+		sym, err := d.readSym(&d.levelDecoder)
 		if err != nil {
 			return err
 		}
@@ -210,7 +199,7 @@ func (d *rar3Decoder) readBlockHeader() error {
 			tableLevels[i] = byte((sym + int(d.lastLevels[i])) & 0xF)
 			i++
 		} else if sym == 16 {
-			count, err := d.br.ReadBits(3)
+			count, err := d.readBits(3)
 			if err != nil {
 				return err
 			}
@@ -225,7 +214,7 @@ func (d *rar3Decoder) readBlockHeader() error {
 				i++
 			}
 		} else if sym == 17 {
-			count, err := d.br.ReadBits(3)
+			count, err := d.readBits(3)
 			if err != nil {
 				return err
 			}
@@ -236,7 +225,7 @@ func (d *rar3Decoder) readBlockHeader() error {
 				i++
 			}
 		} else if sym == 18 {
-			count, err := d.br.ReadBits(7)
+			count, err := d.readBits(7)
 			if err != nil {
 				return err
 			}
@@ -246,6 +235,8 @@ func (d *rar3Decoder) readBlockHeader() error {
 				count--
 				i++
 			}
+		} else {
+			return ErrInvalidRAR3Block
 		}
 	}
 
@@ -271,6 +262,9 @@ func (d *rar3Decoder) readBlockHeader() error {
 }
 
 func (d *rar3Decoder) decodeDistance(slot int) (int, error) {
+	if slot < 0 || slot >= 60 {
+		return 0, ErrInvalidRAR3Block
+	}
 	if slot < 4 {
 		return slot, nil
 	}
@@ -280,7 +274,7 @@ func (d *rar3Decoder) decodeDistance(slot int) (int, error) {
 	if bits > 0 {
 		if bits >= 4 {
 			if bits > 4 {
-				addBits, err := d.br.ReadBits(bits - 4)
+				addBits, err := d.readBits(bits - 4)
 				if err != nil {
 					return 0, err
 				}
@@ -290,7 +284,7 @@ func (d *rar3Decoder) decodeDistance(slot int) (int, error) {
 				d.lowDistRepCount--
 				dist += d.prevLowDist
 			} else {
-				lowSym, err := d.lowDistDecoder.ReadSym(&d.br)
+				lowSym, err := d.readSym(&d.lowDistDecoder)
 				if err != nil {
 					return 0, err
 				}
@@ -303,7 +297,7 @@ func (d *rar3Decoder) decodeDistance(slot int) (int, error) {
 				}
 			}
 		} else {
-			addBits, err := d.br.ReadBits(bits)
+			addBits, err := d.readBits(bits)
 			if err != nil {
 				return 0, err
 			}
@@ -313,57 +307,57 @@ func (d *rar3Decoder) decodeDistance(slot int) (int, error) {
 	return dist, nil
 }
 
+func (d *rar3Decoder) writeByte(c byte) {
+	d.win.writeByte(c)
+	d.produced++
+}
+
+func (d *rar3Decoder) copyMatch(matchLen int, dist int) error {
+	if !d.solid && dist > int(d.produced)+d.win.Available() {
+		return ErrWindowOffsetBounds
+	}
+	if err := d.win.CopyBytes(matchLen, dist); err != nil {
+		return err
+	}
+	d.produced += int64(matchLen)
+	return nil
+}
+
 func (d *rar3Decoder) Read(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
-	if d.written >= d.unpackedSize {
-		return 0, io.EOF
-	}
 
-	// First, drain any unread decompressed bytes from sliding window
-	if d.win.Available() > 0 {
-		n, _ := d.win.Read(p)
-		d.written += int64(n)
-		return n, nil
-	}
+	// Decompress into window until we produce required unpacked bytes or hit EOF
+	for d.produced < d.unpackedSize {
+		if d.win.Available() >= len(p) || d.win.Available() >= 32768 {
+			break
+		}
 
-	// Decompress into window until we produce output or hit EOF
-	for d.written < d.unpackedSize {
 		if !d.tablesRead {
 			if err := d.readBlockHeader(); err != nil {
+				if d.win.Available() > 0 {
+					n, _ := d.win.Read(p)
+					d.written += int64(n)
+					return n, nil
+				}
 				return 0, err
 			}
 		}
 
-		sym, err := d.mainDecoder.ReadSym(&d.br)
+		sym, err := d.readSym(&d.mainDecoder)
 		if err != nil {
-			if errors.Is(err, io.EOF) || errors.Is(err, ErrDecoderOutOfData) {
-				if refillErr := d.refillBitReader(); refillErr != nil {
-					if errors.Is(refillErr, io.EOF) && d.win.Available() > 0 {
-						n, _ := d.win.Read(p)
-						d.written += int64(n)
-						return n, nil
-					}
-					return 0, refillErr
-				}
-				sym, err = d.mainDecoder.ReadSym(&d.br)
-				if err != nil {
-					return 0, err
-				}
-			} else {
-				return 0, err
-			}
-		}
-
-		if sym < 256 {
-			// Literal byte
-			d.win.writeByte(byte(sym))
-			if d.win.Available() >= len(p) || d.win.Available() >= 32768 {
+			if d.win.Available() > 0 {
 				n, _ := d.win.Read(p)
 				d.written += int64(n)
 				return n, nil
 			}
+			return 0, err
+		}
+
+		if sym < 256 {
+			// Literal byte
+			d.writeByte(byte(sym))
 			continue
 		}
 
@@ -393,26 +387,21 @@ func (d *rar3Decoder) Read(p []byte) (int, error) {
 				d.oldDist[0], d.oldDist[1], d.oldDist[2], d.oldDist[3] = d.oldDist[3], d.oldDist[0], d.oldDist[1], d.oldDist[2]
 			}
 
-			lenSym, err := d.lengthDecoder.ReadSym(&d.br)
+			lenSym, err := d.readSym(&d.lengthDecoder)
 			if err != nil {
 				return 0, err
 			}
 			matchLen := ldecode30[lenSym] + 2
 			if lbits30[lenSym] > 0 {
-				addBits, err := d.br.ReadBits(lbits30[lenSym])
+				addBits, err := d.readBits(lbits30[lenSym])
 				if err != nil {
 					return 0, err
 				}
 				matchLen += addBits
 			}
 			d.lastLength = matchLen
-			if err := d.win.CopyBytes(matchLen, dist+1); err != nil {
+			if err := d.copyMatch(matchLen, dist+1); err != nil {
 				return 0, err
-			}
-			if d.win.Available() >= len(p) || d.win.Available() >= 32768 {
-				n, _ := d.win.Read(p)
-				d.written += int64(n)
-				return n, nil
 			}
 			continue
 		}
@@ -422,7 +411,7 @@ func (d *rar3Decoder) Read(p []byte) (int, error) {
 			sdCode := sym - 263
 			dist := sddecode30[sdCode]
 			if sdbits30[sdCode] > 0 {
-				addBits, err := d.br.ReadBits(sdbits30[sdCode])
+				addBits, err := d.readBits(sdbits30[sdCode])
 				if err != nil {
 					return 0, err
 				}
@@ -436,13 +425,8 @@ func (d *rar3Decoder) Read(p []byte) (int, error) {
 			d.oldDist[0] = dist
 
 			d.lastLength = 2
-			if err := d.win.CopyBytes(2, dist+1); err != nil {
+			if err := d.copyMatch(2, dist+1); err != nil {
 				return 0, err
-			}
-			if d.win.Available() >= len(p) || d.win.Available() >= 32768 {
-				n, _ := d.win.Read(p)
-				d.written += int64(n)
-				return n, nil
 			}
 			continue
 		}
@@ -452,14 +436,14 @@ func (d *rar3Decoder) Read(p []byte) (int, error) {
 			lenCode := sym - 271
 			matchLen := ldecode30[lenCode] + 3
 			if lbits30[lenCode] > 0 {
-				addBits, err := d.br.ReadBits(lbits30[lenCode])
+				addBits, err := d.readBits(lbits30[lenCode])
 				if err != nil {
 					return 0, err
 				}
 				matchLen += addBits
 			}
 
-			distSlot, err := d.distDecoder.ReadSym(&d.br)
+			distSlot, err := d.readSym(&d.distDecoder)
 			if err != nil {
 				return 0, err
 			}
@@ -475,13 +459,8 @@ func (d *rar3Decoder) Read(p []byte) (int, error) {
 			d.oldDist[0] = dist
 
 			d.lastLength = matchLen
-			if err := d.win.CopyBytes(matchLen, dist+1); err != nil {
+			if err := d.copyMatch(matchLen, dist+1); err != nil {
 				return 0, err
-			}
-			if d.win.Available() >= len(p) || d.win.Available() >= 32768 {
-				n, _ := d.win.Read(p)
-				d.written += int64(n)
-				return n, nil
 			}
 			continue
 		}
@@ -491,6 +470,10 @@ func (d *rar3Decoder) Read(p []byte) (int, error) {
 		n, _ := d.win.Read(p)
 		d.written += int64(n)
 		return n, nil
+	}
+
+	if d.written >= d.unpackedSize {
+		return 0, io.EOF
 	}
 
 	return 0, io.EOF
