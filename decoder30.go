@@ -367,9 +367,19 @@ func (d *rar3Decoder) Read(p []byte) (int, error) {
 			continue
 		}
 
-		if sym == 257 || sym == 258 {
-			// VM Filter Code/Data (unsupported in this baseline pass)
+		if sym == 257 {
+			// VM Filter Code (unsupported in this baseline pass)
 			return 0, fmt.Errorf("rarengine: rar3 filter VM symbol %d not supported", sym)
+		}
+
+		if sym == 258 {
+			// Repeat last match length at distance R0
+			if d.lastLength > 0 {
+				if err := d.copyMatch(d.lastLength, d.oldDist[0]+1); err != nil {
+					return 0, err
+				}
+			}
+			continue
 		}
 
 		if sym >= 259 && sym <= 262 {
@@ -452,6 +462,14 @@ func (d *rar3Decoder) Read(p []byte) (int, error) {
 				return 0, err
 			}
 
+			distance := dist + 1
+			if distance >= 0x2000 {
+				matchLen++
+				if distance >= 0x40000 {
+					matchLen++
+				}
+			}
+
 			// Shift MTF queue
 			d.oldDist[3] = d.oldDist[2]
 			d.oldDist[2] = d.oldDist[1]
@@ -459,7 +477,7 @@ func (d *rar3Decoder) Read(p []byte) (int, error) {
 			d.oldDist[0] = dist
 
 			d.lastLength = matchLen
-			if err := d.copyMatch(matchLen, dist+1); err != nil {
+			if err := d.copyMatch(matchLen, distance); err != nil {
 				return 0, err
 			}
 			continue
