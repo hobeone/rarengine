@@ -109,11 +109,9 @@ func (d *rar3Decoder) Reset(r io.Reader, unpackedSize int64, solid bool) {
 	d.solid = solid
 
 	// Read full file payload into payloadBuf for seamless bit-reader streaming
-	payload, err := io.ReadAll(r)
-	if err == nil || len(payload) > 0 {
-		d.payloadBuf = payload
-		d.br.Reset(d.payloadBuf, len(d.payloadBuf)*8)
-	}
+	payload, _ := io.ReadAll(r)
+	d.payloadBuf = payload
+	d.br.Reset(d.payloadBuf, len(d.payloadBuf)*8)
 
 	if !solid {
 		d.oldDist = [4]int{0, 0, 0, 0}
