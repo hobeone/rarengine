@@ -76,7 +76,7 @@ type rar3Decoder struct {
 	written        int64 // Total bytes read out by caller via Read(p)
 	win            *Window
 	br             BitReader
-	payloadBuf     []byte
+	inBuf          []byte // Reusable 64KB stream buffer
 	mainDecoder    HuffmanDecoder
 	distDecoder    HuffmanDecoder
 	lowDistDecoder HuffmanDecoder
@@ -95,7 +95,8 @@ type rar3Decoder struct {
 
 func newRAR3Decoder(win *Window) *rar3Decoder {
 	return &rar3Decoder{
-		win: win,
+		win:   win,
+		inBuf: make([]byte, 64*1024),
 	}
 }
 
@@ -108,10 +109,8 @@ func (d *rar3Decoder) Reset(r io.Reader, unpackedSize int64, solid bool) {
 	d.isPPM = false
 	d.solid = solid
 
-	// Read full file payload into payloadBuf for seamless bit-reader streaming
-	payload, _ := io.ReadAll(r)
-	d.payloadBuf = payload
-	d.br.Reset(d.payloadBuf, len(d.payloadBuf)*8)
+	// Clear bit reader; incremental refills via RefillBuffer handle streaming
+	d.br.Reset(nil, 0)
 
 	if !solid {
 		d.oldDist = [4]int{0, 0, 0, 0}
@@ -122,12 +121,38 @@ func (d *rar3Decoder) Reset(r io.Reader, unpackedSize int64, solid bool) {
 	}
 }
 
+func (d *rar3Decoder) refillBitReader() error {
+	n, err := d.r.Read(d.inBuf)
+	if n > 0 {
+		d.br.RefillBuffer(d.inBuf[:n], n*8)
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return io.EOF
+}
+
 func (d *rar3Decoder) readBits(n uint8) (int, error) {
-	return d.br.ReadBits(n)
+	val, err := d.br.ReadBits(n)
+	if errors.Is(err, ErrDecoderOutOfData) || errors.Is(err, io.EOF) {
+		if refillErr := d.refillBitReader(); refillErr != nil {
+			return 0, refillErr
+		}
+		return d.br.ReadBits(n)
+	}
+	return val, err
 }
 
 func (d *rar3Decoder) readSym(h *HuffmanDecoder) (int, error) {
-	return h.ReadSym(&d.br)
+	sym, err := h.ReadSym(&d.br)
+	if errors.Is(err, ErrDecoderOutOfData) || errors.Is(err, io.EOF) {
+		if refillErr := d.refillBitReader(); refillErr != nil {
+			return 0, refillErr
+		}
+		return h.ReadSym(&d.br)
+	}
+	return sym, err
 }
 
 func (d *rar3Decoder) readBlockHeader() error {

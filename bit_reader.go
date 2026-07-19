@@ -38,6 +38,14 @@ func (r *BitReader) Reset(buf []byte, limitBits int) {
 	r.bitsRead = 0
 }
 
+// RefillBuffer updates the source buffer for incremental stream reading,
+// preserving any unread bits in the bit cache.
+func (r *BitReader) RefillBuffer(buf []byte, limitBits int) {
+	r.buf = buf
+	r.off = 0
+	r.limit += limitBits
+}
+
 // fill refills the bit buffer v so it contains 57-64 valid bits.
 //
 // Hot path: when at least 8 bytes remain, load them as a single big-endian
