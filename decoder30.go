@@ -178,6 +178,8 @@ func (d *rar3Decoder) readBlockHeader() error {
 	}
 
 	if reuseBit == 0 {
+		d.lowDistRepCount = 0
+		d.prevLowDist = 0
 		clear(d.lastLevels[:])
 	}
 
@@ -349,6 +351,14 @@ func (d *rar3Decoder) copyMatch(matchLen int, dist int) error {
 func (d *rar3Decoder) Read(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
+	}
+
+	remaining := d.unpackedSize - d.written
+	if remaining <= 0 {
+		return 0, io.EOF
+	}
+	if int64(len(p)) > remaining {
+		p = p[:remaining]
 	}
 
 	// Decompress into window until we produce required unpacked bytes or hit EOF

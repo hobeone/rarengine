@@ -435,3 +435,110 @@ func TestStreamDecompressor_RAR3_LZ77_IntegrationFixture(t *testing.T) {
 		t.Errorf("expected content %q, got %q", expectedContent, string(buf))
 	}
 }
+
+func TestStreamDecompressor_RAR3_LZ77_MatchDecompression(t *testing.T) {
+	// Construct a RAR3 LZ77 payload exercising literal, standard match, rep match, and repeat-last-match (symbol 258)
+	var bw bitWriter
+	// 1. Header: mode bit 0 (LZ77), reuse bit 0 (fresh tables)
+	bw.writeBits(0, 1)
+	bw.writeBits(0, 1)
+
+	// 2. 20 bit lengths for levelDecoder (BC30 = 20): 4 bits per entry.
+	// Symbol 0 (length = 2 bits), Symbol 4 (length = 2 bits), Symbol 16 (length = 2 bits), others = 0
+	for i := range bc30 {
+		if i == 0 || i == 4 || i == 16 {
+			bw.writeBits(2, 4)
+		} else {
+			bw.writeBits(0, 4)
+		}
+	}
+
+	// 3. 404 table levels
+	// Main table active symbols:
+	// 'A' (65), 'B' (66), 'C' (67), sym 256 (EOF), sym 258 (rep last match), sym 259 (rep dist R0), sym 271 (std match len 3)
+	// Dist table active symbols: distSlot 2 (dist = 2) -> level 4
+	// Length table active symbols: lenSym 0 (len = 2) -> level 4
+	targetMain := make([]byte, 299)
+	mainSyms := []int{65, 66, 67, 256, 258, 259, 271}
+	for _, s := range mainSyms {
+		targetMain[s] = 4
+	}
+
+	targetDist := make([]byte, 60)
+	targetDist[2] = 4 // distSlot 2
+
+	targetLen := make([]byte, 28)
+	targetLen[0] = 4 // lenSym 0
+
+	targetAll := make([]byte, 404)
+	copy(targetAll[0:299], targetMain)
+	copy(targetAll[299:359], targetDist)
+	copy(targetAll[359+17:359+17+28], targetLen)
+
+	for i := range targetAll {
+		switch targetAll[i] {
+		case 0:
+			bw.writeBits(0, 2)
+		case 4:
+			bw.writeBits(1, 2)
+		}
+	}
+
+	// Main table canonical codes (7 active symbols in sorted order, length 4):
+	// 65('A'):0, 66('B'):1, 67('C'):2, 256(EOF):3, 258(repLast):4, 259(repR0):5, 271(stdMatch):6
+	// Dist table: distSlot 2 (code 0, 4 bits)
+	// Length table: lenSym 0 (code 0, 4 bits)
+
+	// Stream sequence:
+	// 1. Literal 'A' (code 0)
+	bw.writeBits(0, 4)
+	// 2. Literal 'B' (code 1)
+	bw.writeBits(1, 4)
+	// 3. Literal 'C' (code 2)
+	bw.writeBits(2, 4)
+	// Out: "ABC"
+
+	// 4. Standard match (sym 271 -> code 6, lenCode 0 -> matchLen 3, distSlot 2 -> dist 2 -> distance 3 -> copies "ABC")
+	bw.writeBits(6, 4) // sym 271
+	bw.writeBits(0, 4) // distSlot 2
+	// Out: "ABCABC"
+
+	// 5. Repeat match R0 (sym 259 -> code 5, lenSym 0 -> matchLen 2 -> dist 2 -> distance 3 -> copies "AB")
+	bw.writeBits(5, 4) // sym 259
+	bw.writeBits(0, 4) // lenSym 0
+	// Out: "ABCABCAB"
+
+	// 6. Repeat last match (sym 258 -> code 4, lastLen 2 at distance 3 -> copies "AB")
+	bw.writeBits(4, 4) // sym 258
+	// Out: "ABCABCABAB"
+
+	// 7. End of block (sym 256 -> code 3)
+	bw.writeBits(3, 4)
+	bw.flush()
+
+	archiveData := makeRAR3CustomArchive("match_test.txt", bw.buf, 0, 0, 0, nil, 0x33)
+
+	volumes := make(chan io.ReadCloser, 1)
+	volumes <- &mockReadCloser{bytes.NewReader(archiveData)}
+	close(volumes)
+
+	sd := NewStreamDecompressor(volumes)
+	fh, err := sd.Next()
+	if err != nil {
+		t.Fatalf("Next() failed: %v", err)
+	}
+
+	if fh.Name != "match_test.txt" {
+		t.Errorf("expected filename 'match_test.txt', got %q", fh.Name)
+	}
+
+	buf, err := io.ReadAll(sd)
+	if err != nil {
+		t.Fatalf("ReadAll failed for LZ77 match test: %v", err)
+	}
+
+	expected := "ABCABCABCA"
+	if string(buf) != expected {
+		t.Errorf("expected decompressed output %q, got %q", expected, string(buf))
+	}
+}
