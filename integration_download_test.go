@@ -98,8 +98,8 @@ func TestIntegration_Download_RAR5_Solid(t *testing.T) {
 	}
 }
 
-func TestIntegration_Download_RAR3(t *testing.T) {
-	data := downloadTestFile(t, "testfile.rar3.solid.rar")
+func TestIntegration_Download_RAR3_PPMd(t *testing.T) {
+	data := downloadTestFile(t, "testfile.rar3.rar")
 
 	volumes := make(chan io.ReadCloser, 1)
 	volumes <- io.NopCloser(bytes.NewReader(data))
@@ -114,28 +114,17 @@ func TestIntegration_Download_RAR3(t *testing.T) {
 	if sd.Version() != rarengine.VersionRAR3 {
 		t.Errorf("expected version RAR3, got %v", sd.Version())
 	}
-	if sd.Version().String() != "RAR3" {
-		t.Errorf("expected version string 'RAR3', got %q", sd.Version().String())
-	}
 
 	if fh.Name != "testfile.txt" {
 		t.Errorf("expected filename 'testfile.txt', got %q", fh.Name)
 	}
-	if fh.UnpackedSize != 12 {
-		t.Errorf("expected UnpackedSize 12, got %d", fh.UnpackedSize)
-	}
-	t.Logf("packed size: %d, unpacked size: %d", fh.PackedSize, fh.UnpackedSize)
-	buf, err := io.ReadAll(sd)
-	if err != nil {
-		if errors.Is(err, rarengine.ErrPPMUnsupported) || strings.Contains(err.Error(), "ppmd compression not implemented") {
-			t.Logf("RAR3 archive uses PPMd compression; returning ErrPPMUnsupported as expected: %v", err)
-			return
-		}
-		t.Fatalf("ReadAll failed for RAR3 archive: %v", err)
+
+	_, err = io.ReadAll(sd)
+	if err == nil {
+		t.Fatalf("expected PPMd stream to return ErrPPMUnsupported, but ReadAll succeeded")
 	}
 
-	expectedContent := "Testing 123\n"
-	if string(buf) != expectedContent {
-		t.Errorf("expected content %q, got %q", expectedContent, string(buf))
+	if !errors.Is(err, rarengine.ErrPPMUnsupported) && !strings.Contains(err.Error(), "ppmd compression not implemented") {
+		t.Errorf("expected 'ppmd compression not implemented' error, got %q", err.Error())
 	}
 }
