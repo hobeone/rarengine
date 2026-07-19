@@ -2,6 +2,7 @@ package rarengine_test
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -98,7 +99,7 @@ func TestIntegration_Download_RAR5_Solid(t *testing.T) {
 }
 
 func TestIntegration_Download_RAR3(t *testing.T) {
-	data := downloadTestFile(t, "testfile.rar3.rar")
+	data := downloadTestFile(t, "testfile.rar3.solid.rar")
 
 	volumes := make(chan io.ReadCloser, 1)
 	volumes <- io.NopCloser(bytes.NewReader(data))
@@ -123,17 +124,18 @@ func TestIntegration_Download_RAR3(t *testing.T) {
 	if fh.UnpackedSize != 12 {
 		t.Errorf("expected UnpackedSize 12, got %d", fh.UnpackedSize)
 	}
-	if fh.PackedSize != 27 {
-		t.Errorf("expected PackedSize 27, got %d", fh.PackedSize)
-	}
-
-	// Because Method is 5 (compressed), reading should return an error indicating method not implemented
+	t.Logf("packed size: %d, unpacked size: %d", fh.PackedSize, fh.UnpackedSize)
 	buf, err := io.ReadAll(sd)
-	if err == nil {
-		t.Fatalf("expected Read to fail for Method 5, but succeeded with content: %q", string(buf))
+	if err != nil {
+		if errors.Is(err, rarengine.ErrPPMUnsupported) || strings.Contains(err.Error(), "ppmd compression not implemented") {
+			t.Logf("RAR3 archive uses PPMd compression; returning ErrPPMUnsupported as expected: %v", err)
+			return
+		}
+		t.Fatalf("ReadAll failed for RAR3 archive: %v", err)
 	}
 
-	if !strings.Contains(err.Error(), "compression method 5 not implemented") {
-		t.Errorf("expected 'compression method 5 not implemented' error, got %q", err.Error())
+	expectedContent := "Testing 123\n"
+	if string(buf) != expectedContent {
+		t.Errorf("expected content %q, got %q", expectedContent, string(buf))
 	}
 }

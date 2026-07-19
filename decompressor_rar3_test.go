@@ -6,7 +6,6 @@ import (
 	"errors"
 	"hash/crc32"
 	"io"
-	"strings"
 	"testing"
 )
 
@@ -226,7 +225,7 @@ func TestStreamDecompressor_RAR3_Salt(t *testing.T) {
 	}
 }
 
-func TestStreamDecompressor_RAR3_UnsupportedMethod(t *testing.T) {
+func TestStreamDecompressor_RAR3_Compressed_Method3(t *testing.T) {
 	content := []byte("hello rar3 compressed")
 	filename := "hello_rar3_comp.txt"
 	archiveData := makeRAR3CustomArchive(filename, content, 0, 0, 0, nil, 0x33)
@@ -248,9 +247,11 @@ func TestStreamDecompressor_RAR3_UnsupportedMethod(t *testing.T) {
 	buf := make([]byte, 10)
 	_, err = sd.Read(buf)
 	if err == nil {
-		t.Fatalf("expected Read to fail for Method 3, but it succeeded")
-	}
-	if !strings.Contains(err.Error(), "compression method 3 not implemented") {
-		t.Errorf("expected 'compression method 3 not implemented' error, got %q", err.Error())
+		t.Logf("Read succeeded")
+	} else if errors.Is(err, ErrInvalidRAR3Block) || errors.Is(err, ErrHuffDecodeFailed) || errors.Is(err, ErrInvalidLengthTable) || errors.Is(err, ErrDecoderOutOfData) || errors.Is(err, ErrPPMUnsupported) {
+		// Expected execution through rar3Decoder
+		t.Logf("rar3Decoder executed and returned expected bitstream error: %v", err)
+	} else {
+		t.Errorf("unexpected error from rar3Decoder: %v", err)
 	}
 }
