@@ -209,11 +209,11 @@ func readFilter5Data(br *BitReader) (int64, error) {
 
 	var data int64
 	for i := 0; i < bytesVal; i++ {
-		n, err := br.ReadBits(8)
+		b, err := br.ReadByte()
 		if err != nil {
 			return 0, err
 		}
-		data |= int64(n) << (uint(i) * 8)
+		data |= int64(b) << (uint(i) * 8)
 	}
 	return data, nil
 }
