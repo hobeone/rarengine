@@ -332,7 +332,12 @@ func TestDecodedTracksOutput(t *testing.T) {
 // set. Accumulated into an int it is negative on 32-bit platforms, where a
 // negative length reaches a slice expression and a negative offset places a
 // filter behind the emission cursor. Both bounds in readFilter are upper-only,
-// so the type is what keeps them sufficient.
+// so the return type is what keeps them sufficient.
+//
+// Most of the protection here is at compile time: were the return type to go
+// back to int, this comparison would not build for a 32-bit target, which the
+// crossbuild CI job runs. The runtime assertion alone would not catch it,
+// because on a 64-bit host the value is correct either way.
 func TestReadFilter5DataStaysPositive(t *testing.T) {
 	var bw bitWriter
 	writeVarBytes(&bw, 0xF0332211)
@@ -344,9 +349,6 @@ func TestReadFilter5DataStaysPositive(t *testing.T) {
 	}
 	if val != 0xF0332211 {
 		t.Fatalf("value = %#x, want 0xF0332211", val)
-	}
-	if val < 0 {
-		t.Errorf("value is negative; a length this size would panic a slice expression")
 	}
 }
 

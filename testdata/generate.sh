@@ -154,6 +154,8 @@ echo "  rar5_recovery.rar"
 # TestExeFixtureReachesFilterPath fails if a regenerated fixture stops queueing
 # filters, so a regeneration that silently loses that coverage is caught.
 gcc -O0 -fno-inline -shared -nostdlib -fPIC -o "$TMPDIR/own.exe" exe_filter_src.c
+# rar a appends to an existing archive, so a re-run would add a second copy.
+rm -f rar5_exe_filter.rar
 rar a -m5 -ma5 -ep rar5_exe_filter.rar "$TMPDIR/own.exe"
 echo "  rar5_exe_filter.rar"
 
@@ -164,6 +166,7 @@ echo "  rar5_exe_filter.rar"
 # skipped across a split archive, and the filter queue spanning volume
 # boundaries. Regenerating must keep producing more than one volume; if the
 # payload ever compresses below the volume size the split disappears silently.
+rm -f rar5_multi_service.part*.rar
 rar a -m5 -ma5 -v8k -rr -ep rar5_multi_service.rar "$TMPDIR/own.exe"
 echo "  rar5_multi_service.part*.rar"
 

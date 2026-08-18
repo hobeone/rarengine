@@ -500,7 +500,12 @@ func (d *decoder50) Read(win *Window, p []byte) (int, error) {
 	// drains. That's guaranteed because Read only reaches this branch when
 	// outbuf is empty.
 	f := *head
-	d.fl = d.fl[1:]
+	// Shift down rather than resliceing forward. Reslicing would advance the
+	// base pointer and shrink capacity permanently, since init restores the
+	// length but not the original array, so a long-lived decoder would
+	// eventually exhaust the preallocation and append inside Read.
+	copy(d.fl, d.fl[1:])
+	d.fl = d.fl[:len(d.fl)-1]
 	if cap(d.filterBuf) < f.length {
 		d.filterBuf = make([]byte, f.length)
 	} else {
