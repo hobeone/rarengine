@@ -229,6 +229,9 @@ func TestIntegration_Oracle(t *testing.T) {
 		{"rar5_compress.rar", ""},
 		{"rar5_solid.rar", ""},
 		{"rar5_encrypted.rar", "test"},
+		// Compiled x86 payload; the only fixture that reaches the filter path.
+		// See testdata/generate.sh for why, and what regenerating it must preserve.
+		{"rar5_exe_filter.rar", ""},
 	}
 
 	for _, tc := range testArchives {

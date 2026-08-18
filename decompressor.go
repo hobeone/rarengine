@@ -72,6 +72,21 @@ type StreamDecompressor struct {
 	win        *Window
 	password   string
 	verifyCRC  bool
+	// discardLr backs discardPayload. Reused so discarding a block's payload
+	// costs no allocation, per the no-new-allocations rule in CLAUDE.md.
+	discardLr io.LimitedReader
+}
+
+// discardPayload consumes n bytes of block payload from the current volume, for
+// blocks whose contents the caller never sees: continuation blocks already
+// accounted for, service records, and unrecognized block types.
+func (sd *StreamDecompressor) discardPayload(n int64) error {
+	if n <= 0 {
+		return nil
+	}
+	sd.discardLr.R, sd.discardLr.N = sd.currentVol, n
+	_, err := io.Copy(io.Discard, &sd.discardLr)
+	return err
 }
 
 // SetPassword configures the decryption password for encrypted RAR archives.

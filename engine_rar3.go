@@ -115,7 +115,7 @@ func (re *rar3Engine) processHeader(h *BlockHeader) (*FileHeader, bool, error) {
 		}
 
 		if !fh.FirstBlock {
-			if _, err = io.Copy(io.Discard, io.LimitReader(re.sd.currentVol, fh.PackedSize)); err != nil {
+			if err = re.sd.discardPayload(fh.PackedSize); err != nil {
 				return nil, false, err
 			}
 			return nil, true, nil
@@ -144,7 +144,7 @@ func (re *rar3Engine) processHeader(h *BlockHeader) (*FileHeader, bool, error) {
 
 	default:
 		if h.DataSize > 0 {
-			if _, err := io.Copy(io.Discard, io.LimitReader(re.sd.currentVol, h.DataSize)); err != nil {
+			if err := re.sd.discardPayload(h.DataSize); err != nil {
 				return nil, false, err
 			}
 		}
@@ -169,7 +169,7 @@ func (re *rar3Engine) processVolumePayloadHeader(h *BlockHeader) (io.Reader, boo
 		}
 	default:
 		if h.DataSize > 0 {
-			if _, err := io.Copy(io.Discard, io.LimitReader(re.sd.currentVol, h.DataSize)); err != nil {
+			if err := re.sd.discardPayload(h.DataSize); err != nil {
 				return nil, false, err
 			}
 		}

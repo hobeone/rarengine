@@ -20,11 +20,20 @@ const (
 	tableSize5     = mainSize5 + offsetSize5 + lowoffsetSize5 + lengthSize5
 
 	maxQueuedFilters = 1024
+
+	// maxFilterBlockSize bounds a filter block's declared length. It matches
+	// unrar's limit, though unrar neutralizes an oversize block where this
+	// rejects it, so behavior on corrupt input differs from that reference.
+	maxFilterBlockSize = 0x400000
 )
 
 // FilterBlock holds parameters for post-processing execution.
 type FilterBlock struct {
-	offset int
+	// start is the block's absolute position in this file's output stream,
+	// comparable against tot. Absolute rather than relative to the previous
+	// filter so that draining needs no running decrement, and so a filter
+	// queued while an earlier block is being staged needs no compensation.
+	start  int64
 	length int
 	ftype  uint8 // 0: Delta, 1: E8, 2: E9, 3: Arm
 	param  uint8 // Stores 'n' for Delta filter
@@ -54,6 +63,12 @@ type decoder50 struct {
 	filterBuf    []byte // Reusable scratch for filter input; reused once outbuf drains
 	filterOutBuf []byte // Reusable scratch for filter output
 	tot          int64  // Total number of bytes read/output so far
+	// decoded counts bytes written into the window for this file. It runs ahead
+	// of tot by whatever is decoded but not yet emitted, and the two must share
+	// an epoch: init resets both, or neither, so a queued filter's start stays
+	// comparable against tot. Resetting one alone silently mispositions every
+	// queued filter.
+	decoded int64
 }
 
 func newDecoder50() *decoder50 {
@@ -81,6 +96,7 @@ func (d *decoder50) init(r io.Reader, reset bool) {
 		}
 		d.outbuf = nil
 		d.tot = 0
+		d.decoded = 0
 	}
 }
 
@@ -177,20 +193,27 @@ func slotToLength(br *BitReader, n int) (int, error) {
 	return n, nil
 }
 
-func readFilter5Data(br *BitReader) (int, error) {
+// readFilter5Data reads a filter record's variable-width value: a 2-bit count
+// of bytes, then that many little-endian bytes.
+//
+// The result is int64 rather than int so that four bytes with the top bit set
+// stay positive on 32-bit platforms. As an int they would be negative, and a
+// negative length reaches a slice expression while a negative offset places a
+// filter behind the emission cursor.
+func readFilter5Data(br *BitReader) (int64, error) {
 	bytesVal, err := br.ReadBits(2)
 	if err != nil {
 		return 0, err
 	}
 	bytesVal++
 
-	var data int
+	var data int64
 	for i := 0; i < bytesVal; i++ {
 		n, err := br.ReadBits(8)
 		if err != nil {
 			return 0, err
 		}
-		data |= n << (uint(i) * 8)
+		data |= int64(n) << (uint(i) * 8)
 	}
 	return data, nil
 }
@@ -214,19 +237,29 @@ func (d *decoder50) readFilter(win *Window) error {
 		return err
 	}
 
-	offset += win.w - win.r
-	offset %= win.size
-	if offset < 0 {
-		offset += win.size
+	// Bound both stream-supplied values, which reach 0xFFFFFFFF. A filter is
+	// announced while the decoder is near its position, so an offset beyond one
+	// window is malformed rather than merely distant. Both are non-negative by
+	// construction, so an upper bound is the whole check.
+	if length > maxFilterBlockSize || offset > int64(win.size) {
+		return ErrInvalidFilter
 	}
-	length %= win.size
-	if length < 0 {
-		length += win.size
+
+	// The filter starts offset bytes past the decode head, which is where the
+	// stream is as this record is parsed.
+	start := d.decoded + offset
+
+	// Filters are applied in queue order, so a block starting before the last
+	// one queued is malformed. Comparing absolute starts needs only the tail
+	// entry; the relative encoding this replaced had to walk the whole queue.
+	if n := len(d.fl); n > 0 && start < d.fl[n-1].start {
+		return ErrInvalidFilter
 	}
 
 	fb := FilterBlock{
-		offset: offset,
-		length: length,
+		start: start,
+		// Safe on every platform: the bound above caps length at 4 MB.
+		length: int(length),
 		ftype:  uint8(ftype),
 	}
 
@@ -241,6 +274,13 @@ func (d *decoder50) readFilter(win *Window) error {
 		// No extra parameters needed
 	default:
 		return ErrUnknownFilter
+	}
+
+	// A zero-length block transforms nothing. Dropping it here rather than at
+	// dequeue keeps Read from returning (0, nil) against a non-empty buffer,
+	// which would violate io.Reader.
+	if fb.length == 0 {
+		return nil
 	}
 
 	d.fl = append(d.fl, fb)
@@ -259,6 +299,9 @@ func (d *decoder50) decodeLength(win *Window, i int) error {
 	d.length, err = slotToLength(d.br, sl)
 	if err == nil {
 		err = win.CopyBytes(d.length, d.offset[0])
+	}
+	if err == nil {
+		d.decoded += int64(d.length)
 	}
 	return err
 }
@@ -316,7 +359,11 @@ func (d *decoder50) decodeOffset(win *Window, i int) error {
 	d.offset[1] = d.offset[0]
 	d.offset[0] = offset
 	d.length = length
-	return win.CopyBytes(d.length, d.offset[0])
+	if err := win.CopyBytes(d.length, d.offset[0]); err != nil {
+		return err
+	}
+	d.decoded += int64(d.length)
+	return nil
 }
 
 // decodeSymbol maps a decoded symbol to its sliding window or filter action.
@@ -324,13 +371,18 @@ func (d *decoder50) decodeSymbol(win *Window, sym int) error {
 	switch {
 	case sym < 256:
 		win.writeByte(byte(sym))
+		d.decoded++
 		return nil
 	case sym >= 262:
 		return d.decodeOffset(win, sym-262)
 	case sym >= 258:
 		return d.decodeLength(win, sym-258)
 	case sym == 257:
-		return win.CopyBytes(d.length, d.offset[0])
+		if err := win.CopyBytes(d.length, d.offset[0]); err != nil {
+			return err
+		}
+		d.decoded += int64(d.length)
+		return nil
 	default: // sym == 256:
 		return d.readFilter(win)
 	}
@@ -361,6 +413,37 @@ func (d *decoder50) fill(win *Window) error {
 				return ErrDecoderOutOfData
 			}
 			return err
+		}
+	}
+	return nil
+}
+
+// stageFilterInput fills buf with a filter block's input, decoding more data
+// when the window holds less than the block needs.
+//
+// Draining must precede decoding: fill returns as soon as the window is half
+// full, so waiting for the whole block to become available before draining
+// would never make progress for a block larger than half the window. Each
+// iteration either copies at least one byte or leaves the decoder having
+// produced at least one, so the loop is bounded without a retry counter.
+//
+// A block the stream cannot satisfy yields io.ErrUnexpectedEOF. io.EOF must not
+// escape here: the caller would read it as a clean end of file and silently
+// truncate the output.
+func (d *decoder50) stageFilterInput(win *Window, buf []byte) error {
+	for got := 0; got < len(buf); {
+		n, _ := win.Read(buf[got:])
+		got += n
+		if got == len(buf) {
+			return nil
+		}
+
+		err := d.fill(win)
+		if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, ErrDecoderOutOfData) {
+			return err
+		}
+		if n == 0 && win.Available() == 0 {
+			return io.ErrUnexpectedEOF
 		}
 	}
 	return nil
@@ -398,27 +481,42 @@ func (d *decoder50) Read(win *Window, p []byte) (int, error) {
 		return n, nil
 	}
 
-	// A filter is pending. Drain its pre-filter passthrough first.
-	f := d.fl[0]
-	if f.offset > 0 {
-		limit := min(f.offset, win.Available(), len(p))
+	// A filter is pending. Emit anything ahead of it first. The gap is derived
+	// from tot on each call rather than carried in the queue entry, so there is
+	// no per-filter counter to keep in step.
+	head := &d.fl[0]
+	if gap := head.start - d.tot; gap > 0 {
+		limit := min(int(gap), win.Available(), len(p))
 		n, _ := win.Read(p[:limit])
-		f.offset -= n
 		d.tot += int64(n)
 		return n, nil
 	}
 
-	// Apply the filter. Reuse filterBuf for the input. Note: some filter
-	// implementations return a slice aliasing their input, so filterBuf must
-	// stay stable until outbuf drains. That's guaranteed because Read only
-	// reaches this branch when outbuf is empty.
+	// Apply the filter. f is a copy because d.fl is resliced immediately below,
+	// and staging can drive a fill that appends to d.fl and reallocates it.
+	//
+	// Reuse filterBuf for the input. Note: some filter implementations return a
+	// slice aliasing their input, so filterBuf must stay stable until outbuf
+	// drains. That's guaranteed because Read only reaches this branch when
+	// outbuf is empty.
+	f := *head
 	d.fl = d.fl[1:]
 	if cap(d.filterBuf) < f.length {
 		d.filterBuf = make([]byte, f.length)
 	} else {
 		d.filterBuf = d.filterBuf[:f.length]
 	}
-	_, _ = win.Read(d.filterBuf)
+	if err := d.stageFilterInput(win, d.filterBuf); err != nil {
+		return 0, err
+	}
+
+	// A filter overlapping this block would have to be applied to this block's
+	// output rather than to fresh window data. unrar supports that for blocks
+	// sharing a start and length exactly; this rejects it, which no archive
+	// from a current encoder should hit.
+	if len(d.fl) > 0 && d.fl[0].start < f.start+int64(f.length) {
+		return 0, ErrInvalidFilter
+	}
 
 	var out []byte
 	switch f.ftype {
@@ -435,6 +533,12 @@ func (d *decoder50) Read(win *Window, p []byte) (int, error) {
 		out = FilterE8(0xe9, true, d.filterBuf, d.tot)
 	case 3:
 		out = FilterArm(d.filterBuf, d.tot)
+	default:
+		// readFilter rejects unknown types before queueing, so this is
+		// unreachable. Erroring rather than falling through keeps a future
+		// filter type from leaving out nil, which would return no bytes and no
+		// error against a non-empty buffer.
+		return 0, ErrUnknownFilter
 	}
 
 	d.tot += int64(len(out))

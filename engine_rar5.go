@@ -126,17 +126,16 @@ func (re *rar5Engine) processHeader(h *BlockHeader) (*FileHeader, bool, error) {
 			return nil, false, err
 		}
 
-	case HeaderTypeFile, HeaderTypeService:
+	case HeaderTypeFile:
 		fh, err := ParseFileHeader(h)
 		if err != nil {
 			return nil, false, err
 		}
 
+		// A continuation block's bytes belong to the file its first block
+		// already announced.
 		if !fh.FirstBlock {
-			if _, err = io.Copy(io.Discard, io.LimitReader(re.sd.currentVol, fh.PackedSize)); err != nil {
-				return nil, false, err
-			}
-			return nil, true, nil
+			return nil, true, re.sd.discardPayload(fh.PackedSize)
 		}
 
 		if fh.UnpackedSize > 1024*1024 && fh.UnpackedSize > 1000*fh.PackedSize {
@@ -170,10 +169,13 @@ func (re *rar5Engine) processHeader(h *BlockHeader) (*FileHeader, bool, error) {
 			return nil, false, err
 		}
 	default:
-		if h.DataSize > 0 {
-			if _, err := io.Copy(io.Discard, io.LimitReader(re.sd.currentVol, h.DataSize)); err != nil {
-				return nil, false, err
-			}
+		// Everything the caller never sees, including service records — quick
+		// open, comment, recovery, ACL, stream. Those reuse the file-header
+		// layout, so routing them to the file case above would surface one from
+		// Next() as a file named after the record, e.g. "QO", and hand its bytes
+		// over as file data. Their payload length is h.DataSize either way.
+		if err := re.sd.discardPayload(h.DataSize); err != nil {
+			return nil, false, err
 		}
 	}
 	return nil, true, nil
@@ -185,7 +187,7 @@ func (re *rar5Engine) processVolumePayloadHeader(h *BlockHeader) (io.Reader, boo
 		if _, err := ParseArchiveHeader(h); err != nil {
 			return nil, false, err
 		}
-	case HeaderTypeFile, HeaderTypeService:
+	case HeaderTypeFile:
 		fh, err := ParseFileHeader(h)
 		if err != nil {
 			return nil, false, err
@@ -197,10 +199,13 @@ func (re *rar5Engine) processVolumePayloadHeader(h *BlockHeader) (io.Reader, boo
 			return nil, false, err
 		}
 	default:
-		if h.DataSize > 0 {
-			if _, err := io.Copy(io.Discard, io.LimitReader(re.sd.currentVol, h.DataSize)); err != nil {
-				return nil, false, err
-			}
+		// Everything the caller never sees, including service records — quick
+		// open, comment, recovery, ACL, stream. Those reuse the file-header
+		// layout, so routing them to the file case above would surface one from
+		// Next() as a file named after the record, e.g. "QO", and hand its bytes
+		// over as file data. Their payload length is h.DataSize either way.
+		if err := re.sd.discardPayload(h.DataSize); err != nil {
+			return nil, false, err
 		}
 	}
 	return nil, true, nil

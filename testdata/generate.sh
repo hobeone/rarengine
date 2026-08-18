@@ -1,7 +1,7 @@
 #!/bin/bash
 # generate.sh — Regenerates all RAR test fixtures from scratch.
 #
-# Requirements: rar (v5+), ln -s
+# Requirements: rar (v5+), ln -s, python3, gcc (for the x86 filter fixture)
 #
 # The .rar files are the canonical test fixtures (checked into git).
 # This script documents how they were created and can regenerate them
@@ -136,6 +136,36 @@ echo "  rar5_locked.rar"
 echo -n "hello rardecode" > "$TMPDIR/hello.txt"
 rar a -ma5 -rr -ep rar5_recovery.rar "$TMPDIR/hello.txt"
 echo "  rar5_recovery.rar"
+
+# 19. RAR5, x86 branch filter.
+#
+# The compressor emits its branch filter only when a block's statistics look
+# like real machine code — a synthetic byte pattern with dense E8 opcodes does
+# not trip the detector, so the payload has to be compiled. exe_filter_src.c
+# defines about a thousand small mutually-calling functions, which yields a
+# dense field of genuine relative CALL instructions. Built as a bare shared
+# object with no libc so the fixture contains only code from this repository.
+#
+# This is the only fixture that exercises the filter queue at all, and the only
+# one big enough that rar adds a quick open service record — which is what
+# covers service headers being skipped by Next() rather than surfaced as a file
+# named "QO". Do not add -qo- here.
+#
+# TestExeFixtureReachesFilterPath fails if a regenerated fixture stops queueing
+# filters, so a regeneration that silently loses that coverage is caught.
+gcc -O0 -fno-inline -shared -nostdlib -fPIC -o "$TMPDIR/own.exe" exe_filter_src.c
+rar a -m5 -ma5 -ep rar5_exe_filter.rar "$TMPDIR/own.exe"
+echo "  rar5_exe_filter.rar"
+
+# 20. RAR5, multi-volume with service records in every volume.
+#
+# Same payload split across 8KB volumes with -rr, so each volume carries a quick
+# open and a recovery record after its file block. Covers service records being
+# skipped across a split archive, and the filter queue spanning volume
+# boundaries. Regenerating must keep producing more than one volume; if the
+# payload ever compresses below the volume size the split disappears silently.
+rar a -m5 -ma5 -v8k -rr -ep rar5_multi_service.rar "$TMPDIR/own.exe"
+echo "  rar5_multi_service.part*.rar"
 
 # Note: RAR4 archives (-ma4) are not supported by RAR 7.
 # If RAR4 test fixtures are needed, use an older version of rar.

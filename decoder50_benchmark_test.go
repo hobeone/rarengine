@@ -16,7 +16,7 @@ func BenchmarkFilterExecution(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		for j := range 100 {
 			fl[j] = FilterBlock{
-				offset: j,
+				start:  int64(j),
 				length: 16,
 				ftype:  uint8(j % 4),
 				param:  5,
