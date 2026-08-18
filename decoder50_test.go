@@ -23,7 +23,7 @@ func TestReadFilter5Data(t *testing.T) {
 	if err != nil {
 		t.Fatalf("readFilter5Data failed: %v", err)
 	}
-	expected := 0x1234
+	expected := int64(0x1234)
 	if val != expected {
 		t.Errorf("expected %d, got %d", expected, val)
 	}
@@ -40,24 +40,8 @@ func TestDecoder50_ReadFilter(t *testing.T) {
 	d := newDecoder50()
 	win := NewWindow(1024)
 
-	// Stream contains:
-	// - offset: bytesVal = 1 (1: 0x00), byte = 0x10 -> offset = 0x10 (16)
-	// - length: bytesVal = 1 (1: 0x00), byte = 0x08 -> length = 0x08 (8)
-	// - ftype: 3 bits -> let's say ftype = 0 (Delta filter: 000)
-	// - delta param: 5 bits -> let's say param = 4 (00100), meaning fb.param = 5
-	// In bits:
-	// offset: 00 00010000 (00000100 00)
-	// length: 00 00001000 (00000010 00)
-	// ftype: 000 (000)
-	// param: 00100 (00100)
-	//
-	// Bit sequence:
-	// 00000100 00000000 10000000 01000000 = 0x04, 0x00, 0x80, 0x40
-	buf := []byte{0x04, 0x00, 0x80, 0x40}
-	br := NewBitReader(buf, len(buf)*8)
-	d.br = br
-
-	err := d.readFilter(win)
+	// A delta filter at raw offset 0x10, block length 0x08, param 5.
+	err := queueOne(d, win, 0x10, 0x08, 0, 5)
 	if err != nil {
 		t.Fatalf("readFilter failed: %v", err)
 	}
@@ -72,6 +56,13 @@ func TestDecoder50_ReadFilter(t *testing.T) {
 	}
 	if fb.param != 5 {
 		t.Errorf("expected param 5, got %d", fb.param)
+	}
+	// Nothing has been decoded yet, so the start is the raw stream value.
+	if fb.start != 0x10 {
+		t.Errorf("expected start 0x10, got %#x", fb.start)
+	}
+	if fb.length != 0x08 {
+		t.Errorf("expected length 0x08, got %#x", fb.length)
 	}
 
 	// Test ErrTooManyFilters limit

@@ -40,3 +40,28 @@ jobs:
 
     - name: Run Benchmarks
       run: go test -bench=. -benchmem ./...
+
+  crossbuild:
+    name: 32-bit Build
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v7
+
+    - name: Set up Go
+      uses: actions/setup-go@v7
+      with:
+        go-version-file: go.mod
+
+    # Values parsed from an archive are sized against int, so a stream can
+    # produce a negative where int is 32 bits. Vet rather than build: build
+    # skips test files, which is how a set of 32-bit regression tests once
+    # passed while failing to compile for the platform they cover. There is no
+    # 32-bit runner here, so this checks compilation only.
+    - name: Vet on 32-bit targets
+      run: |
+        for arch in 386 arm; do
+          echo "== GOARCH=$arch =="
+          GOARCH=$arch go vet ./...
+        done
