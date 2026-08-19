@@ -638,17 +638,17 @@ func TestFileReader_DrainLeavesStreamPositioned(t *testing.T) {
 // TestFileReader_ShortFileStopsTraversal pins the boundary of the skip
 // contract.
 //
-// A file that failed but still delivered its declared size has had its packed
-// payload consumed, so the caller can move past it -- that is the CRC-mismatch
-// case, and TestFileReader_SkipVerifies covers it. A file that stopped short
-// has not: an unknown number of its packed bytes remain, and this type only
-// sees the decompressed side. Continuing there would leave the next block
-// header to be parsed out of that payload, so Next must report the failure
-// rather than resynchronise onto it.
+// A file that failed but still delivered its declared size can be stepped
+// over -- that is the CRC-mismatch case, and TestFileReader_SkipVerifies
+// covers it. A file that stopped short is reported instead, and the reason is
+// no longer that its payload is still in the stream: endFile drains the packed
+// remainder on every terminal path, so the stream is positioned at a real
+// block boundary by the time this returns.
 //
-// Draining the packed remainder to make this case skippable too is follow-up
-// work; until then the archive ending here is the safe answer, and is what
-// the previous drain-to-EOF did as well.
+// It is reported because a caller cannot yet tell this failure apart from
+// "the archive is over", and the permissive guess silently truncates whatever
+// the caller is assembling. Giving that distinction a contract is follow-up
+// work; until it exists, reporting is the answer that cannot lose data.
 func TestFileReader_ShortFileStopsTraversal(t *testing.T) {
 	full := fixtureBytes(t, "rar5_store.rar")
 	sd := decompressorFor(full[:len(full)-10])
@@ -660,11 +660,11 @@ func TestFileReader_ShortFileStopsTraversal(t *testing.T) {
 		t.Fatalf("reading the truncated file returned %v; want ErrTruncatedFile", err)
 	}
 
-	// Already reported to the caller, but the packed side is still unread, so
-	// this must not be treated as a file that can be stepped over.
+	// Already reported to the caller once, and reported again here: a short
+	// file ends the traversal until the error contract can say "this file
+	// failed, the stream is fine, keep going".
 	if _, err := sd.Next(); !errors.Is(err, ErrTruncatedFile) {
-		t.Fatalf("Next() after a short file returned %v; want ErrTruncatedFile. "+
-			"Continuing would parse the next header out of the unread payload", err)
+		t.Fatalf("Next() after a short file returned %v; want ErrTruncatedFile", err)
 	}
 }
 

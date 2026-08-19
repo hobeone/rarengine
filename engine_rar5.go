@@ -12,7 +12,7 @@ type rar5Engine struct {
 	lzReader lz50Reader
 	stReader storeReader
 	mvReader multiVolumePayloadReader
-	limitPr  io.LimitedReader
+	packed   packedCursor
 	// headerDec decrypts subsequent header blocks once a HEAD_CRYPT header
 	// (archive-level header encryption) has been seen. nil means headers
 	// are plaintext. Not reset across volumes -- multi-volume archives with
@@ -30,7 +30,7 @@ func newRAR5Engine(sd *StreamDecompressor) *rar5Engine {
 func (re *rar5Engine) Next() (*FileHeader, error) {
 	// Draining goes through the owner, so a file the caller skipped is
 	// verified on the same terms as one it read.
-	if err := re.sd.file.endFile(); err != nil {
+	if err := re.sd.file.endFile(&re.packed); err != nil {
 		return nil, err
 	}
 
@@ -81,15 +81,16 @@ func (re *rar5Engine) processHeader(h *BlockHeader) (*FileHeader, bool, error) {
 			// next header would be parsed out of it, which for a crafted
 			// archive means an entry fabricated from attacker-chosen bytes
 			// surfacing from Next(). The block header is intact and
-			// CRC-checked here -- only the declared unpacked size is
-			// unusable -- so h.DataSize is trustworthy and the payload can be
-			// dropped, leaving the traversal able to reach the next file.
-			if errors.Is(err, ErrUnpSizeUnknown) {
-				if discardErr := re.sd.discardPayload(h.DataSize); discardErr != nil {
-					return nil, false, discardErr
-				}
-			}
-			return nil, false, err
+			// CRC-checked by this point whatever went wrong inside it -- only
+			// the file-level fields are unusable -- so h.DataSize is
+			// trustworthy and the payload can be dropped, leaving the
+			// traversal able to reach the next file.
+			//
+			// This runs for every parse failure, not one named error. Which
+			// field an archive corrupts is the archive's choice, so keying the
+			// discard on a particular error left the same fabrication open
+			// through every other one.
+			return nil, false, re.sd.refuse(h.DataSize, err)
 		}
 
 		// A continuation block's bytes belong to the file its first block
@@ -99,15 +100,17 @@ func (re *rar5Engine) processHeader(h *BlockHeader) (*FileHeader, bool, error) {
 		}
 
 		if fh.UnpackedSize > 1024*1024 && fh.UnpackedSize > 1000*fh.PackedSize {
-			return nil, false, ErrRarBombDetected
+			// Refused like any other rejected file, and for the same reason:
+			// the caller can keep calling Next(), so leaving the payload lets
+			// the block that was just refused supply the next "file".
+			return nil, false, re.sd.refuse(fh.PackedSize, ErrRarBombDetected)
 		}
 
 		re.sd.win.Reset(fh.Solid)
 
-		re.limitPr.R = re.sd.currentVol
-		re.limitPr.N = fh.PackedSize
+		re.packed.repoint(re.sd.currentVol, fh.PackedSize)
 
-		re.sd.file.begin(fh, re.newDecompressionReader(fh, &re.limitPr), re.sd.verifyCRC)
+		re.sd.file.begin(fh, re.newDecompressionReader(fh, re.packed.reader()), re.sd.verifyCRC)
 		return fh, false, nil
 
 	case HeaderTypeEncryption:
@@ -147,10 +150,15 @@ func (re *rar5Engine) processVolumePayloadHeader(h *BlockHeader) (io.Reader, boo
 	case HeaderTypeFile:
 		fh, err := ParseFileHeader(h)
 		if err != nil {
-			return nil, false, err
+			return nil, false, re.sd.refuse(h.DataSize, err)
 		}
 		re.sd.file.advanceVolume(fh)
-		return io.LimitReader(re.sd.currentVol, fh.PackedSize), false, nil
+		// Repointed rather than replaced by a fresh limiter: teardown drains
+		// this cursor, and a limiter it cannot see would leave the count
+		// describing a volume the stream has already moved past. Reusing it
+		// also drops an allocation per volume.
+		re.packed.repoint(re.sd.currentVol, fh.PackedSize)
+		return re.packed.reader(), false, nil
 	case HeaderTypeEnd:
 		if err := re.sd.nextVolume(); err != nil {
 			return nil, false, err
@@ -169,6 +177,11 @@ func (re *rar5Engine) processVolumePayloadHeader(h *BlockHeader) (io.Reader, boo
 }
 
 func (re *rar5Engine) nextVolumePayload() (io.Reader, error) {
+	// The count describes the volume being left, and nextVolume closes that
+	// volume before it can discover whether a next one exists. Dropping it
+	// here keeps teardown from later draining a closed reader -- a read the
+	// caller was told would not happen, on a handle it may have recycled.
+	re.packed.invalidate()
 	if err := re.sd.nextVolume(); err != nil {
 		return nil, err
 	}

@@ -249,39 +249,66 @@ func (fr *fileReader) truncated() error {
 // end the archive with no way past it, which is the workflow
 // SetVerifyCRC(false) exists to support. That only applies when the file
 // actually produced its declared size, though: see below.
-func (fr *fileReader) endFile() error {
+// packed is the engine's cursor over the bytes the current file's block still
+// owes the stream. It is passed in rather than held as a field because the
+// engine repoints it on every volume advance: read at the point of use it is
+// current by construction, where a copy kept here would describe whichever
+// volume the file started on.
+func (fr *fileReader) endFile(packed *packedCursor) error {
 	if fr.src == nil {
 		return nil
 	}
 	reported := fr.done
-	_, err := io.Copy(io.Discard, fr)
+	_, contentErr := io.Copy(io.Discard, fr)
 	// Captured before clear: whether the file delivered everything it
 	// promised decides whether traversal can continue.
 	short := fr.remaining > 0
+	// Drained on every terminal path, not only the failing ones. A file that
+	// completed perfectly can still leave packed bytes behind, and that is
+	// exactly the case an archive uses to fabricate the next entry.
+	packedErr := packed.drain()
+	// The cursor described this file. Dropping the count here keeps a short
+	// drain -- a truncated volume, where the promised bytes were never on the
+	// media -- from leaving a stale count for whatever runs next.
+	packed.invalidate()
 	fr.clear()
 
-	if short {
-		// The file stopped before its declared size, so an unknown number of
-		// its *packed* bytes are still in the stream -- this type only sees
-		// the decompressed side and cannot skip them. Continuing would leave
-		// the next block header to be parsed out of that payload, which for a
-		// crafted archive means an entry fabricated from attacker-chosen
-		// bytes surfacing from Next(). Reporting the failure instead ends the
-		// traversal, which is what the previous drain-to-EOF also did.
-		//
-		// Making this case skippable requires draining the packed remainder,
-		// which belongs to the engines rather than here; that is deliberately
-		// left to follow-up work.
-		if reported != nil {
-			return reported
+	var verdict error
+	switch {
+	case short:
+		// The file stopped before its declared size. Its packed remainder is
+		// drained by now, so the stream sits at a real block boundary and
+		// traversal *could* continue -- but a caller cannot tell this failure
+		// apart from "the archive is over", and the permissive guess silently
+		// truncates whatever it is assembling. Reporting is the reading that
+		// cannot lose data, until the error contract can carry the difference.
+		verdict = reported
+		if verdict == nil {
+			verdict = contentErr
 		}
-		return err
+	case reported != nil:
+		// Already delivered to the caller once; saying it again would make one
+		// corrupt file an archive nobody can read past.
+		verdict = nil
+	default:
+		verdict = contentErr
 	}
 
-	if reported != nil {
-		return nil
+	switch {
+	case packedErr == nil:
+		return verdict
+	case verdict == nil:
+		// Returned unwrapped. errors.Join builds a wrapper even around a
+		// single error, which costs an allocation and defeats the identity
+		// comparisons callers use to recognise a sentinel.
+		return packedErr
+	default:
+		// Both are meaningful and neither subsumes the other: the verdict says
+		// what happened to the file, the drain error says the stream is no
+		// longer positioned at a block boundary. Returning either alone loses
+		// something the caller needs.
+		return errors.Join(verdict, packedErr)
 	}
-	return err
 }
 
 // clear drops the active file. The zero value reports ErrNoActiveFile from
