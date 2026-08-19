@@ -234,6 +234,9 @@ func (mv *multiVolumePayloadReader) Read(p []byte) (int, error) {
 }
 
 func (re *rar5Engine) newDecompressionReader(fh *FileHeader, pr io.Reader) io.Reader {
+	// Derived up front, applied below the multi-volume splice. A non-nil key
+	// is what says the file is encrypted from that point on.
+	var decKey, decIV []byte
 	if fh.Encrypted {
 		if re.sd.password == "" {
 			return &errorReader{err: ErrPasswordRequired}
@@ -250,23 +253,42 @@ func (re *rar5Engine) newDecompressionReader(fh *FileHeader, pr io.Reader) io.Re
 				return &errorReader{err: err}
 			}
 		}
-		decPr, err := newCBCDecryptReader(pr, key, fh.IV)
-		if err != nil {
-			return &errorReader{err: err}
-		}
-		pr = decPr
+		decKey, decIV = key, fh.IV
 	}
 
+	// The multi-volume splice sits BELOW the decryption, not above it.
+	//
+	// A file's ciphertext is one continuous CBC stream that volume boundaries
+	// cut at arbitrary offsets: the parts of an 8 KiB file measure 757, 756
+	// and 631 bytes, none of them 16-byte aligned though they total a whole
+	// number of blocks. A later volume therefore begins mid-block and cannot
+	// be decrypted on its own -- there is no per-volume IV to restart from,
+	// and the header repeats the first part's salt and IV unchanged.
+	//
+	// Splicing above the decryption fed each new volume's raw bytes straight
+	// to the decoder, so the first part decoded and every part after it was
+	// ciphertext. Splicing below it lets one CBC reader carry its chaining
+	// state across the boundary, and leaves the advance path with nothing to
+	// know about encryption at all.
 	re.mvReader.re = re
 	re.mvReader.r = pr
 
+	var src io.Reader = &re.mvReader
+	if decKey != nil {
+		decSrc, err := newCBCDecryptReader(src, decKey, decIV)
+		if err != nil {
+			return &errorReader{err: err}
+		}
+		src = decSrc
+	}
+
 	var r io.Reader
 	if fh.Method == 0 {
-		re.stReader.r = &re.mvReader
+		re.stReader.r = src
 		re.stReader.win = re.sd.win
 		r = &re.stReader
 	} else {
-		re.dec50.init(&re.mvReader, fh.FirstBlock)
+		re.dec50.init(src, fh.FirstBlock)
 		re.lzReader.dec = re.dec50
 		re.lzReader.win = re.sd.win
 		r = &re.lzReader

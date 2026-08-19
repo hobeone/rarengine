@@ -247,6 +247,29 @@ func TestIntegration_Oracle(t *testing.T) {
 		// which this library does not implement, so it cannot round-trip
 		// against unrar. It is exercised by TestRAR3_RealArchive_Header
 		// instead.
+		// Encrypted AND split. A file's ciphertext is one continuous CBC
+		// stream that volume boundaries cut mid-block, so these are the only
+		// fixtures where the decryption has to survive a volume advance.
+		// Neither method is redundant: the compressed decoder reads ahead
+		// across the boundary before emitting anything, while the store
+		// reader emits each volume as it goes, so a broken splice produces
+		// nothing in one and partial garbage in the other.
+		{name: "rar5_encrypted_multi", password: "test", volumes: []string{
+			"rar5_encrypted_multi.part01.rar", "rar5_encrypted_multi.part02.rar",
+			"rar5_encrypted_multi.part03.rar", "rar5_encrypted_multi.part04.rar",
+			"rar5_encrypted_multi.part05.rar", "rar5_encrypted_multi.part06.rar",
+			"rar5_encrypted_multi.part07.rar", "rar5_encrypted_multi.part08.rar",
+			"rar5_encrypted_multi.part09.rar", "rar5_encrypted_multi.part10.rar",
+			"rar5_encrypted_multi.part11.rar",
+		}},
+		{name: "rar5_encrypted_multi_store", password: "test", volumes: []string{
+			"rar5_encrypted_multi_store.part01.rar", "rar5_encrypted_multi_store.part02.rar",
+			"rar5_encrypted_multi_store.part03.rar", "rar5_encrypted_multi_store.part04.rar",
+			"rar5_encrypted_multi_store.part05.rar", "rar5_encrypted_multi_store.part06.rar",
+			"rar5_encrypted_multi_store.part07.rar", "rar5_encrypted_multi_store.part08.rar",
+			"rar5_encrypted_multi_store.part09.rar", "rar5_encrypted_multi_store.part10.rar",
+			"rar5_encrypted_multi_store.part11.rar",
+		}},
 		{name: "rar5_solid_multi_qo", volumes: []string{
 			"rar5_solid_multi_qo.part1.rar", "rar5_solid_multi_qo.part2.rar",
 			"rar5_solid_multi_qo.part3.rar", "rar5_solid_multi_qo.part4.rar",
@@ -289,7 +312,7 @@ func TestIntegration_Oracle(t *testing.T) {
 			sd := rarengine.NewStreamDecompressor(volumes)
 			if tc.password != "" {
 				sd.SetPassword(tc.password)
-				// Encrypted files record a key-derived MAC in place of a
+				// Encrypted files record a key-derived digest in place of a
 				// CRC32, which this library cannot compute, so verification
 				// refuses them rather than skipping the check. Comparing the
 				// decoded bytes against unrar is still worth doing, and is

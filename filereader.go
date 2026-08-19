@@ -14,8 +14,9 @@ import (
 var ErrTruncatedFile = errors.New("rarengine: archive ended before the file's declared size was produced")
 
 // ErrChecksumUnsupported is returned once a file has been fully decoded when
-// its header records a digest this library cannot check -- currently the
-// key-derived MAC that encrypted files use in place of a CRC32.
+// its header records a digest this library cannot check -- currently any
+// encrypted file, whose recorded value is derived from the key rather than
+// being a CRC32 of the plaintext.
 //
 // Completing such a file without an error would report unverified content as
 // extracted successfully, and a RAR archive's per-file digest is the only
@@ -101,8 +102,21 @@ func (fr *fileReader) begin(fh *FileHeader, src io.Reader, verifyCRC bool) {
 	fr.size = fh.UnpackedSize
 	fr.remaining = fh.UnpackedSize
 	fr.crc = 0
-	fr.accumulate = verifyCRC && !fh.UseMac
-	fr.unverifiable = verifyCRC && fh.UseMac
+	// An encrypted file's recorded checksum is not a CRC32 of the plaintext.
+	// Measured on two fixtures: one records 9ef0f342 where the content's CRC32
+	// is 4a7f9844, the other records a value matching neither its content's
+	// CRC32 nor any prefix of it. Comparing it as a CRC32 therefore reports
+	// corruption on bytes that decoded perfectly -- a false alarm, and the
+	// worst kind, since it accuses correct data.
+	//
+	// UseMac alone does not cover this: it is set on one of those fixtures and
+	// clear on the other, while neither value is verifiable here. Gating on
+	// encryption itself matches what this library can actually check.
+	// Verifying these properly is separate work; until then the honest answer
+	// is that the digest cannot be checked, not that it failed.
+	unverifiable := fh.UseMac || fh.Encrypted
+	fr.accumulate = verifyCRC && !unverifiable
+	fr.unverifiable = verifyCRC && unverifiable
 	fr.done = nil
 }
 
