@@ -70,10 +70,14 @@ func init() {
 }
 
 type rar3Decoder struct {
-	r              io.Reader
+	r io.Reader
+	// unpackedSize bounds the decode loop only. It is deliberately not an
+	// output budget: fileReader owns that and clamps p before calling Read,
+	// so a second copy here could only disagree with it. A caller driving
+	// this decoder directly must clamp p the same way or it can over-read
+	// bytes left in the window.
 	unpackedSize   int64
 	produced       int64 // Total bytes produced into sliding window for current file
-	written        int64 // Total bytes read out by caller via Read(p)
 	win            *Window
 	br             BitReader
 	inBuf          []byte // Reusable 64KB stream buffer
@@ -103,7 +107,6 @@ func (d *rar3Decoder) Reset(r io.Reader, unpackedSize int64, solid bool) {
 	d.r = r
 	d.unpackedSize = unpackedSize
 	d.produced = 0
-	d.written = 0
 	d.tablesRead = false
 	d.isPPM = false
 
@@ -348,14 +351,6 @@ func (d *rar3Decoder) Read(p []byte) (int, error) {
 		return 0, nil
 	}
 
-	remaining := d.unpackedSize - d.written
-	if remaining <= 0 {
-		return 0, io.EOF
-	}
-	if int64(len(p)) > remaining {
-		p = p[:remaining]
-	}
-
 	// Decompress into window until we produce required unpacked bytes or hit EOF
 	for d.produced < d.unpackedSize {
 		if d.win.Available() >= len(p) || d.win.Available() >= 32768 {
@@ -366,7 +361,6 @@ func (d *rar3Decoder) Read(p []byte) (int, error) {
 			if err := d.readBlockHeader(); err != nil {
 				if d.win.Available() > 0 {
 					n, _ := d.win.Read(p)
-					d.written += int64(n)
 					return n, nil
 				}
 				return 0, err
@@ -377,7 +371,6 @@ func (d *rar3Decoder) Read(p []byte) (int, error) {
 		if err != nil {
 			if d.win.Available() > 0 {
 				n, _ := d.win.Read(p)
-				d.written += int64(n)
 				return n, nil
 			}
 			return 0, err
@@ -514,12 +507,7 @@ func (d *rar3Decoder) Read(p []byte) (int, error) {
 
 	if d.win.Available() > 0 {
 		n, _ := d.win.Read(p)
-		d.written += int64(n)
 		return n, nil
-	}
-
-	if d.written >= d.unpackedSize {
-		return 0, io.EOF
 	}
 
 	return 0, io.EOF

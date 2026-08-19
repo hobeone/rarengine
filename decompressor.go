@@ -56,22 +56,26 @@ func (v ArchiveVersion) String() string {
 	}
 }
 
+// versionedEngine is the per-format half of decoding: walking block headers
+// and installing each file. Reading a file's bytes is deliberately not part
+// of it -- both engines had byte-identical Read and checksum implementations,
+// and fileReader now owns that for both.
 type versionedEngine interface {
 	Next() (*FileHeader, error)
-	Read(p []byte) (int, error)
 }
 
 // StreamDecompressor implements a sequential, tar-like reader for extracting RAR archives on-the-fly.
 type StreamDecompressor struct {
 	volumes    <-chan io.ReadCloser
 	currentVol io.ReadCloser
-	currHeader *FileHeader
-	currReader io.Reader
-	version    ArchiveVersion
-	engine     versionedEngine
-	win        *Window
-	password   string
-	verifyCRC  bool
+	// file owns all per-file decode state: the reader chain, the header in
+	// force, the byte budget, the running checksum and the terminal error.
+	file      fileReader
+	version   ArchiveVersion
+	engine    versionedEngine
+	win       *Window
+	password  string
+	verifyCRC bool
 	// discardLr backs discardPayload. Reused so discarding a block's payload
 	// costs no allocation, per the no-new-allocations rule in CLAUDE.md.
 	discardLr io.LimitedReader
@@ -136,8 +140,9 @@ func (sd *StreamDecompressor) Reset(volumes <-chan io.ReadCloser) {
 		sd.currentVol = nil
 	}
 	sd.volumes = volumes
-	sd.currHeader = nil
-	sd.currReader = nil
+	// Clearing the file drops any terminal error with it; without this a
+	// reused decompressor would inherit the previous stream's failure.
+	sd.file.clear()
 	sd.version = VersionUnknown
 	sd.engine = nil
 	sd.win.Reset(false)
@@ -210,12 +215,18 @@ func (sd *StreamDecompressor) Next() (*FileHeader, error) {
 	return sd.engine.Next()
 }
 
-// Read reads decompressed bytes from the current active file block.
+// Read reads decompressed bytes from the current active file.
+//
+// Once a file fails -- a checksum mismatch, a truncated stream, or a decode
+// error -- that error is returned by every subsequent Read for that file
+// rather than decaying to io.EOF. Advance with Next to move on.
+//
+// Note that io.ReadFull cannot see an error delivered alongside the final
+// bytes, because io.ReadAtLeast discards it once enough bytes have arrived.
+// A caller reading exactly UnpackedSize that way must Read once more, or use
+// io.Copy, to observe the file's verdict.
 func (sd *StreamDecompressor) Read(p []byte) (int, error) {
-	if sd.engine == nil {
-		return 0, ErrNoActiveFile
-	}
-	return sd.engine.Read(p)
+	return sd.file.Read(p)
 }
 
 type lz50Reader struct {

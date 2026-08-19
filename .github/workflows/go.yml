@@ -22,10 +22,27 @@ jobs:
       with:
         go-version-file: go.mod
 
+    # The runner image resolves apt through a mirrorlist that puts an Azure
+    # mirror first, and that mirror stalls rather than refusing: an unbounded
+    # apt-get update has burned an entire job on "Ign:" retries. Each call is
+    # bounded so a stalled mirror costs a retry instead of the run, and the
+    # step timeout is the backstop for a stall the inner bound cannot see.
     - name: Install unrar (Ubuntu)
+      timeout-minutes: 6
       run: |
-        sudo apt-get update
-        sudo apt-get install -y unrar
+        for attempt in 1 2 3; do
+          sudo timeout 120 apt-get update && break
+          echo "::warning::apt-get update stalled or failed (attempt $attempt/3)"
+        done
+        sudo timeout 180 apt-get install -y unrar
+
+    # The oracle tests skip themselves when unrar is absent, so an install
+    # that fails without stopping the job would produce a green run with no
+    # differential coverage at all. Fail here instead, where the cause is
+    # still visible. This mirrors exec.LookPath, which is what those tests
+    # actually branch on.
+    - name: Verify unrar is present
+      run: command -v unrar
 
     - name: Verify go.mod Tidy
       run: |

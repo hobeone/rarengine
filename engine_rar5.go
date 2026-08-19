@@ -3,19 +3,16 @@ package rarengine
 import (
 	"errors"
 	"fmt"
-	"hash/crc32"
 	"io"
 )
 
 type rar5Engine struct {
-	sd             *StreamDecompressor
-	dec50          *decoder50
-	lzReader       lz50Reader
-	stReader       storeReader
-	mvReader       multiVolumePayloadReader
-	limitPr        io.LimitedReader
-	bytesRemaining int64
-	crc            uint32
+	sd       *StreamDecompressor
+	dec50    *decoder50
+	lzReader lz50Reader
+	stReader storeReader
+	mvReader multiVolumePayloadReader
+	limitPr  io.LimitedReader
 	// headerDec decrypts subsequent header blocks once a HEAD_CRYPT header
 	// (archive-level header encryption) has been seen. nil means headers
 	// are plaintext. Not reset across volumes -- multi-volume archives with
@@ -31,7 +28,9 @@ func newRAR5Engine(sd *StreamDecompressor) *rar5Engine {
 }
 
 func (re *rar5Engine) Next() (*FileHeader, error) {
-	if err := re.drainPrevious(); err != nil {
+	// Draining goes through the owner, so a file the caller skipped is
+	// verified on the same terms as one it read.
+	if err := re.sd.file.endFile(); err != nil {
 		return nil, err
 	}
 
@@ -68,57 +67,6 @@ func (re *rar5Engine) readBlockHeader() (*BlockHeader, error) {
 	return ReadBlockHeader(re.sd.currentVol)
 }
 
-func (re *rar5Engine) Read(p []byte) (int, error) {
-	if re.sd.currReader == nil {
-		return 0, ErrNoActiveFile
-	}
-	if re.bytesRemaining <= 0 {
-		return 0, io.EOF
-	}
-	if int64(len(p)) > re.bytesRemaining {
-		p = p[:re.bytesRemaining]
-	}
-	n, err := re.sd.currReader.Read(p)
-	re.crc = crc32.Update(re.crc, crc32.IEEETable, p[:n])
-	re.bytesRemaining -= int64(n)
-	if err == nil && re.bytesRemaining <= 0 {
-		if crcErr := re.checkCRC(); crcErr != nil {
-			return n, crcErr
-		}
-		return n, io.EOF
-	}
-	return n, err
-}
-
-// checkCRC compares the running CRC32 of this file's decompressed content
-// against the value recorded in its RAR header, once all bytes have been
-// read. A no-op when verification is disabled or the header carries no
-// CRC32 (FileFlagHasCRC32 unset).
-func (re *rar5Engine) checkCRC() error {
-	if !re.sd.verifyCRC {
-		return nil
-	}
-	fh := re.sd.currHeader
-	if fh == nil || !fh.HasCRC32 {
-		return nil
-	}
-	if re.crc != fh.CRC32 {
-		return fmt.Errorf("%w: file %q: computed=%08x header=%08x", ErrCRCMismatch, fh.Name, re.crc, fh.CRC32)
-	}
-	return nil
-}
-
-func (re *rar5Engine) drainPrevious() error {
-	if re.sd.currReader != nil {
-		if _, err := io.Copy(io.Discard, re.sd.currReader); err != nil {
-			re.sd.currReader = nil
-			return fmt.Errorf("rarengine: draining previous file: %w", err)
-		}
-		re.sd.currReader = nil
-	}
-	return nil
-}
-
 func (re *rar5Engine) processHeader(h *BlockHeader) (*FileHeader, bool, error) {
 	switch h.Type {
 	case HeaderTypeArchive:
@@ -129,6 +77,18 @@ func (re *rar5Engine) processHeader(h *BlockHeader) (*FileHeader, bool, error) {
 	case HeaderTypeFile:
 		fh, err := ParseFileHeader(h)
 		if err != nil {
+			// Refusing a file must not leave its payload in the stream: the
+			// next header would be parsed out of it, which for a crafted
+			// archive means an entry fabricated from attacker-chosen bytes
+			// surfacing from Next(). The block header is intact and
+			// CRC-checked here -- only the declared unpacked size is
+			// unusable -- so h.DataSize is trustworthy and the payload can be
+			// dropped, leaving the traversal able to reach the next file.
+			if errors.Is(err, ErrUnpSizeUnknown) {
+				if discardErr := re.sd.discardPayload(h.DataSize); discardErr != nil {
+					return nil, false, discardErr
+				}
+			}
 			return nil, false, err
 		}
 
@@ -147,10 +107,7 @@ func (re *rar5Engine) processHeader(h *BlockHeader) (*FileHeader, bool, error) {
 		re.limitPr.R = re.sd.currentVol
 		re.limitPr.N = fh.PackedSize
 
-		re.sd.currHeader = fh
-		re.bytesRemaining = fh.UnpackedSize
-		re.crc = 0
-		re.sd.currReader = re.newDecompressionReader(fh, &re.limitPr)
+		re.sd.file.begin(fh, re.newDecompressionReader(fh, &re.limitPr), re.sd.verifyCRC)
 		return fh, false, nil
 
 	case HeaderTypeEncryption:
@@ -192,7 +149,7 @@ func (re *rar5Engine) processVolumePayloadHeader(h *BlockHeader) (io.Reader, boo
 		if err != nil {
 			return nil, false, err
 		}
-		re.sd.currHeader = fh
+		re.sd.file.advanceVolume(fh)
 		return io.LimitReader(re.sd.currentVol, fh.PackedSize), false, nil
 	case HeaderTypeEnd:
 		if err := re.sd.nextVolume(); err != nil {
@@ -233,7 +190,6 @@ func (re *rar5Engine) nextVolumePayload() (io.Reader, error) {
 
 type multiVolumePayloadReader struct {
 	re *rar5Engine
-	sd *StreamDecompressor
 	r  io.Reader
 }
 
@@ -247,25 +203,13 @@ func (mv *multiVolumePayloadReader) Read(p []byte) (int, error) {
 			return n, nil
 		}
 		if err == io.EOF {
-			var currHeader *FileHeader
-			if mv.re != nil {
-				currHeader = mv.re.sd.currHeader
-			} else if mv.sd != nil {
-				currHeader = mv.sd.currHeader
-			}
-			if currHeader != nil && currHeader.LastBlock {
+			// The header in force says whether this is the file's final
+			// block; anything else means the payload continues in the next
+			// volume, so an inner EOF is a boundary rather than an end.
+			if mv.re.sd.file.lastBlock() {
 				return 0, io.EOF
 			}
-			var nextR io.Reader
-			var nextErr error
-			if mv.re != nil {
-				nextR, nextErr = mv.re.nextVolumePayload()
-			} else if mv.sd != nil {
-				if mv.sd.engine == nil {
-					mv.sd.engine = newRAR5Engine(mv.sd)
-				}
-				nextR, nextErr = mv.sd.engine.(*rar5Engine).nextVolumePayload()
-			}
+			nextR, nextErr := mv.re.nextVolumePayload()
 			if nextErr != nil {
 				return 0, nextErr
 			}

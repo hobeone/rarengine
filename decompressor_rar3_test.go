@@ -111,7 +111,16 @@ func TestStreamDecompressor_RAR3_Store(t *testing.T) {
 	}
 }
 
-func makeRAR3CustomArchive(filename string, content []byte, flags uint16, highPack, highUnp uint32, salt []byte, method byte) []byte {
+// makeRAR3CustomArchive builds a RAR3 archive whose stored payload is content
+// and which is expected to decompress to unpacked.
+//
+// unpacked is passed rather than derived because for a compressed method it
+// differs from content, and both values the header records about it are now
+// load-bearing: producing fewer bytes than the declared size is reported as
+// ErrTruncatedFile, and ParseRAR3FileHeader always marks a RAR3 header as
+// carrying a CRC32, so the recorded checksum is always compared. For the
+// store method, pass content for both.
+func makeRAR3CustomArchive(filename string, content, unpacked []byte, flags uint16, highPack, highUnp uint32, salt []byte, method byte) []byte {
 	var buf bytes.Buffer
 
 	// 1. Signature
@@ -143,9 +152,10 @@ func makeRAR3CustomArchive(filename string, content []byte, flags uint16, highPa
 	binary.LittleEndian.PutUint16(fileHead[5:7], uint16(headSize))
 	binary.LittleEndian.PutUint32(fileHead[7:11], uint32(len(content)))
 
-	binary.LittleEndian.PutUint32(fileHead[11:15], uint32(len(content)))
+	binary.LittleEndian.PutUint32(fileHead[11:15], uint32(len(unpacked)))
 	fileHead[15] = 3
-	binary.LittleEndian.PutUint32(fileHead[20:24], 0)
+	binary.LittleEndian.PutUint32(fileHead[16:20], crc32.ChecksumIEEE(unpacked)) // FILE_CRC
+	binary.LittleEndian.PutUint32(fileHead[20:24], 0)                            // FTIME
 	fileHead[24] = 20
 	fileHead[25] = method
 	binary.LittleEndian.PutUint16(fileHead[26:28], uint16(len(filename)))
@@ -178,7 +188,7 @@ func makeRAR3CustomArchive(filename string, content []byte, flags uint16, highPa
 func TestStreamDecompressor_RAR3_HighSize(t *testing.T) {
 	content := []byte("hello rar3 high size")
 	filename := "hello_rar3_high.txt"
-	archiveData := makeRAR3CustomArchive(filename, content, 0x0100, 2, 3, nil, 0x30)
+	archiveData := makeRAR3CustomArchive(filename, content, content, 0x0100, 2, 3, nil, 0x30)
 
 	volumes := make(chan io.ReadCloser, 1)
 	volumes <- &mockReadCloser{bytes.NewReader(archiveData)}
@@ -205,7 +215,7 @@ func TestStreamDecompressor_RAR3_Salt(t *testing.T) {
 	content := []byte("hello rar3 salt")
 	filename := "hello_rar3_salt.txt"
 	salt := []byte{1, 2, 3, 4, 5, 6, 7, 8}
-	archiveData := makeRAR3CustomArchive(filename, content, 0x0400, 0, 0, salt, 0x30)
+	archiveData := makeRAR3CustomArchive(filename, content, content, 0x0400, 0, 0, salt, 0x30)
 
 	volumes := make(chan io.ReadCloser, 1)
 	volumes <- &mockReadCloser{bytes.NewReader(archiveData)}
@@ -323,7 +333,7 @@ func TestStreamDecompressor_RAR3_LZ77_ExactDecompression(t *testing.T) {
 	compressedPayload := bw.buf
 
 	// Create custom RAR3 archive with compressed payload
-	archiveData := makeRAR3CustomArchive("hello_lz77.txt", compressedPayload, 0, 0, 0, nil, 0x33)
+	archiveData := makeRAR3CustomArchive("hello_lz77.txt", compressedPayload, []byte(expectedText), 0, 0, 0, nil, 0x33)
 
 	volumes := make(chan io.ReadCloser, 1)
 	volumes <- &mockReadCloser{bytes.NewReader(archiveData)}
@@ -403,7 +413,7 @@ func TestStreamDecompressor_RAR3_LZ77_IntegrationFixture(t *testing.T) {
 	bw.flush()
 
 	// Wrap payload in RAR3 Archive File Header
-	archiveData := makeRAR3CustomArchive("testfile.txt", bw.buf, 0, 0, 0, nil, 0x33)
+	archiveData := makeRAR3CustomArchive("testfile.txt", bw.buf, []byte(expectedContent), 0, 0, 0, nil, 0x33)
 
 	volumes := make(chan io.ReadCloser, 1)
 	volumes <- &mockReadCloser{bytes.NewReader(archiveData)}
@@ -516,7 +526,10 @@ func TestStreamDecompressor_RAR3_LZ77_MatchDecompression(t *testing.T) {
 	bw.writeBits(3, 4)
 	bw.flush()
 
-	archiveData := makeRAR3CustomArchive("match_test.txt", bw.buf, 0, 0, 0, nil, 0x33)
+	// Declared before the archive is built: the header must name the
+	// decompressed length, not the length of the compressed payload.
+	expected := "ABCABCABCA"
+	archiveData := makeRAR3CustomArchive("match_test.txt", bw.buf, []byte(expected), 0, 0, 0, nil, 0x33)
 
 	volumes := make(chan io.ReadCloser, 1)
 	volumes <- &mockReadCloser{bytes.NewReader(archiveData)}
@@ -537,7 +550,6 @@ func TestStreamDecompressor_RAR3_LZ77_MatchDecompression(t *testing.T) {
 		t.Fatalf("ReadAll failed for LZ77 match test: %v", err)
 	}
 
-	expected := "ABCABCABCA"
 	if string(buf) != expected {
 		t.Errorf("expected decompressed output %q, got %q", expected, string(buf))
 	}

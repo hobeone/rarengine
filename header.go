@@ -19,6 +19,14 @@ var (
 	ErrCorruptFileHeader    = errors.New("rarengine: corrupt file header")
 	ErrUnknownEncryptMethod = errors.New("rarengine: unknown encryption method")
 	ErrCorruptEncryptData   = errors.New("rarengine: corrupt encryption record")
+
+	// ErrUnpSizeUnknown is returned for a file whose header declares that its
+	// unpacked size is not known (FileFlagUnpSizeUnknown), as produced by
+	// streamed archiving such as "rar -si". Decoding relies on the declared
+	// size to tell a completed file from a truncated one, so a file that
+	// declines to state it is refused rather than decoded on a size that
+	// means nothing.
+	ErrUnpSizeUnknown = errors.New("rarengine: file header declares an unknown unpacked size")
 )
 
 const (
@@ -215,6 +223,9 @@ func parseBlockHeaderFields(buf []byte, n int) (*BlockHeader, error) {
 			return nil, err
 		}
 		h.DataSize = int64(dtSizeV)
+		if h.DataSize < 0 {
+			return nil, ErrCorruptBlockHeader
+		}
 		payload = payload[nDt:]
 	}
 
@@ -362,6 +373,13 @@ func ParseFileHeader(h *BlockHeader) (*FileHeader, error) {
 	}
 	payload = payload[nFlags:]
 
+	// Refused at parse time rather than later: the flag says UnpackedSize is
+	// not a trustworthy value, which is a structural fact about the header
+	// rather than a policy judgment about the file.
+	if flags&FileFlagUnpSizeUnknown > 0 {
+		return nil, ErrUnpSizeUnknown
+	}
+
 	fh := &FileHeader{
 		IsDir:      flags&FileFlagIsDir > 0,
 		FirstBlock: h.Flags&HeaderFlagDataNotFirst == 0,
@@ -373,7 +391,14 @@ func ParseFileHeader(h *BlockHeader) (*FileHeader, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The vint carries up to 70 bits, so an attacker can set the sign bit of
+	// the int64. A negative size would sail past every "have we produced
+	// enough yet" comparison downstream, so it is rejected where it enters
+	// rather than defended against at each use.
 	fh.UnpackedSize = int64(unpackedSize)
+	if fh.UnpackedSize < 0 {
+		return nil, ErrCorruptFileHeader
+	}
 	payload = payload[nUnp:]
 
 	attrs, nAttrs, err := DecodeVint(payload) // Attributes
