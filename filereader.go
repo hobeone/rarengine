@@ -109,11 +109,15 @@ func (fr *fileReader) lastBlock() bool {
 func (fr *fileReader) Read(p []byte) (int, error) {
 	// Behavioural rule: a terminated file yields no further bytes. This is
 	// not the same check as the one in finish, which protects the recorded
-	// verdict; this one protects the caller. Both are needed. A source can
-	// resume producing data after reporting an error -- rar3Decoder does
-	// exactly that, discarding a decode error while its window still holds
-	// bytes -- and without this those bytes would be appended to a file
-	// already reported as failed.
+	// verdict; this one protects the caller. Both are needed.
+	//
+	// It holds whatever the source does afterwards. io.Reader does not forbid
+	// a reader from producing data once it has reported a failure, and the
+	// decoders below are stateful enough that arguing case by case is not
+	// worth depending on -- rar3Decoder, for one, already returns buffered
+	// window bytes while withholding a decode error. Without this guard those
+	// bytes would be appended to a file the caller was already told had
+	// failed.
 	if fr.done != nil {
 		return 0, fr.done
 	}

@@ -193,10 +193,13 @@ func assertSticky(t *testing.T, sd *StreamDecompressor, want error) {
 	}
 }
 
-// resurrectingReader reports io.EOF once and then produces bytes again. That
-// is not a hypothetical misbehaviour: rar3Decoder.Read discards a decode error
-// while the window still holds data and yields more on the next call, which is
-// the shape #23 is about.
+// resurrectingReader reports io.EOF once and then produces bytes again.
+//
+// It is a deliberate stand-in rather than a copy of any one decoder's
+// behaviour: io.Reader permits this, and fileReader must hold regardless of
+// which source it is wrapping. The decoders are not far from it -- rar3Decoder
+// returns buffered window bytes while withholding a decode error -- but the
+// guard under test is not conditional on that.
 type resurrectingReader struct{ calls int }
 
 func (r *resurrectingReader) Read(p []byte) (int, error) {
