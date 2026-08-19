@@ -77,7 +77,7 @@ func (re *rar3Engine) processHeader(h *BlockHeader) (*FileHeader, bool, error) {
 		re.limitPr.R = re.sd.currentVol
 		re.limitPr.N = fh.PackedSize
 
-		re.sd.file.begin(fh, re.newDecompressionReader(fh, &re.limitPr), re.sd.verifyCRC)
+		re.sd.file.begin(fh, re.newDecompressionReader(fh, &re.limitPr), &re.limitPr, re.sd.verifyCRC)
 		return fh, false, nil
 
 	case 0x7b: // Terminator block
@@ -106,7 +106,13 @@ func (re *rar3Engine) processVolumePayloadHeader(h *BlockHeader) (io.Reader, boo
 			return nil, false, err
 		}
 		re.sd.file.advanceVolume(fh)
-		return io.LimitReader(re.sd.currentVol, fh.PackedSize), false, nil
+		// Repointed rather than replaced by a fresh limiter: fileReader holds
+		// this one to drain the packed remainder, and a limiter it cannot see
+		// would leave that count describing a volume the stream has already
+		// moved past. Reusing the field also drops an allocation per volume.
+		re.limitPr.R = re.sd.currentVol
+		re.limitPr.N = fh.PackedSize
+		return &re.limitPr, false, nil
 	case 0x7b: // Terminator
 		if err := re.sd.nextVolume(); err != nil {
 			return nil, false, err

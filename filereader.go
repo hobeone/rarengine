@@ -42,6 +42,23 @@ type fileReader struct {
 	// nil means no file is active.
 	src io.Reader
 
+	// packed is the file's packed-side segment for the volume currently being
+	// read: bytes the block still owes the stream, as opposed to the
+	// decompressed bytes owed to the caller.
+	//
+	// It exists because the decompressed side reaching its declared size does
+	// not mean the packed block is spent. A block may carry more bytes than
+	// its file declares, and whatever is left is exactly what the next block
+	// header would otherwise be parsed out of -- so an archive can hand
+	// Next() an entry fabricated from its own payload.
+	//
+	// Both engines repoint this same limiter on every volume advance, so it
+	// always describes the live volume. That is what makes draining it safe:
+	// a count captured once goes stale the moment a file crosses a volume
+	// boundary, and discarding a stale count consumes a later volume's
+	// legitimate header bytes instead.
+	packed *io.LimitedReader
+
 	// header is the file header currently in force, which is NOT constant
 	// across a file: see advanceVolume.
 	//
@@ -95,8 +112,9 @@ type fileReader struct {
 // begin installs a file as the active one. src must already be fully
 // constructed: the multi-volume readers consult the header through this type
 // while reading, so both must be in place before the first Read.
-func (fr *fileReader) begin(fh *FileHeader, src io.Reader, verifyCRC bool) {
+func (fr *fileReader) begin(fh *FileHeader, src io.Reader, packed *io.LimitedReader, verifyCRC bool) {
 	fr.src = src
+	fr.packed = packed
 	fr.header = fh
 	fr.size = fh.UnpackedSize
 	fr.remaining = fh.UnpackedSize
@@ -258,29 +276,60 @@ func (fr *fileReader) endFile() error {
 	// Captured before clear: whether the file delivered everything it
 	// promised decides whether traversal can continue.
 	short := fr.remaining > 0
+	// Runs on every terminal path, not just the failing ones. A file that
+	// completed perfectly can still leave packed bytes behind, and that is
+	// the case an archive uses to fabricate the next entry.
+	packedErr := fr.drainPacked()
 	fr.clear()
 
+	verdict := fr.verdict(short, reported, err)
+	if packedErr == nil {
+		return verdict
+	}
+	// Both are meaningful and neither subsumes the other: the verdict says
+	// what happened to the file, the drain error says the stream is no
+	// longer positioned at a block boundary. Reporting either alone loses
+	// something the caller needs.
+	return errors.Join(verdict, packedErr)
+}
+
+// verdict decides what traversal should report about the file that just
+// ended, before the packed side is taken into account.
+func (fr *fileReader) verdict(short bool, reported, drained error) error {
 	if short {
-		// The file stopped before its declared size, so an unknown number of
-		// its *packed* bytes are still in the stream -- this type only sees
-		// the decompressed side and cannot skip them. Continuing would leave
-		// the next block header to be parsed out of that payload, which for a
-		// crafted archive means an entry fabricated from attacker-chosen
-		// bytes surfacing from Next(). Reporting the failure instead ends the
-		// traversal, which is what the previous drain-to-EOF also did.
-		//
-		// Making this case skippable requires draining the packed remainder,
-		// which belongs to the engines rather than here; that is deliberately
-		// left to follow-up work.
+		// The file stopped before its declared size. Its packed remainder has
+		// been drained by now, so the stream is positioned at a real block
+		// boundary and traversal *could* continue -- but a caller has no way
+		// to tell this failure apart from "the archive is over", and guessing
+		// wrong in the permissive direction silently truncates whatever the
+		// caller is building. Reporting it keeps the safe reading until the
+		// error contract can carry the distinction.
 		if reported != nil {
 			return reported
 		}
-		return err
+		return drained
 	}
 
 	if reported != nil {
 		return nil
 	}
+	return drained
+}
+
+// drainPacked consumes whatever is left of the current volume's packed
+// segment, so the next block header is read from the stream's real structure
+// rather than from the tail of a file's payload.
+//
+// A short drain is not an error here. When a volume is truncated the bytes
+// the header promised are simply absent from the media, so io.Copy stops at
+// the underlying EOF with the count still owed; the stream is then at the end
+// of that volume, where the caller's next read advances to the next volume
+// rather than parsing anything out of the payload.
+func (fr *fileReader) drainPacked() error {
+	if fr.packed == nil || fr.packed.N <= 0 {
+		return nil
+	}
+	_, err := io.Copy(io.Discard, fr.packed)
 	return err
 }
 

@@ -149,7 +149,7 @@ func TestStreamDecompressor_RejectsOverReachingBackReference(t *testing.T) {
 	re.lzReader.dec = re.dec50
 	re.lzReader.win = win
 	sd.engine = re
-	sd.file.begin(&FileHeader{Name: "current.bin", UnpackedSize: 16}, &re.lzReader, sd.verifyCRC)
+	sd.file.begin(&FileHeader{Name: "current.bin", UnpackedSize: 16}, &re.lzReader, nil, sd.verifyCRC)
 
 	// The file's first token is a match reaching 1000 bytes back, before it has
 	// produced anything at all.
