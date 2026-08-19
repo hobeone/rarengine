@@ -1,6 +1,7 @@
 package rarengine
 
 import (
+	"bytes"
 	"errors"
 	"io"
 	"testing"
@@ -123,5 +124,54 @@ func TestDecoder50_DecodeSymbol(t *testing.T) {
 	expectedStr := "hellolol"
 	if string(buf) != expectedStr {
 		t.Errorf("expected window content %q, got %q", expectedStr, string(buf))
+	}
+}
+
+// TestStreamDecompressor_RejectsOverReachingBackReference exercises the
+// disclosure at the public API boundary: a back-reference reaching past the
+// bytes the current file has produced used to surface the previous file's
+// plaintext from StreamDecompressor.Read.
+//
+// The over-reaching distance is injected as an already-decoded offset rather
+// than encoded as a Huffman-coded bit stream. Nothing sits between the decoded
+// offset and CopyBytes, so how the value was derived does not affect what is
+// under test here.
+func TestStreamDecompressor_RejectsOverReachingBackReference(t *testing.T) {
+	win := NewWindow(0x40000)
+	fillWindowWithPriorFile(win)
+
+	// A new non-solid file begins, exactly as processHeader does.
+	win.Reset(false)
+
+	sd := &StreamDecompressor{win: win, verifyCRC: true}
+	re := newRAR5Engine(sd)
+	re.dec50.init(bytes.NewReader(nil), true)
+	re.lzReader.dec = re.dec50
+	re.lzReader.win = win
+	sd.engine = re
+	sd.currReader = &re.lzReader
+	re.bytesRemaining = 16
+
+	// The file's first token is a match reaching 1000 bytes back, before it has
+	// produced anything at all.
+	re.dec50.offset[0] = 1000
+	re.dec50.length = 16
+	err := re.dec50.decodeSymbol(win, 257)
+	if !errors.Is(err, ErrWindowOffsetBounds) {
+		t.Fatalf("over-reaching back-reference accepted: %v", err)
+	}
+
+	// Nothing surfaces through the public API. Checking the byte count matters
+	// as much as the error: a CRC failure returns data alongside its error, so
+	// "an error came back" would not by itself prove the bytes stayed in.
+	// (That the window itself stages nothing is covered one layer down, by
+	// TestWindow_CopyBytes_DoesNotLeakPriorFile.)
+	out := make([]byte, 16)
+	n, _ := sd.Read(out)
+	if n != 0 {
+		t.Fatalf("StreamDecompressor.Read produced %d bytes after a rejected copy: %q", n, out[:n])
+	}
+	if bytes.Contains(out, []byte("SECRET")) {
+		t.Fatalf("prior file's content leaked: %q", out)
 	}
 }
