@@ -103,6 +103,13 @@ func ParseRAR3FileHeader(h *BlockHeader) (*FileHeader, error) {
 	finalPackSize := h.DataSize | (int64(highPack) << 32)
 	finalUnpSize := int64(unpSize) | (int64(highUnp) << 32)
 
+	// The high halves are attacker-supplied, so either size can be given the
+	// sign bit. A negative size would pass every "have we produced enough
+	// yet" comparison downstream; reject it at the boundary instead.
+	if finalPackSize < 0 || finalUnpSize < 0 {
+		return nil, ErrCorruptFileHeader
+	}
+
 	if len(payload) < offset+int(nameSize) {
 		return nil, ErrCorruptFileHeader
 	}

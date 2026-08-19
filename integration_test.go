@@ -289,6 +289,13 @@ func TestIntegration_Oracle(t *testing.T) {
 			sd := rarengine.NewStreamDecompressor(volumes)
 			if tc.password != "" {
 				sd.SetPassword(tc.password)
+				// Encrypted files record a key-derived MAC in place of a
+				// CRC32, which this library cannot compute, so verification
+				// refuses them rather than skipping the check. Comparing the
+				// decoded bytes against unrar is still worth doing, and is
+				// what this test is for -- so opt out of the digest check
+				// here rather than dropping the fixture.
+				sd.SetVerifyCRC(false)
 			}
 
 			// Track files extracted by decompressor to match with oracle directory

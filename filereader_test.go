@@ -323,33 +323,152 @@ func TestFileReader_MultiVolumeVerifiesAgainstLastHeader(t *testing.T) {
 	}
 }
 
-// TestFileReader_MacChecksumIsNotComparedAsCRC32 covers encrypted files whose
-// header records a key-derived MAC rather than a CRC32 of the plaintext.
-// Comparing the two fails on correctly decrypted content; it stayed hidden
-// only because io.ReadFull discards an error delivered with the final bytes
-// and the old non-sticky error let the retry decay to io.EOF.
-func TestFileReader_MacChecksumIsNotComparedAsCRC32(t *testing.T) {
-	sd := decompressorFor(fixtureBytes(t, "rar5_encrypted.rar"))
-	sd.SetPassword("test")
+// TestFileReader_MacChecksumIsRefusedNotMiscompared covers encrypted files
+// whose header records a key-derived MAC rather than a CRC32 of the plaintext.
+//
+// Comparing the MAC as though it were a CRC32 fails on correctly decrypted
+// content, which is what used to happen. Skipping the check instead would be
+// worse: the flag that selects a MAC is attacker-supplied, so silently
+// completing would let a crafted archive deliver arbitrary bytes reported as
+// extracted successfully. Since this library cannot compute the MAC, it says
+// so and fails.
+//
+// Verification is the caller's to disable, and doing so must still yield the
+// content -- that is what SetVerifyCRC(false) is for.
+func TestFileReader_MacChecksumIsRefusedNotMiscompared(t *testing.T) {
+	// verify is applied before Next, because the decision is captured when a
+	// file begins rather than re-read at completion.
+	load := func(t *testing.T, verify bool) (*StreamDecompressor, *FileHeader) {
+		t.Helper()
+		sd := decompressorFor(fixtureBytes(t, "rar5_encrypted.rar"))
+		sd.SetPassword("test")
+		sd.SetVerifyCRC(verify)
+		fh, err := sd.Next()
+		if err != nil {
+			t.Fatalf("Next() failed: %v", err)
+		}
+		if !fh.UseMac {
+			t.Skip("fixture no longer uses a MAC checksum; this case tests nothing")
+		}
+		return sd, fh
+	}
 
-	fh, err := sd.Next()
-	if err != nil {
-		t.Fatalf("Next() failed: %v", err)
-	}
-	if !fh.UseMac {
-		t.Skip("fixture no longer uses a MAC checksum; this case tests nothing")
+	t.Run("refused while verifying", func(t *testing.T) {
+		sd, _ := load(t, true)
+		_, err := io.ReadAll(sd)
+		if !errors.Is(err, ErrChecksumUnsupported) {
+			t.Fatalf("reading a MAC-checksummed file returned %v; want ErrChecksumUnsupported", err)
+		}
+		if errors.Is(err, ErrCRCMismatch) {
+			t.Fatal("reported as a CRC mismatch, which misdescribes an unverifiable digest " +
+				"as corrupt content")
+		}
+	})
+
+	t.Run("delivered when verification is off", func(t *testing.T) {
+		sd, fh := load(t, false)
+		got, err := io.ReadAll(sd)
+		if err != nil {
+			t.Fatalf("reading with verification disabled failed: %v", err)
+		}
+		if int64(len(got)) != fh.UnpackedSize {
+			t.Fatalf("read %d bytes, declared %d", len(got), fh.UnpackedSize)
+		}
+		if crc32.ChecksumIEEE(got) == fh.CRC32 {
+			t.Fatal("the header checksum equals a plain CRC32 of the content, so this " +
+				"fixture no longer demonstrates the MAC case")
+		}
+	})
+}
+
+// TestFileReader_AttackerFlagsCannotSkipVerification pins the two header bits
+// that used to switch verification off.
+//
+// Both are attacker-supplied and neither is cross-checked against the entry
+// actually carrying content, so gating on them let a crafted archive hand the
+// caller arbitrary bytes with a clean io.EOF. IsDir is no longer consulted at
+// all -- an entry that produced bytes is verified whatever it calls itself --
+// and UseMac now refuses rather than skips.
+func TestFileReader_AttackerFlagsCannotSkipVerification(t *testing.T) {
+	content := []byte("attacker payload")
+	const bogus = 0xDEADBEEF
+
+	cases := []struct {
+		name string
+		fh   *FileHeader
+		want error
+	}{
+		{
+			name: "IsDir set on an entry carrying content",
+			fh: &FileHeader{Name: "d", IsDir: true, HasCRC32: true, CRC32: bogus,
+				UnpackedSize: int64(len(content))},
+			want: ErrCRCMismatch,
+		},
+		{
+			name: "UseMac set on an entry carrying content",
+			fh: &FileHeader{Name: "e", UseMac: true, HasCRC32: true, CRC32: bogus,
+				UnpackedSize: int64(len(content))},
+			want: ErrChecksumUnsupported,
+		},
+		{
+			name: "no flags, for comparison",
+			fh: &FileHeader{Name: "c", HasCRC32: true, CRC32: bogus,
+				UnpackedSize: int64(len(content))},
+			want: ErrCRCMismatch,
+		},
 	}
 
-	got, err := io.ReadAll(sd)
-	if err != nil {
-		t.Fatalf("reading a MAC-checksummed encrypted file failed: %v", err)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var fr fileReader
+			fr.begin(tc.fh, bytes.NewReader(content), true)
+
+			got, err := io.ReadAll(&fr)
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("delivered %q with err=%v; want %v. A header flag must not be "+
+					"able to turn verification off", got, err, tc.want)
+			}
+		})
 	}
-	if int64(len(got)) != fh.UnpackedSize {
-		t.Fatalf("read %d bytes, declared %d", len(got), fh.UnpackedSize)
+}
+
+// TestParseFileHeader_RejectsNegativeSize covers a declared size with the sign
+// bit set.
+//
+// The size vint carries more bits than an int64 sign-magnitude value, so a
+// crafted header can make UnpackedSize negative. Downstream that value is
+// compared against progress and used to clamp a slice, where it would panic
+// and take the process down -- so it is rejected where it is decoded.
+func TestParseFileHeader_RejectsNegativeSize(t *testing.T) {
+	var payload bytes.Buffer
+	payload.Write(EncodeVint(0))       // flags
+	payload.Write(EncodeVint(1 << 63)) // unpacked size, sign bit set
+	payload.Write(EncodeVint(0))       // attributes
+	payload.Write(EncodeVint(0))       // compFlags
+	payload.Write(EncodeVint(1))       // hostOS
+	payload.Write(EncodeVint(4))       // name length
+	payload.WriteString("evil")
+
+	h := &BlockHeader{Type: HeaderTypeFile, Payload: payload.Bytes()}
+	fh, err := ParseFileHeader(h)
+	if err == nil {
+		t.Fatalf("accepted a header declaring an unpacked size of %d", fh.UnpackedSize)
 	}
-	if crc32.ChecksumIEEE(got) == fh.CRC32 {
-		t.Fatal("the header checksum equals a plain CRC32 of the content, so this " +
-			"fixture no longer demonstrates the MAC case")
+	if !errors.Is(err, ErrCorruptFileHeader) {
+		t.Fatalf("returned %v; want ErrCorruptFileHeader", err)
+	}
+}
+
+// TestFileReader_NegativeRemainingDoesNotPanic is the backstop for the same
+// hazard, in case a size ever reaches this type without passing a parser.
+func TestFileReader_NegativeRemainingDoesNotPanic(t *testing.T) {
+	var fr fileReader
+	fr.begin(&FileHeader{Name: "evil", UnpackedSize: -1},
+		bytes.NewReader(bytes.Repeat([]byte("A"), 64)), true)
+
+	n, err := fr.Read(make([]byte, 16))
+	if n != 0 || !errors.Is(err, io.EOF) {
+		t.Fatalf("Read returned n=%d err=%v; want 0, io.EOF", n, err)
 	}
 }
 
@@ -366,14 +485,11 @@ func TestFileReader_ChecksumSkippedWhenNotApplicable(t *testing.T) {
 		content []byte
 	}{
 		{
-			name:    "directory entry",
+			// Verified by producing nothing rather than by claiming to be a
+			// directory: the flag is not consulted, the size is.
+			name:    "entry with no content",
 			header:  &FileHeader{Name: "dir", IsDir: true, HasCRC32: true, CRC32: bogus},
 			content: nil,
-		},
-		{
-			name:    "mac checksum",
-			header:  &FileHeader{Name: "enc", UseMac: true, HasCRC32: true, CRC32: bogus, UnpackedSize: 5},
-			content: []byte("world"),
 		},
 		{
 			name:    "no checksum recorded",

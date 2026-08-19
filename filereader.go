@@ -13,6 +13,16 @@ import (
 // exactly the defect it exists to prevent, and callers loop until io.EOF.
 var ErrTruncatedFile = errors.New("rarengine: archive ended before the file's declared size was produced")
 
+// ErrChecksumUnsupported is returned once a file has been fully decoded when
+// its header records a digest this library cannot check -- currently the
+// key-derived MAC that encrypted files use in place of a CRC32.
+//
+// Completing such a file without an error would report unverified content as
+// extracted successfully, and a RAR archive's per-file digest is the only
+// signal that the decoded bytes are the intended ones. Callers that want the
+// content regardless can disable verification; see SetVerifyCRC.
+var ErrChecksumUnsupported = errors.New("rarengine: file records a checksum this library cannot verify")
+
 // fileReader owns every piece of state that belongs to one file being
 // decoded: the reader chain it comes from, the header in force, how many
 // bytes are still owed, the running checksum, and whether the file has
@@ -52,20 +62,29 @@ type fileReader struct {
 	crc uint32
 
 	// accumulate reports whether a running CRC32 is worth computing for this
-	// file. It is fixed when the file begins, because everything it depends
-	// on is a property of the file rather than of the part header currently
-	// in force: whether verification is enabled at all, whether the checksum
-	// field holds a key-derived MAC instead of a CRC32, and whether the entry
-	// has any content.
+	// file: verification is on, and the recorded digest is one this library
+	// can actually check.
 	//
-	// The comparison in verifyChecksum additionally requires the final header
-	// to record a CRC32, and that one genuinely is per-part, so it must be
-	// read at the end. Keeping accumulation a strict superset of comparison
-	// is what stops the two from disagreeing across a volume boundary: were
-	// accumulation also gated on the header in force, a file whose earlier
-	// parts omitted a CRC32 would be compared on a checksum covering only
-	// some of its bytes.
+	// It is fixed when the file begins because it must not depend on the part
+	// header in force -- comparison happens against the LAST header, so
+	// gating accumulation on a per-part value could compare a checksum
+	// covering only some of the file's bytes. Accumulation is therefore a
+	// strict superset of comparison.
+	//
+	// It deliberately does NOT consult IsDir. That flag is attacker-supplied
+	// and is not cross-checked against the entry carrying content, so
+	// skipping verification on it let a crafted archive deliver arbitrary
+	// bytes under a header claiming to be a directory. verifyChecksum skips
+	// on the produced size instead, which is a value this type enforces.
 	accumulate bool
+
+	// unverifiable records that the file's digest is a key-derived MAC
+	// rather than a CRC32 of the plaintext, so the recorded value cannot be
+	// checked here. Completing such a file silently would report unverified
+	// attacker-chosen content as extracted successfully, so finish turns it
+	// into an error instead -- unless the caller has opted out of
+	// verification, which is what SetVerifyCRC(false) means.
+	unverifiable bool
 
 	// done is the terminal state. Once set, every Read returns it and the
 	// file produces nothing further. It is what makes an error durable
@@ -82,7 +101,8 @@ func (fr *fileReader) begin(fh *FileHeader, src io.Reader, verifyCRC bool) {
 	fr.size = fh.UnpackedSize
 	fr.remaining = fh.UnpackedSize
 	fr.crc = 0
-	fr.accumulate = verifyCRC && !fh.UseMac && !fh.IsDir
+	fr.accumulate = verifyCRC && !fh.UseMac
+	fr.unverifiable = verifyCRC && fh.UseMac
 	fr.done = nil
 }
 
@@ -130,7 +150,12 @@ func (fr *fileReader) Read(p []byte) (int, error) {
 	}
 	// A zero-length file never enters the read path below, so completing it
 	// here is what gives it a terminal state (and a checksum check) at all.
-	if fr.remaining == 0 {
+	//
+	// Tested with <= rather than ==: the parsers reject a negative declared
+	// size, and this is the backstop for that. Reaching the clamp below with
+	// a negative remaining would panic on the slice bound, turning a crafted
+	// header into a process kill.
+	if fr.remaining <= 0 {
 		return 0, fr.finish(nil)
 	}
 	if len(p) == 0 {
@@ -193,7 +218,14 @@ func (fr *fileReader) finish(err error) error {
 // records no CRC32 at all, and this library does not check BLAKE2sp. So
 // "terminated cleanly" does not imply "content was verified".
 func (fr *fileReader) verifyChecksum() error {
-	if !fr.accumulate || !fr.header.HasCRC32 {
+	if fr.unverifiable {
+		return fmt.Errorf("%w: file %q", ErrChecksumUnsupported, fr.header.Name)
+	}
+	// Nothing was delivered, so there is nothing to verify. This is what
+	// covers directory entries, without trusting the IsDir flag to tell the
+	// truth: an entry that produced bytes is checked whatever it calls
+	// itself, and one that produced none has nothing to check.
+	if fr.size == 0 || !fr.accumulate || !fr.header.HasCRC32 {
 		return nil
 	}
 	if fr.crc != fr.header.CRC32 {

@@ -223,6 +223,9 @@ func parseBlockHeaderFields(buf []byte, n int) (*BlockHeader, error) {
 			return nil, err
 		}
 		h.DataSize = int64(dtSizeV)
+		if h.DataSize < 0 {
+			return nil, ErrCorruptBlockHeader
+		}
 		payload = payload[nDt:]
 	}
 
@@ -388,7 +391,14 @@ func ParseFileHeader(h *BlockHeader) (*FileHeader, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The vint carries up to 70 bits, so an attacker can set the sign bit of
+	// the int64. A negative size would sail past every "have we produced
+	// enough yet" comparison downstream, so it is rejected where it enters
+	// rather than defended against at each use.
 	fh.UnpackedSize = int64(unpackedSize)
+	if fh.UnpackedSize < 0 {
+		return nil, ErrCorruptFileHeader
+	}
 	payload = payload[nUnp:]
 
 	attrs, nAttrs, err := DecodeVint(payload) // Attributes
