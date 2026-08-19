@@ -223,7 +223,7 @@ func (r *resurrectingReader) Read(p []byte) (int, error) {
 // those bytes appended to a file already reported as truncated.
 func TestFileReader_TerminatedFileProducesNothingFurther(t *testing.T) {
 	var fr fileReader
-	fr.begin(&FileHeader{Name: "resurrect.bin", UnpackedSize: 10}, &resurrectingReader{}, nil, false)
+	fr.begin(&FileHeader{Name: "resurrect.bin", UnpackedSize: 10}, &resurrectingReader{}, false)
 
 	if n, err := fr.Read(make([]byte, 10)); n != 0 || !errors.Is(err, ErrTruncatedFile) {
 		t.Fatalf("first read returned n=%d err=%v; want 0, ErrTruncatedFile", n, err)
@@ -421,7 +421,7 @@ func TestFileReader_AttackerFlagsCannotSkipVerification(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var fr fileReader
-			fr.begin(tc.fh, bytes.NewReader(content), nil, true)
+			fr.begin(tc.fh, bytes.NewReader(content), true)
 
 			got, err := io.ReadAll(&fr)
 			if !errors.Is(err, tc.want) {
@@ -464,7 +464,7 @@ func TestParseFileHeader_RejectsNegativeSize(t *testing.T) {
 func TestFileReader_NegativeRemainingDoesNotPanic(t *testing.T) {
 	var fr fileReader
 	fr.begin(&FileHeader{Name: "evil", UnpackedSize: -1},
-		bytes.NewReader(bytes.Repeat([]byte("A"), 64)), nil, true)
+		bytes.NewReader(bytes.Repeat([]byte("A"), 64)), true)
 
 	n, err := fr.Read(make([]byte, 16))
 	if n != 0 || !errors.Is(err, io.EOF) {
@@ -501,7 +501,7 @@ func TestFileReader_ChecksumSkippedWhenNotApplicable(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var fr fileReader
-			fr.begin(tc.header, bytes.NewReader(tc.content), nil, true)
+			fr.begin(tc.header, bytes.NewReader(tc.content), true)
 
 			got, err := io.ReadAll(&fr)
 			if err != nil {
@@ -520,7 +520,7 @@ func TestFileReader_ChecksumSkippedWhenNotApplicable(t *testing.T) {
 func TestFileReader_ZeroLengthFileCompletes(t *testing.T) {
 	var fr fileReader
 	fr.begin(&FileHeader{Name: "empty", HasCRC32: true, CRC32: crc32.ChecksumIEEE(nil)},
-		bytes.NewReader(nil), nil, true)
+		bytes.NewReader(nil), true)
 
 	n, err := fr.Read(make([]byte, 8))
 	if n != 0 || !errors.Is(err, io.EOF) {

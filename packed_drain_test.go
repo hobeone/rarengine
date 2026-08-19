@@ -3,6 +3,7 @@ package rarengine
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"hash/crc32"
 	"io"
 	"testing"
@@ -213,10 +214,159 @@ func TestPackedRemainder_ConsumedOnCompletion(t *testing.T) {
 	if !ok {
 		t.Fatalf("engine is %T, want *rar5Engine", sd.engine)
 	}
-	if re.limitPr.N != 0 {
-		t.Errorf("limitPr.N = %d after the file ended, want 0: %d packed bytes "+
-			"are still owed and the next header would be parsed from them",
-			re.limitPr.N, re.limitPr.N)
+	if owed := re.packed.owed(); owed != 0 {
+		t.Errorf("packed cursor still owes %d bytes after the file ended, want 0: "+
+			"the next header would be parsed from them", owed)
+	}
+}
+
+// recordingVolume reports whether the library read from it after being told,
+// through Close, that the library was finished with it.
+type recordingVolume struct {
+	r               *bytes.Reader
+	closed          bool
+	readsAfterClose int
+}
+
+func (v *recordingVolume) Read(p []byte) (int, error) {
+	if v.closed {
+		v.readsAfterClose++
+	}
+	return v.r.Read(p)
+}
+
+func (v *recordingVolume) Close() error {
+	v.closed = true
+	return nil
+}
+
+// TestPackedRemainder_NoReadAfterVolumeClose covers the interaction between
+// draining and volume exhaustion. nextVolume closes the current volume before
+// it can discover the channel holds no further volume, so a file whose payload
+// continues off the end of the last volume leaves a count standing against a
+// reader that is already closed.
+//
+// Draining it there would read a caller-supplied io.ReadCloser after telling
+// the caller it was finished: a bytes.Reader tolerates that, an *os.File
+// returns "file already closed", and a pooled or network-backed stream may
+// hand back somebody else's bytes. A partially downloaded multi-volume set is
+// the ordinary case for this library's callers, not a crafted one.
+func TestPackedRemainder_NoReadAfterVolumeClose(t *testing.T) {
+	b := fixtureBytes(t, "rar5_multi.part01.rar")
+	vol := &recordingVolume{r: bytes.NewReader(b[:len(b)-300])}
+
+	volumes := make(chan io.ReadCloser, 1)
+	volumes <- vol
+	close(volumes)
+
+	sd := NewStreamDecompressor(volumes)
+	if _, err := sd.Next(); err != nil {
+		t.Fatalf("Next#1: %v", err)
+	}
+	_, _ = io.ReadAll(sd)
+	if _, err := sd.Next(); err == nil {
+		t.Fatal("Next#2 succeeded; want the archive to end")
+	}
+
+	if vol.readsAfterClose != 0 {
+		t.Errorf("read from the volume %d times after closing it",
+			vol.readsAfterClose)
+	}
+}
+
+// TestPackedRemainder_NoJoinOnCleanArchiveEnd guards the error value a caller
+// actually sees when a multi-volume set simply runs out. Wrapping that in a
+// join would break identity comparisons against the sentinel, which is how
+// several loops in this repo decide the archive is over.
+func TestPackedRemainder_NoJoinOnCleanArchiveEnd(t *testing.T) {
+	// Untrimmed: the archive is healthy and read to completion, so the only
+	// thing left to report is that no further volume exists.
+	sd := NewStreamDecompressor(multiVolumeChan(t, -1))
+
+	if _, err := sd.Next(); err != nil {
+		t.Fatalf("Next#1: %v", err)
+	}
+	if _, err := io.ReadAll(sd); err != nil {
+		t.Fatalf("reading: %v", err)
+	}
+
+	_, err := sd.Next()
+	//nolint:errorlint // identity is the property under test, not equivalence.
+	if err != ErrNoNextVolume {
+		t.Errorf("Next at the end of a healthy archive returned %v (%T); want "+
+			"the bare ErrNoNextVolume sentinel. Wrapping it in a join breaks "+
+			"the identity comparisons callers use to stop looping", err, err)
+	}
+}
+
+// TestRefusedFile_RarBombPayloadIsDropped covers a refusal that is not a parse
+// failure. The rar-bomb guard rejects the file after its header has been read,
+// but traversal continues -- the caller can and does call Next() again -- so
+// leaving the payload lets the block that was just refused supply the next
+// entry. The fabricated entry carries its own valid CRC32, because whoever
+// wrote the payload computed it.
+func TestRefusedFile_RarBombPayloadIsDropped(t *testing.T) {
+	evil := rar5FileEntry("EVIL.txt", 5, crc32.ChecksumIEEE([]byte("PWNED")), []byte("PWNED"))
+
+	var arc bytes.Buffer
+	arc.Write(rar5ArchiveHeader())
+	// UnpackedSize is over the 1 MiB floor and more than 1000x the packed
+	// size, which is what the guard rejects.
+	arc.Write(rar5FileEntry("bomb.txt", 2_000_000, 0, evil))
+	arc.Write(rar5EndHeader())
+
+	sd := decompressorFor(arc.Bytes())
+
+	if _, err := sd.Next(); !errors.Is(err, ErrRarBombDetected) {
+		t.Fatalf("Next#1 = %v; want ErrRarBombDetected", err)
+	}
+	fh, err := sd.Next()
+	if err == nil {
+		t.Fatalf("Next#2 surfaced %q out of the refused file's payload; "+
+			"want an error", fh.Name)
+	}
+}
+
+// TestRefusedFile_CorruptHeaderPayloadIsDropped covers parse failures other
+// than the one that already dropped its payload. Which field an archive
+// corrupts is the archive's choice, so keying the discard on a single named
+// error left the same fabrication reachable through every other one.
+func TestRefusedFile_CorruptHeaderPayloadIsDropped(t *testing.T) {
+	evil := rar5FileEntry("EVIL.txt", 5, crc32.ChecksumIEEE([]byte("PWNED")), []byte("PWNED"))
+
+	// An UnpackedSize vint with the int64 sign bit set is refused by the
+	// parser as a corrupt header.
+	var fp bytes.Buffer
+	fp.Write(EncodeVint(FileFlagHasCRC32))
+	fp.Write(EncodeVint(1 << 63))
+	fp.Write(EncodeVint(0))
+	fp.Write([]byte{0, 0, 0, 0})
+	fp.Write(EncodeVint(0))
+	fp.Write(EncodeVint(1))
+	fp.Write(EncodeVint(uint64(len("neg.txt"))))
+	fp.WriteString("neg.txt")
+
+	var hp bytes.Buffer
+	hp.Write(EncodeVint(HeaderTypeFile))
+	hp.Write(EncodeVint(HeaderFlagHasData))
+	hp.Write(EncodeVint(uint64(len(evil))))
+	hp.Write(fp.Bytes())
+
+	var arc bytes.Buffer
+	arc.Write(rar5ArchiveHeader())
+	arc.Write(rar5Block(hp.Bytes()))
+	arc.Write(evil)
+	arc.Write(rar5EndHeader())
+
+	sd := decompressorFor(arc.Bytes())
+
+	if _, err := sd.Next(); err == nil {
+		t.Fatal("Next#1 accepted a header with a negative unpacked size")
+	}
+	fh, err := sd.Next()
+	if err == nil {
+		t.Fatalf("Next#2 surfaced %q out of the refused file's payload; "+
+			"want an error", fh.Name)
 	}
 }
 
@@ -238,9 +388,9 @@ func TestPackedRemainder_TracksCurrentVolume(t *testing.T) {
 	if !ok {
 		t.Fatalf("engine is %T, want *rar5Engine", sd.engine)
 	}
-	if re.limitPr.N > 0 && re.limitPr.R != sd.currentVol {
-		t.Errorf("limitPr still owes %d bytes but points at a different volume "+
-			"than currentVol; draining it would consume bytes from the wrong stream",
-			re.limitPr.N)
+	if re.packed.owed() > 0 && re.packed.lr.R != sd.currentVol {
+		t.Errorf("packed cursor still owes %d bytes but points at a different "+
+			"volume than currentVol; draining it would consume bytes from the "+
+			"wrong stream", re.packed.owed())
 	}
 }

@@ -76,21 +76,81 @@ type StreamDecompressor struct {
 	win       *Window
 	password  string
 	verifyCRC bool
-	// discardLr backs discardPayload. Reused so discarding a block's payload
+	// discard backs discardPayload. Reused so discarding a block's payload
 	// costs no allocation, per the no-new-allocations rule in CLAUDE.md.
-	discardLr io.LimitedReader
+	discard packedCursor
+}
+
+// packedCursor tracks how many packed bytes a block still owes the stream, and
+// which volume owes them.
+//
+// It exists because "how much payload is left" is read and written from
+// several places -- the engine on each volume advance, the decode chain as it
+// consumes bytes, and the teardown that discards whatever is unread -- and an
+// unguarded io.LimitedReader shared between them is what let a count captured
+// on one volume be applied to another. Mutation goes through repoint and
+// invalidate; consumption goes through reader and drain. Nothing else may
+// touch the count.
+//
+// Reused rather than reallocated per volume: a fresh limiter on each advance
+// is both an allocation and a value the previous holder cannot see.
+type packedCursor struct {
+	lr io.LimitedReader
+}
+
+// repoint aims the cursor at n bytes of r, replacing whatever it described
+// before. Called when a file begins and again on every volume advance, so the
+// count always belongs to the volume actually being read.
+func (c *packedCursor) repoint(r io.Reader, n int64) {
+	c.lr.R, c.lr.N = r, n
+}
+
+// invalidate forgets the outstanding count without reading anything.
+//
+// Required before the stream leaves a volume: nextVolume closes the current
+// volume before it can discover whether a next one exists, so a count left
+// standing would later be drained out of a closed reader -- a read the caller
+// was told would not happen, on a handle it may already have recycled.
+func (c *packedCursor) invalidate() {
+	c.lr.N = 0
+}
+
+// reader exposes the cursor as the payload source for a decode chain.
+func (c *packedCursor) reader() io.Reader {
+	return &c.lr
+}
+
+// owed reports how many packed bytes remain unread.
+func (c *packedCursor) owed() int64 {
+	return c.lr.N
+}
+
+// drain discards whatever the cursor still owes, so the next block header is
+// read from the stream's real structure rather than from the tail of a file's
+// payload.
+//
+// A short drain is not an error. When a volume is truncated the promised bytes
+// are simply absent from the media, so io.Copy stops at the underlying EOF
+// with the count still standing; the stream is then at the end of that volume,
+// where the next read advances rather than parsing anything out of payload.
+func (c *packedCursor) drain() error {
+	if c.lr.N <= 0 {
+		return nil
+	}
+	_, err := io.Copy(io.Discard, &c.lr)
+	return err
 }
 
 // discardPayload consumes n bytes of block payload from the current volume, for
 // blocks whose contents the caller never sees: continuation blocks already
-// accounted for, service records, and unrecognized block types.
+// accounted for, service records, unrecognized block types, and files refused
+// after their header was read.
 func (sd *StreamDecompressor) discardPayload(n int64) error {
 	if n <= 0 {
 		return nil
 	}
-	sd.discardLr.R, sd.discardLr.N = sd.currentVol, n
-	_, err := io.Copy(io.Discard, &sd.discardLr)
-	return err
+	sd.discard.repoint(sd.currentVol, n)
+	return sd.discard.drain()
 }
 
 // SetPassword configures the decryption password for encrypted RAR archives.
