@@ -5,9 +5,10 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"encoding/binary"
 	"errors"
+	"hash/crc32"
 	"io"
-	"os"
 	"path/filepath"
 	"testing"
 )
@@ -29,10 +30,7 @@ func encryptedMultiVolumeChan(t *testing.T, prefix string) <-chan io.ReadCloser 
 	// this is volume order.
 	volumes := make(chan io.ReadCloser, len(names))
 	for _, name := range names {
-		b, err := os.ReadFile(name)
-		if err != nil {
-			t.Fatalf("reading %s: %v", name, err)
-		}
+		b := fixtureBytes(t, filepath.Base(name))
 		volumes <- &mockReadCloser{bytes.NewReader(b)}
 	}
 	close(volumes)
@@ -43,11 +41,11 @@ func encryptedMultiVolumeChan(t *testing.T, prefix string) <-chan io.ReadCloser 
 // that is both encrypted and split across volumes.
 //
 // A file's ciphertext is one continuous CBC stream, and volume boundaries cut
-// it at arbitrary offsets: this fixture's parts are 757, 756 and 631 bytes,
-// none of them a whole number of AES blocks though together they are. A later
-// volume therefore starts mid-block and cannot be decrypted on its own -- the
-// headers repeat the first part's salt and IV rather than supplying new ones,
-// so there is nothing to restart from.
+// it at arbitrary offsets: this fixture's parts are 765, 764 and 599 bytes,
+// none of them a whole number of AES blocks though together they are
+// (8240 = 16 x 515). A later volume therefore starts mid-block and cannot be
+// decrypted on its own -- the headers repeat the first part's salt and IV
+// rather than supplying new ones, so there is nothing to restart from.
 //
 // Splicing volumes above the decryption fed each new part's raw bytes to the
 // decoder, so the first part decoded and every part after it was ciphertext.
@@ -78,7 +76,7 @@ func TestEncryptedMultiVolume_DecodesEveryVolume(t *testing.T) {
 			}
 
 			got, err := io.ReadAll(sd)
-			// An encrypted file's recorded digest is not a plaintext CRC32, so
+			// These fixtures record a key-derived MAC on their last part, so
 			// completion is reported as unverifiable rather than as a match.
 			// That is another test's subject; here it must simply not be a
 			// decode failure.
@@ -110,10 +108,14 @@ func TestEncryptedMultiVolume_DecodesEveryVolume(t *testing.T) {
 }
 
 // TestEncryptedMultiVolume_ChecksumIsReportedUnverifiable pins what a caller
-// sees on success. An encrypted file records a transformed digest rather than
-// a CRC32 of its plaintext -- measured on these fixtures, one records 9ef0f342
-// where the content's CRC32 is 4a7f9844 -- so comparing it as a CRC32 accuses
-// correct data of being corrupt.
+// sees on success, and guards the split-header bug specifically.
+//
+// RAR records this file's digest as a key-derived MAC and sets UseMac on the
+// header carrying it -- the LAST part's. Part 1 has the flag clear and no file
+// CRC32 at all ("unrar lt" reports "Pack-CRC32" there and "CRC32 MAC" on part
+// 11). Reading UseMac when the file began therefore saw the cleared copy and
+// went on to compare a plaintext CRC32 against a MAC, a guaranteed mismatch on
+// every encrypted multi-volume file.
 //
 // ErrChecksumUnsupported says the digest cannot be checked, which is true, and
 // leaves the caller free to accept the content. ErrCRCMismatch would say the
@@ -167,9 +169,9 @@ func TestCBCDecryptReader_KeepsSubBlockRemainder(t *testing.T) {
 	ciphertext := make([]byte, len(plain))
 	cipher.NewCBCEncrypter(block, iv).CryptBlocks(ciphertext, plain)
 
-	// 757 is the size of the fixture's first volume payload and is what made
-	// the discarded remainder visible: 47 whole blocks and 5 bytes over.
-	sizes := []int{757, 13, 1, 300}
+	// 765 is the size of the fixture's first volume payload and is what made
+	// the discarded remainder visible: 47 whole blocks and 13 bytes over.
+	sizes := []int{765, 13, 1, 300}
 	// Asserted, not assumed: the whole point is a read that ends mid-block, so
 	// a size list that happens to be block-aligned would test nothing.
 	for _, s := range sizes {
@@ -233,10 +235,7 @@ func (c *chunkedReader) Read(p []byte) (int, error) {
 // firstDifference reports the index of the first differing byte, or the length
 // of the shorter slice when one is a prefix of the other. -1 means equal.
 func firstDifference(a, b []byte) int {
-	n := len(a)
-	if len(b) < n {
-		n = len(b)
-	}
+	n := min(len(b), len(a))
 	for i := 0; i < n; i++ {
 		if a[i] != b[i] {
 			return i
@@ -246,4 +245,95 @@ func firstDifference(a, b []byte) int {
 		return n
 	}
 	return -1
+}
+
+// rar3StoreEntryWithFlags builds a stored RAR3 file block whose extra header
+// flags are caller-chosen, so a test can vary one bit and hold everything else
+// fixed. Setting LHD_PASSWORD (0x0400) requires the 8 salt bytes that follow
+// the name, which ParseRAR3FileHeader reads.
+func rar3StoreEntryWithFlags(name string, extraFlags uint16, declaredCRC uint32, payload []byte) []byte {
+	salted := extraFlags&0x0400 > 0
+	headSize := 32 + len(name)
+	if salted {
+		headSize += 8
+	}
+	h := make([]byte, headSize)
+	h[2] = 0x74
+	binary.LittleEndian.PutUint16(h[3:5], 0x8000|extraFlags)
+	binary.LittleEndian.PutUint16(h[5:7], uint16(headSize))
+	binary.LittleEndian.PutUint32(h[7:11], uint32(len(payload)))
+	binary.LittleEndian.PutUint32(h[11:15], uint32(len(payload)))
+	h[15] = 3
+	binary.LittleEndian.PutUint32(h[16:20], declaredCRC)
+	binary.LittleEndian.PutUint32(h[20:24], 0)
+	h[24] = 20
+	h[25] = 0x30 // store
+	binary.LittleEndian.PutUint16(h[26:28], uint16(len(name)))
+	binary.LittleEndian.PutUint32(h[28:32], 0o644)
+	copy(h[32:], name)
+	binary.LittleEndian.PutUint16(h[0:2], uint16(crc32.ChecksumIEEE(h[2:])))
+
+	var out bytes.Buffer
+	out.Write(h)
+	out.Write(payload)
+	return out.Bytes()
+}
+
+// TestRAR3_EncryptedFlagCannotSuppressCRCCheck pins that the RAR3 header's
+// LHD_PASSWORD bit cannot turn checksum verification off.
+//
+// The RAR3 engine does not decrypt: newDecompressionReader never consults the
+// password and never splices a CBC reader, so a file carrying this flag is
+// delivered as-is. Gating verification on FileHeader.Encrypted -- which is set
+// straight from that bit -- therefore handed a crafted archive an off switch,
+// reachable with no password and without the caller ever calling SetPassword:
+// flip the bit, append 8 salt bytes, fix the 16-bit header CRC, and a payload
+// that fails its CRC32 reports as ErrChecksumUnsupported ("cannot check this")
+// instead of ErrCRCMismatch ("this content is wrong"). A caller whose policy is
+// "accept unverifiable, reject mismatch" -- the policy ErrChecksumUnsupported
+// exists to enable -- would accept the tampered bytes.
+//
+// UseMac is the only sanctioned exemption, and RAR3 never sets it.
+func TestRAR3_EncryptedFlagCannotSuppressCRCCheck(t *testing.T) {
+	payload := []byte("content that will not match its recorded checksum")
+	const wrongCRC = 0xdeadbeef
+	if crc32.ChecksumIEEE(payload) == wrongCRC {
+		t.Fatal("the recorded CRC must not match, or neither case can mismatch")
+	}
+
+	for _, tc := range []struct {
+		name  string
+		flags uint16
+	}{
+		{"plain", 0},
+		{"encrypted flag set", 0x0400},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var archive bytes.Buffer
+			archive.Write(rar3ArchiveHeader())
+			archive.Write(rar3StoreEntryWithFlags("victim.bin", tc.flags, wrongCRC, payload))
+
+			volumes := make(chan io.ReadCloser, 1)
+			volumes <- &mockReadCloser{bytes.NewReader(archive.Bytes())}
+			close(volumes)
+
+			sd := NewStreamDecompressor(volumes)
+			fh, err := sd.Next()
+			if err != nil {
+				t.Fatalf("Next: %v", err)
+			}
+			// Guards the test rather than the code: if the builder stopped
+			// setting the bit, both subtests would trivially agree.
+			if want := tc.flags&0x0400 > 0; fh.Encrypted != want {
+				t.Fatalf("fh.Encrypted = %v, want %v; the flag under test is "+
+					"not reaching the header", fh.Encrypted, want)
+			}
+
+			_, err = io.ReadAll(sd)
+			if !errors.Is(err, ErrCRCMismatch) {
+				t.Fatalf("got %v; want ErrCRCMismatch. RAR3 does not decrypt, "+
+					"so this flag must not affect verification", err)
+			}
+		})
+	}
 }

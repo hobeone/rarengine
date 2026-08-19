@@ -344,8 +344,8 @@ type cbcDecryptReader struct {
 	// Reader may return any count it likes, so those bytes have to survive
 	// until the next call completes the block. Dropping them silently
 	// corrupted every encrypted multi-volume file, whose parts are sliced at
-	// arbitrary offsets -- 757 bytes in the first volume decrypts 47 blocks
-	// and strands 5.
+	// arbitrary offsets -- 765 bytes in the first volume decrypts 47 blocks
+	// and strands 13.
 	inLen    int
 	outBlock [4096]byte
 	outBuf   []byte

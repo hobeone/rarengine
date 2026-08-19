@@ -259,9 +259,9 @@ func (re *rar5Engine) newDecompressionReader(fh *FileHeader, pr io.Reader) io.Re
 	// The multi-volume splice sits BELOW the decryption, not above it.
 	//
 	// A file's ciphertext is one continuous CBC stream that volume boundaries
-	// cut at arbitrary offsets: the parts of an 8 KiB file measure 757, 756
-	// and 631 bytes, none of them 16-byte aligned though they total a whole
-	// number of blocks. A later volume therefore begins mid-block and cannot
+	// cut at arbitrary offsets: the parts of an 8 KiB file measure 765, 764
+	// and 599 bytes, none of them 16-byte aligned though they total a whole
+	// number of blocks (8240 = 16 x 515). A later volume therefore begins mid-block and cannot
 	// be decrypted on its own -- there is no per-volume IV to restart from,
 	// and the header repeats the first part's salt and IV unchanged.
 	//
