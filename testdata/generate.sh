@@ -100,6 +100,24 @@ echo "  rar5_unix_owner.rar"
 rar a -ma5 -v1k -ep rar5_multi.rar "$TMPDIR/large.bin"
 echo "  rar5_multi.part*.rar"
 
+# 11b. RAR5, encrypted AND multi-volume, in both methods.
+#
+# The only fixtures where decryption has to survive a volume advance: a file's
+# ciphertext is one continuous CBC stream, and 1 KB volumes cut it mid-block
+# (the compressed parts come out 765, 764 and 599 bytes and the stored ones
+# 765, 764 and 551 -- none of them a whole number of AES blocks, though each
+# file totals one). Every part's header repeats the first part's salt and IV, so a
+# later volume cannot be decrypted on its own.
+#
+# Both methods are kept because they fail differently when the splice is
+# wrong: the compressed decoder reads ahead across the boundary and produces
+# nothing at all, while the store reader emits the first volume correctly and
+# then garbage. One fixture would leave half the failure untested.
+rar a -ma5 -ptest -v1k -ep rar5_encrypted_multi.rar "$TMPDIR/large.bin"
+echo "  rar5_encrypted_multi.part*.rar"
+rar a -ma5 -m0 -ptest -v1k -ep rar5_encrypted_multi_store.rar "$TMPDIR/large.bin"
+echo "  rar5_encrypted_multi_store.part*.rar"
+
 # 12. RAR5, archive comment
 rar a -ma5 -ep -z"$TMPDIR/comment.txt" rar5_comment.rar "$TMPDIR/hello.txt"
 echo "  rar5_comment.rar"

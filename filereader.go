@@ -14,8 +14,10 @@ import (
 var ErrTruncatedFile = errors.New("rarengine: archive ended before the file's declared size was produced")
 
 // ErrChecksumUnsupported is returned once a file has been fully decoded when
-// its header records a digest this library cannot check -- currently the
-// key-derived MAC that encrypted files use in place of a CRC32.
+// its header records a digest this library cannot check -- the key-derived
+// MAC selected by UseMac, rather than a CRC32 of the plaintext. RAR sets that
+// flag on the header carrying the digest, which for a multi-volume file is
+// the last part's.
 //
 // Completing such a file without an error would report unverified content as
 // extracted successfully, and a RAR archive's per-file digest is the only
@@ -61,15 +63,17 @@ type fileReader struct {
 
 	crc uint32
 
-	// accumulate reports whether a running CRC32 is worth computing for this
-	// file: verification is on, and the recorded digest is one this library
-	// can actually check.
+	// accumulate reports whether verification is on for this file, and so
+	// whether a running CRC32 is worth computing.
 	//
-	// It is fixed when the file begins because it must not depend on the part
-	// header in force -- comparison happens against the LAST header, so
+	// It is fixed when the file begins and depends on nothing but the
+	// caller's SetVerifyCRC choice. In particular it must not depend on the
+	// part header in force -- comparison happens against the LAST header, so
 	// gating accumulation on a per-part value could compare a checksum
 	// covering only some of the file's bytes. Accumulation is therefore a
-	// strict superset of comparison.
+	// strict superset of comparison, and whether the recorded digest is one
+	// this library can check is decided at completion, by verifyChecksum,
+	// against the header that actually records it.
 	//
 	// It deliberately does NOT consult IsDir. That flag is attacker-supplied
 	// and is not cross-checked against the entry carrying content, so
@@ -77,14 +81,6 @@ type fileReader struct {
 	// bytes under a header claiming to be a directory. verifyChecksum skips
 	// on the produced size instead, which is a value this type enforces.
 	accumulate bool
-
-	// unverifiable records that the file's digest is a key-derived MAC
-	// rather than a CRC32 of the plaintext, so the recorded value cannot be
-	// checked here. Completing such a file silently would report unverified
-	// attacker-chosen content as extracted successfully, so finish turns it
-	// into an error instead -- unless the caller has opted out of
-	// verification, which is what SetVerifyCRC(false) means.
-	unverifiable bool
 
 	// done is the terminal state. Once set, every Read returns it and the
 	// file produces nothing further. It is what makes an error durable
@@ -101,8 +97,7 @@ func (fr *fileReader) begin(fh *FileHeader, src io.Reader, verifyCRC bool) {
 	fr.size = fh.UnpackedSize
 	fr.remaining = fh.UnpackedSize
 	fr.crc = 0
-	fr.accumulate = verifyCRC && !fh.UseMac
-	fr.unverifiable = verifyCRC && fh.UseMac
+	fr.accumulate = verifyCRC
 	fr.done = nil
 }
 
@@ -218,7 +213,27 @@ func (fr *fileReader) finish(err error) error {
 // records no CRC32 at all, and this library does not check BLAKE2sp. So
 // "terminated cleanly" does not imply "content was verified".
 func (fr *fileReader) verifyChecksum() error {
-	if fr.unverifiable {
+	// UseMac is read here rather than at begin because it belongs to the
+	// header that records the digest, which for a multi-volume file is the
+	// LAST part's -- and RAR sets it only there. Reading it at begin saw the
+	// first part's cleared copy and then compared a plaintext CRC32 against a
+	// key-derived MAC, a guaranteed false ErrCRCMismatch on every encrypted
+	// multi-volume file. Part 11 is the only part of either encrypted
+	// multi-volume fixture with UseMac set.
+	//
+	// Parts 1 to 10 do carry a CRC32 field, so HasCRC32 below is NOT a
+	// backstop against completing on a non-final header: that field covers
+	// the part's own packed bytes rather than the file's plaintext, and this
+	// parser cannot tell the two apart -- header.go sets HasCRC32 from the
+	// same flag on every part. Completing while an intermediate header is in
+	// force would miscompare against it, which is a separate problem from the
+	// one this gate solves.
+	//
+	// The gate is UseMac and not Encrypted: encryption alone does not make a
+	// digest uncheckable, RAR says so by setting this flag. Gating on
+	// Encrypted would also hand RAR3 -- which never sets UseMac and never
+	// decrypts -- a header bit that switches CRC verification off.
+	if fr.accumulate && fr.header.UseMac {
 		return fmt.Errorf("%w: file %q", ErrChecksumUnsupported, fr.header.Name)
 	}
 	// Nothing was delivered, so there is nothing to verify. This is what

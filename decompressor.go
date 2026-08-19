@@ -339,9 +339,17 @@ type cbcDecryptReader struct {
 	r         io.Reader
 	decrypter cipher.BlockMode
 	inBuf     [4096]byte
-	outBlock  [4096]byte
-	outBuf    []byte
-	err       error
+	// inLen is how much of inBuf is held but not yet decrypted: the tail of a
+	// read that ended mid-block. CBC consumes whole 16-byte blocks, and a
+	// Reader may return any count it likes, so those bytes have to survive
+	// until the next call completes the block. Dropping them silently
+	// corrupted every encrypted multi-volume file, whose parts are sliced at
+	// arbitrary offsets -- 765 bytes in the first volume decrypts 47 blocks
+	// and strands 13.
+	inLen    int
+	outBlock [4096]byte
+	outBuf   []byte
+	err      error
 }
 
 func newCBCDecryptReader(r io.Reader, key []byte, iv []byte) (io.Reader, error) {
@@ -362,33 +370,56 @@ func (c *cbcDecryptReader) Read(p []byte) (int, error) {
 		c.outBuf = c.outBuf[n:]
 		return n, nil
 	}
-	if c.err != nil {
+	// Held-back bytes are still owed to the caller, so a recorded EOF only
+	// ends the stream once they have been consumed.
+	if c.err != nil && c.inLen == 0 {
 		return 0, c.err
 	}
 
-	var totalRead int
-	for totalRead < 16 {
-		n, err := c.r.Read(c.inBuf[totalRead:])
-		if n > 0 {
-			totalRead += n
-		}
+	// Fill until a whole block is available, resuming from whatever the last
+	// call held back rather than starting at zero.
+	for c.inLen < 16 && c.err == nil {
+		n, err := c.r.Read(c.inBuf[c.inLen:])
+		c.inLen += n
 		if err != nil {
-			if err == io.EOF {
+			if errors.Is(err, io.EOF) {
 				c.err = io.EOF
 				break
 			}
+			// Recorded, not just returned. Left unrecorded, a caller that
+			// reads again re-enters this loop, and a source that then reports
+			// EOF sends the held bytes down the partial-block path below --
+			// reporting ErrUnexpectedEOF and losing the real failure. The
+			// held bytes go with it: after a hard error the stream is broken,
+			// and keeping a fragment only to mislabel it later helps nobody.
+			c.err = err
+			c.inLen = 0
 			return 0, err
 		}
 	}
-	if totalRead < 16 {
-		if totalRead > 0 {
-			return 0, io.ErrUnexpectedEOF
+	if c.inLen < 16 {
+		if c.inLen > 0 {
+			// RAR pads a file's ciphertext to whole blocks, so a partial block
+			// at the end of the stream means it was cut short rather than
+			// that the format allows one.
+			//
+			// Recorded so it survives a second call. Returning it while
+			// leaving c.err at io.EOF let the next Read report a clean end of
+			// stream, decaying a truncation into success -- the exact decay
+			// fileReader.finish exists to prevent one layer up, which is not a
+			// reason for this layer to produce it.
+			c.inLen = 0
+			c.err = io.ErrUnexpectedEOF
 		}
-		return 0, io.EOF
+		return 0, c.err
 	}
 
-	decryptLen := (totalRead / 16) * 16
+	decryptLen := (c.inLen / 16) * 16
 	c.decrypter.CryptBlocks(c.outBlock[:decryptLen], c.inBuf[:decryptLen])
+	// Carry the sub-block tail into the next call.
+	rem := c.inLen - decryptLen
+	copy(c.inBuf[:rem], c.inBuf[decryptLen:c.inLen])
+	c.inLen = rem
 	c.outBuf = c.outBlock[:decryptLen]
 
 	n := copy(p, c.outBuf)
