@@ -46,8 +46,7 @@ func (sd *StreamDecompressor) Reset(volumes <-chan io.ReadCloser) {
 		sd.currentVol = nil
 	}
 	sd.volumes = volumes
-	sd.currHeader = nil
-	sd.currReader = nil
+	sd.file.clear()
 	sd.win.Reset(false)
 }
 ```

@@ -51,8 +51,10 @@ volumes <-chan io.ReadCloser
   └─ multiVolumePayloadReader   (splices packed bytes across RAR volumes)
        └─ cbcDecryptReader       (AES-256-CBC; only present for encrypted files)
             └─ storeReader / lz50Reader   (method=0: passthrough; method≥1: LZ77+Huffman)
-                 └─ io.LimitReader(fh.UnpackedSize)
+                 └─ fileReader             (byte budget, running CRC, terminal state)
 ```
+
+`fileReader` (`filereader.go`) is the sole owner of per-file state and the outermost element of the chain: `StreamDecompressor.Read` is a thin delegation to it. It bounds output by the header's declared size rather than an `io.LimitReader`, because it must distinguish "the declared size was reached" from "the stream ended early" — a limit reader reports both as `io.EOF`.
 
 The `Window` (32 MB sliding buffer, `window.go`) is allocated once in `NewStreamDecompressor` and shared by `storeReader`/`lz50Reader`. `Reset(false)` skips zeroing the buffer; eliminating the zero-loop removed an 81% CPU-time bottleneck.
 
@@ -63,6 +65,7 @@ Skipping the clear is safe only because `CopyBytes` refuses to read behind the h
 | File | Role |
 |---|---|
 | `decompressor.go` | `StreamDecompressor` — public API, volume stitching, AES decryption, reader composition |
+| `filereader.go` | `fileReader` — sole owner of per-file state; byte budget, running CRC, terminal error |
 | `header.go` | RAR5 block/file/archive header parsing; `sanitizePath` for traversal protection |
 | `decoder50.go` | LZ77 + Huffman decode loop (RAR5 method 1–5) |
 | `huffman.go` | 10-bit direct-lookup Huffman table (do not replace with tree walk) |
@@ -87,6 +90,9 @@ The library is **not concurrently safe** within a single `StreamDecompressor` in
 - The rar-bomb guard (`UnpackedSize > 1000 * PackedSize` for files > 1 MB) must not be weakened or removed without explicit user approval.
 - The window history bound in `CopyBytes` (`distance > w.historyLen()`) must not be weakened or removed without explicit user approval. It is what keeps the deliberately-uncleared history buffer from being readable across files — see `Window.wrapped` in `window.go`, which also enumerates the write paths that must maintain it.
 - AES key material (password, derived key bytes, salt) must never appear in error messages or log output.
+- A file must never terminate cleanly without either meeting its declared `UnpackedSize` or reporting why not. `fileReader.finish` is the only place that decides, and `ErrTruncatedFile` must not be made to satisfy `errors.Is(err, io.EOF)` — callers loop until `io.EOF`, so that would restore the silent-truncation bug it exists to prevent.
+- A file's terminal error is durable for that file: once `fileReader.done` is set, `Read` returns it instead of producing bytes. Do not add a path that clears it short of `begin` or `clear`, or a caller that keeps reading will see a failure decay back into success.
+- **Never let a block header be parsed out of a previous file's payload.** `fileReader` sees only the decompressed side and stops at the declared size, so a file that ends short leaves an unknown number of *packed* bytes in the stream. `endFile` therefore reports a failure rather than allowing traversal to continue in that case, and any path that refuses a file after reading its block header must drop that file's payload first (as `processHeader` does for `ErrUnpSizeUnknown`, using the CRC-checked `h.DataSize`). Resynchronising header parsing onto unread payload lets a crafted archive surface a fabricated file entry from `Next()`. Making short files skippable requires the engines to drain the packed remainder, which is tracked separately.
 
 ## Integration Testing
 
