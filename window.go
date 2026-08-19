@@ -14,6 +14,28 @@ type Window struct {
 	r    int    // Read index (beginning of unread data)
 	w    int    // Write index (end of unread data)
 	full bool   // True if the buffer is completely full
+
+	// wrapped reports whether the ring has completed a full lap since the last
+	// Reset that did not preserve history. Together with w it gives the true
+	// depth of valid LZ77 history: w bytes before the first lap, the whole
+	// buffer after. Bytes beyond that depth are stale contents of a previously
+	// decompressed file, because Reset deliberately does not clear buf.
+	//
+	// w returns to 0 for two different reasons — Reset discarded history, or
+	// the ring lapped — and this flag is what distinguishes them. Every path
+	// that advances w must therefore maintain it. In non-test code there are
+	// exactly three: writeByte, writeBytes, and CopyBytes.
+	wrapped bool
+}
+
+// historyLen returns the number of bytes of valid LZ77 history behind the write
+// pointer. It is derived from w and wrapped rather than counted separately; see
+// the wrapped field for why that is sound.
+func (w *Window) historyLen() int {
+	if w.wrapped {
+		return w.size
+	}
+	return w.w
 }
 
 // NewWindow creates a new sliding window of the specified size.
@@ -30,10 +52,18 @@ func NewWindow(size int) *Window {
 
 // Reset resets the sliding window indexes. If keepHistory is true (for solid archives),
 // we retain the written data and only reset the read pointer to the write pointer.
+//
+// The buffer is deliberately not cleared — see the note in CLAUDE.md. Discarding
+// history therefore means discarding the right to reference it: wrapped is
+// cleared alongside the pointers so CopyBytes rejects any back-reference into
+// the previous file's bytes, which are still physically present in buf.
+// A keepHistory reset leaves wrapped alone, so a solid group continues the
+// preceding file's dictionary.
 func (w *Window) Reset(keepHistory bool) {
 	if !keepHistory {
 		w.w = 0
 		w.r = 0
+		w.wrapped = false
 	} else {
 		w.r = w.w
 	}
@@ -46,6 +76,7 @@ func (w *Window) writeByte(c byte) {
 	w.w++
 	if w.w >= w.size {
 		w.w = 0
+		w.wrapped = true
 	}
 	if w.w == w.r {
 		w.full = true
@@ -62,6 +93,7 @@ func (w *Window) writeBytes(p []byte) {
 		w.w += n
 		if w.w >= w.size {
 			w.w = 0
+			w.wrapped = true
 		}
 		if w.w == w.r {
 			w.full = true
@@ -83,8 +115,18 @@ func (w *Window) writeBytes(p []byte) {
 // the src/dst boundary. After copying d=distance bytes, src and dst advance by
 // d together and remain exactly distance apart, keeping each subsequent copy
 // non-overlapping.
+//
+// distance must lie within the history actually written since the last Reset
+// that discarded history. A wider bound — the buffer size, say — would only
+// prove the read lands inside buf, not that it lands on bytes this file
+// produced; since Reset does not clear buf, the difference is the previous
+// file's plaintext. Out-of-range distances return ErrWindowOffsetBounds and
+// copy nothing. Callers driving the window directly should note this contract
+// is narrower than a plain buffer-size bound.
 func (w *Window) CopyBytes(length int, distance int) error {
-	if distance <= 0 || distance > w.size {
+	// distance is attacker-controlled: it comes straight off the compressed
+	// stream. historyLen never exceeds size, so this also keeps srcIdx in range.
+	if distance <= 0 || distance > w.historyLen() {
 		return ErrWindowOffsetBounds
 	}
 
@@ -104,6 +146,7 @@ func (w *Window) CopyBytes(length int, distance int) error {
 		w.w += n
 		if w.w >= w.size {
 			w.w = 0
+			w.wrapped = true
 		}
 		if w.w == w.r {
 			w.full = true

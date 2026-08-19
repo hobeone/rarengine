@@ -542,3 +542,42 @@ func TestStreamDecompressor_RAR3_LZ77_MatchDecompression(t *testing.T) {
 		t.Errorf("expected decompressed output %q, got %q", expected, string(buf))
 	}
 }
+
+// TestRAR3_CopyMatch_RejectsWithinAvailableGap covers the RAR3 half of the
+// history-disclosure bug. A back-reference is legitimate only within the bytes
+// the file has actually produced; distances beyond that reach into the previous
+// file's bytes, which Reset leaves in the buffer. The band just past the
+// produced count is the interesting one, because a bound that also credited the
+// undrained bytes would admit it.
+func TestRAR3_CopyMatch_RejectsWithinAvailableGap(t *testing.T) {
+	win := NewWindow(0x40000)
+	fillWindowWithPriorFile(win)
+
+	// A new non-solid RAR3 file begins.
+	win.Reset(false)
+	d := newRAR3Decoder(win)
+	d.Reset(nil, 1<<20, false)
+
+	// Produce 10 bytes and leave them undrained, so the produced count and the
+	// undrained count are both 10. Distances in 11..20 are the interesting ones:
+	// they are past the real history but would survive any bound that credited
+	// undrained bytes on top of produced ones.
+	for range 10 {
+		d.writeByte('X')
+	}
+	if d.produced != 10 || win.Available() != 10 {
+		t.Fatalf("setup: produced=%d available=%d, want 10/10", d.produced, win.Available())
+	}
+
+	// Everything strictly beyond the 10 bytes produced must be rejected.
+	for _, dist := range []int{11, 15, 20} {
+		if err := d.copyMatch(8, dist); !errors.Is(err, ErrWindowOffsetBounds) {
+			t.Errorf("copyMatch(8, %d) = %v, want ErrWindowOffsetBounds", dist, err)
+		}
+	}
+
+	// A legitimate distance within the produced bytes still works.
+	if err := d.copyMatch(4, 10); err != nil {
+		t.Errorf("copyMatch(4, 10) rejected: %v", err)
+	}
+}

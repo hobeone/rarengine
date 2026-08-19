@@ -90,7 +90,6 @@ type rar3Decoder struct {
 	lastLevels      [huffTableSize30]byte
 	tablesRead      bool
 	isPPM           bool
-	solid           bool
 }
 
 func newRAR3Decoder(win *Window) *rar3Decoder {
@@ -107,7 +106,6 @@ func (d *rar3Decoder) Reset(r io.Reader, unpackedSize int64, solid bool) {
 	d.written = 0
 	d.tablesRead = false
 	d.isPPM = false
-	d.solid = solid
 
 	// Clear bit reader; incremental refills via RefillBuffer handle streaming
 	d.br.Reset(nil, 0)
@@ -338,9 +336,6 @@ func (d *rar3Decoder) writeByte(c byte) {
 }
 
 func (d *rar3Decoder) copyMatch(matchLen int, dist int) error {
-	if !d.solid && dist > int(d.produced)+d.win.Available() {
-		return ErrWindowOffsetBounds
-	}
 	if err := d.win.CopyBytes(matchLen, dist); err != nil {
 		return err
 	}

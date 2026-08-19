@@ -54,7 +54,9 @@ volumes <-chan io.ReadCloser
                  └─ io.LimitReader(fh.UnpackedSize)
 ```
 
-The `Window` (32 MB sliding buffer, `window.go`) is allocated once in `NewStreamDecompressor` and shared by `storeReader`/`lz50Reader`. `Reset(false)` skips zeroing the buffer — safe because LZ77 only reads bytes within the current write pointer; eliminating the zero-loop removed an 81% CPU-time bottleneck.
+The `Window` (32 MB sliding buffer, `window.go`) is allocated once in `NewStreamDecompressor` and shared by `storeReader`/`lz50Reader`. `Reset(false)` skips zeroing the buffer; eliminating the zero-loop removed an 81% CPU-time bottleneck.
+
+Skipping the clear is safe only because `CopyBytes` refuses to read behind the history actually written since that reset — `Window.historyLen()`, derived from `w` plus the `wrapped` lap flag. Without that bound a crafted stream can name a back-reference distance larger than the bytes its file has produced and read out the previous file's plaintext, which is still physically present in the buffer. The bound is load-bearing: it is what makes the missing memclr a performance choice rather than an information leak.
 
 ### Key files
 
@@ -83,6 +85,7 @@ The library is **not concurrently safe** within a single `StreamDecompressor` in
 
 - `sanitizePath` in `header.go` is mandatory for all archive-internal filenames — do not bypass it.
 - The rar-bomb guard (`UnpackedSize > 1000 * PackedSize` for files > 1 MB) must not be weakened or removed without explicit user approval.
+- The window history bound in `CopyBytes` (`distance > w.historyLen()`) must not be weakened or removed without explicit user approval. It is what keeps the deliberately-uncleared history buffer from being readable across files — see `Window.wrapped` in `window.go`, which also enumerates the write paths that must maintain it.
 - AES key material (password, derived key bytes, salt) must never appear in error messages or log output.
 
 ## Integration Testing
