@@ -50,6 +50,13 @@ func rar5EndHeader() []byte {
 // produces an entry whose packed block has bytes left over once the declared
 // content has been produced.
 func rar5FileEntry(name string, unpackedSize uint64, declaredCRC uint32, payload []byte) []byte {
+	return rar5EntryComp(name, 0, unpackedSize, declaredCRC, payload)
+}
+
+// rar5EntryComp is rar5FileEntry with the compression-info vint exposed, so a
+// test can set FileCompSolid (0x40) or a method without rebuilding the block.
+// Method lives in bits 7-9 of the same vint, so 0 is store either way.
+func rar5EntryComp(name string, compFlags uint64, unpackedSize uint64, declaredCRC uint32, payload []byte) []byte {
 	var fp bytes.Buffer
 	fp.Write(EncodeVint(FileFlagHasCRC32))
 	fp.Write(EncodeVint(unpackedSize))
@@ -57,7 +64,7 @@ func rar5FileEntry(name string, unpackedSize uint64, declaredCRC uint32, payload
 	var crcBuf [4]byte
 	binary.LittleEndian.PutUint32(crcBuf[:], declaredCRC)
 	fp.Write(crcBuf[:])
-	fp.Write(EncodeVint(0)) // store method, not solid
+	fp.Write(EncodeVint(compFlags))
 	fp.Write(EncodeVint(1))
 	fp.Write(EncodeVint(uint64(len(name))))
 	fp.WriteString(name)

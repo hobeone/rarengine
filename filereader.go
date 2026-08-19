@@ -25,6 +25,46 @@ var ErrTruncatedFile = errors.New("rarengine: archive ended before the file's de
 // content regardless can disable verification; see SetVerifyCRC.
 var ErrChecksumUnsupported = errors.New("rarengine: file records a checksum this library cannot verify")
 
+// ErrSolidStreamBroken is returned when a solid file cannot be decoded
+// because an earlier file in the same solid run was damaged.
+//
+// Solid files share one LZ77 history: a file's back-references reach into the
+// bytes its predecessors wrote. A damaged predecessor never writes them, so
+// every solid file after it would decode against history that is simply
+// absent -- producing plausible-looking bytes that are wrong, with nothing in
+// the format to mark them. Refusing is the only answer that cannot silently
+// hand over fabricated content. A non-solid file resets the window and clears
+// the condition, so a solid run that begins after the damage is unaffected.
+var ErrSolidStreamBroken = errors.New("rarengine: solid file depends on history a damaged file did not write")
+
+// FileError reports that one file could not be delivered while the archive
+// itself is still readable, and is what makes skipping a damaged file
+// possible without guessing.
+//
+// Next returns it in place of the next header. The stream is already
+// positioned at the following block when it is returned -- the failed file's
+// packed remainder has been drained -- so calling Next again continues the
+// traversal. Any other error means traversal has stopped.
+//
+// That distinction is the whole point of the type. Both outcomes previously
+// arrived as the same bare error, so a caller had no way to tell "this file
+// is unreadable, the rest are fine" from "the archive is over", and the only
+// safe reading was to stop and lose every later file.
+//
+// Header is the file that failed, captured before its state was cleared.
+// Unwrap exposes the underlying cause, so errors.Is(err, ErrTruncatedFile)
+// and the other sentinels keep working.
+type FileError struct {
+	Header *FileHeader
+	Err    error
+}
+
+func (e *FileError) Error() string { return e.Err.Error() }
+
+// Unwrap keeps errors.Is/As working through the wrapper, so a caller that
+// does not care about the distinction behaves exactly as before.
+func (e *FileError) Unwrap() error { return e.Err }
+
 // fileReader owns every piece of state that belongs to one file being
 // decoded: the reader chain it comes from, the header in force, how many
 // bytes are still owed, the running checksum, and whether the file has
@@ -276,12 +316,21 @@ func (fr *fileReader) endFile(packed *packedCursor) error {
 	reported := fr.done
 	_, contentErr := io.Copy(io.Discard, fr)
 	// Captured before clear: whether the file delivered everything it
-	// promised decides whether traversal can continue.
+	// promised decides whether traversal can continue, and which file to name
+	// when reporting that it did not.
 	short := fr.remaining > 0
+	failed := fr.header
 	// Drained on every terminal path, not only the failing ones. A file that
 	// completed perfectly can still leave packed bytes behind, and that is
 	// exactly the case an archive uses to fabricate the next entry.
 	packedErr := packed.drain()
+	// Whether the remainder was actually consumed, read before invalidate
+	// clears the count. This is the mechanical test for "the stream is at the
+	// next block": a full drain means every promised byte was accounted for.
+	// A short drain means the payload ran out early -- truncated media, or a
+	// source that failed -- and the traversal is somewhere the block structure
+	// does not describe.
+	fullyDrained := packed.owed() == 0
 	// The cursor described this file. Dropping the count here keeps a short
 	// drain -- a truncated volume, where the promised bytes were never on the
 	// media -- from leaving a stale count for whatever runs next.
@@ -291,12 +340,13 @@ func (fr *fileReader) endFile(packed *packedCursor) error {
 	var verdict error
 	switch {
 	case short:
-		// The file stopped before its declared size. Its packed remainder is
-		// drained by now, so the stream sits at a real block boundary and
-		// traversal *could* continue -- but a caller cannot tell this failure
-		// apart from "the archive is over", and the permissive guess silently
-		// truncates whatever it is assembling. Reporting is the reading that
-		// cannot lose data, until the error contract can carry the difference.
+		// The file stopped before its declared size. Its packed remainder has
+		// been drained by now, so the stream sits at a real block boundary and
+		// traversal can continue -- but only a caller that can tell this
+		// failure apart from "the archive is over" may act on that, or the
+		// permissive reading silently truncates whatever it is assembling.
+		// FileError is what carries the difference; it is applied below, once
+		// the drain is known to have succeeded.
 		verdict = reported
 		if verdict == nil {
 			verdict = contentErr
@@ -311,6 +361,18 @@ func (fr *fileReader) endFile(packed *packedCursor) error {
 
 	switch {
 	case packedErr == nil:
+		if short && verdict != nil && fullyDrained {
+			// Continuable only when the remainder was fully consumed, which is
+			// what puts the stream on the next block header. Anything less --
+			// a drain that errored, or one that ran out of payload early --
+			// leaves the offset undescribed by the block structure, and
+			// inviting the caller to read on from there is how a header gets
+			// parsed out of a previous file's payload.
+			//
+			// This costs nothing real in the cases it excludes: a volume that
+			// ran out has no further files to reach on it anyway.
+			return &FileError{Header: failed, Err: verdict}
+		}
 		return verdict
 	case verdict == nil:
 		// Returned unwrapped. errors.Join builds a wrapper even around a

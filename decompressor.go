@@ -80,6 +80,55 @@ type StreamDecompressor struct {
 	// discard backs discardPayload. Reused so discarding a block's payload
 	// costs no allocation, per the no-new-allocations rule in CLAUDE.md.
 	discard packedCursor
+	// damaged records that a file was skipped without delivering everything
+	// it declared, so the LZ77 window is missing bytes a solid successor
+	// would back-reference. Set by finishCurrentFile, consulted and cleared
+	// by admitFile -- those two are the only places allowed to touch it.
+	damaged bool
+}
+
+// finishCurrentFile ends the active file and remembers whether it left the
+// window incomplete.
+//
+// The engines call this rather than sd.file.endFile directly so that the
+// damage state has exactly one writer. Reading it back out of the returned
+// error at each call site would put the same rule in two engines and let them
+// drift, which is how the refusal paths diverged before.
+func (sd *StreamDecompressor) finishCurrentFile(packed *packedCursor) error {
+	err := sd.file.endFile(packed)
+	if err == nil {
+		return nil
+	}
+	// A FileError is precisely the case where a file ended without producing
+	// what it declared. Matching on the type rather than on a bare bool keeps
+	// this in step with whatever endFile decides is continuable.
+	//
+	// AsType rather than As: As takes its target as an any, and boxing the
+	// pointer allocates on every call. This runs once per file, so the
+	// non-generic form put an allocation on the success path of Next -- which
+	// the nil check above also now skips entirely.
+	if _, ok := errors.AsType[*FileError](err); ok {
+		sd.damaged = true
+	}
+	return err
+}
+
+// admitFile decides whether a file may begin, given what happened to the
+// files before it.
+//
+// A non-solid file resets the window, so it and everything built on it are
+// unaffected by earlier damage -- that is what clears the state. A solid file
+// after damage cannot be decoded correctly and is refused: see
+// ErrSolidStreamBroken.
+func (sd *StreamDecompressor) admitFile(fh *FileHeader) error {
+	if !fh.Solid {
+		sd.damaged = false
+		return nil
+	}
+	if sd.damaged {
+		return ErrSolidStreamBroken
+	}
+	return nil
 }
 
 // packedCursor tracks how many packed bytes a block still owes the stream, and
@@ -227,6 +276,10 @@ func (sd *StreamDecompressor) Reset(volumes <-chan io.ReadCloser) {
 	// Clearing the file drops any terminal error with it; without this a
 	// reused decompressor would inherit the previous stream's failure.
 	sd.file.clear()
+	// Same reason as clearing the file: damage belongs to the stream that
+	// caused it, and a reused decompressor would otherwise refuse the next
+	// archive's solid files over a failure they had nothing to do with.
+	sd.damaged = false
 	sd.version = VersionUnknown
 	sd.engine = nil
 	sd.win.Reset(false)

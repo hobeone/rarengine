@@ -23,7 +23,7 @@ func newRAR3Engine(sd *StreamDecompressor) *rar3Engine {
 func (re *rar3Engine) Next() (*FileHeader, error) {
 	// Draining goes through the owner, so a file the caller skipped is
 	// verified on the same terms as one it read.
-	if err := re.sd.file.endFile(&re.packed); err != nil {
+	if err := re.sd.finishCurrentFile(&re.packed); err != nil {
 		return nil, err
 	}
 
@@ -87,6 +87,13 @@ func (re *rar3Engine) processHeader(h *BlockHeader) (*FileHeader, bool, error) {
 			// carries only the low half. The header parsed cleanly here, so
 			// the full size is known and is what has to go.
 			return nil, false, re.sd.refuse(fh.PackedSize, ErrRarBombDetected)
+		}
+
+		// Refused like any other rejected file, so the payload is dropped and
+		// the traversal stays able to reach whatever follows -- a later
+		// non-solid file is still perfectly readable.
+		if err := re.sd.admitFile(fh); err != nil {
+			return nil, false, re.sd.refuse(fh.PackedSize, err)
 		}
 
 		re.sd.win.Reset(fh.Solid)
