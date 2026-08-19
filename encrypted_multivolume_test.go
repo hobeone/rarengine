@@ -41,11 +41,12 @@ func encryptedMultiVolumeChan(t *testing.T, prefix string) <-chan io.ReadCloser 
 // that is both encrypted and split across volumes.
 //
 // A file's ciphertext is one continuous CBC stream, and volume boundaries cut
-// it at arbitrary offsets: this fixture's parts are 765, 764 and 599 bytes,
-// none of them a whole number of AES blocks though together they are
-// (8240 = 16 x 515). A later volume therefore starts mid-block and cannot be
-// decrypted on its own -- the headers repeat the first part's salt and IV
-// rather than supplying new ones, so there is nothing to restart from.
+// it at arbitrary offsets: the compressed fixture's parts are 765, 764 and 599
+// bytes (8240 = 16 x 515) and the stored one's are 765, 764 and 551
+// (8192 = 16 x 512). No part is a whole number of AES blocks though each file
+// is. A later volume therefore starts mid-block and cannot be decrypted on its
+// own -- the headers repeat the first part's salt and IV rather than supplying
+// new ones, so there is nothing to restart from.
 //
 // Splicing volumes above the decryption fed each new part's raw bytes to the
 // decoder, so the first part decoded and every part after it was ciphertext.
@@ -111,11 +112,12 @@ func TestEncryptedMultiVolume_DecodesEveryVolume(t *testing.T) {
 // sees on success, and guards the split-header bug specifically.
 //
 // RAR records this file's digest as a key-derived MAC and sets UseMac on the
-// header carrying it -- the LAST part's. Part 1 has the flag clear and no file
-// CRC32 at all ("unrar lt" reports "Pack-CRC32" there and "CRC32 MAC" on part
-// 11). Reading UseMac when the file began therefore saw the cleared copy and
-// went on to compare a plaintext CRC32 against a MAC, a guaranteed mismatch on
-// every encrypted multi-volume file.
+// header carrying it -- the LAST part's. Part 1 has the flag clear, and the
+// CRC32 field it does carry covers that part's packed bytes rather than the
+// file's plaintext ("unrar lt" labels it "Pack-CRC32" there and "CRC32 MAC" on
+// part 11). Reading UseMac when the file began therefore saw the cleared copy
+// and went on to compare a plaintext CRC32 against a MAC, a guaranteed
+// mismatch on every encrypted multi-volume file.
 //
 // ErrChecksumUnsupported says the digest cannot be checked, which is true, and
 // leaves the caller free to accept the content. ErrCRCMismatch would say the
@@ -236,7 +238,7 @@ func (c *chunkedReader) Read(p []byte) (int, error) {
 // of the shorter slice when one is a prefix of the other. -1 means equal.
 func firstDifference(a, b []byte) int {
 	n := min(len(b), len(a))
-	for i := 0; i < n; i++ {
+	for i := range n {
 		if a[i] != b[i] {
 			return i
 		}

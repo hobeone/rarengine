@@ -104,8 +104,9 @@ echo "  rar5_multi.part*.rar"
 #
 # The only fixtures where decryption has to survive a volume advance: a file's
 # ciphertext is one continuous CBC stream, and 1 KB volumes cut it mid-block
-# (the parts come out 765, 764 and 599 bytes, none of them a whole number of
-# AES blocks). Every part's header repeats the first part's salt and IV, so a
+# (the compressed parts come out 765, 764 and 599 bytes and the stored ones
+# 765, 764 and 551 -- none of them a whole number of AES blocks, though each
+# file totals one). Every part's header repeats the first part's salt and IV, so a
 # later volume cannot be decrypted on its own.
 #
 # Both methods are kept because they fail differently when the splice is

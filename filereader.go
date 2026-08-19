@@ -218,8 +218,16 @@ func (fr *fileReader) verifyChecksum() error {
 	// LAST part's -- and RAR sets it only there. Reading it at begin saw the
 	// first part's cleared copy and then compared a plaintext CRC32 against a
 	// key-derived MAC, a guaranteed false ErrCRCMismatch on every encrypted
-	// multi-volume file. Both encrypted multi-volume fixtures report
-	// "CRC32 MAC" on part 11 and no file CRC32 on part 1.
+	// multi-volume file. Part 11 is the only part of either encrypted
+	// multi-volume fixture with UseMac set.
+	//
+	// Parts 1 to 10 do carry a CRC32 field, so HasCRC32 below is NOT a
+	// backstop against completing on a non-final header: that field covers
+	// the part's own packed bytes rather than the file's plaintext, and this
+	// parser cannot tell the two apart -- header.go sets HasCRC32 from the
+	// same flag on every part. Completing while an intermediate header is in
+	// force would miscompare against it, which is a separate problem from the
+	// one this gate solves.
 	//
 	// The gate is UseMac and not Encrypted: encryption alone does not make a
 	// digest uncheckable, RAR says so by setting this flag. Gating on
