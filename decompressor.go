@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 )
 
@@ -138,7 +139,14 @@ func (c *packedCursor) drain() error {
 		return nil
 	}
 	_, err := io.Copy(io.Discard, &c.lr)
-	return err
+	if err != nil {
+		// Named, because endFile may report this alongside the file's own
+		// verdict and the two are otherwise indistinguishable in the joined
+		// message: one says the file is bad, this one says the stream is no
+		// longer positioned at a block boundary.
+		return fmt.Errorf("rarengine: draining packed remainder: %w", err)
+	}
+	return nil
 }
 
 // discardPayload consumes n bytes of block payload from the current volume, for
@@ -151,6 +159,22 @@ func (sd *StreamDecompressor) discardPayload(n int64) error {
 	}
 	sd.discard.repoint(sd.currentVol, n)
 	return sd.discard.drain()
+}
+
+// refuse drops n bytes of a rejected file's payload and returns cause, the
+// reason the file was rejected.
+//
+// Every refusal has to do both, because traversal continues afterwards: the
+// caller gets the error and calls Next() again, so a refused block that keeps
+// its payload supplies the next entry. Pairing them here rather than at each
+// refusal site keeps the two from drifting apart, and a failed discard wins
+// over cause -- if the stream cannot be repositioned, nothing later can be
+// trusted regardless of why this file was refused.
+func (sd *StreamDecompressor) refuse(n int64, cause error) error {
+	if err := sd.discardPayload(n); err != nil {
+		return err
+	}
+	return cause
 }
 
 // SetPassword configures the decryption password for encrypted RAR archives.

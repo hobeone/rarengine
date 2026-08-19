@@ -100,6 +100,38 @@ func rar3FileEntry(name string, unpackedSize uint32, declaredCRC uint32, payload
 	return out.Bytes()
 }
 
+// rar3LargeFileEntry emits a file block carrying LHD_LARGE, which splits both
+// sizes across a low half in the ordinary fields and a high half in
+// HIGH_PACK_SIZE / HIGH_UNP_SIZE. The block framing's ADD_SIZE holds only the
+// low half of the packed size, so a reader that trusts it alone sees a
+// different figure than the header actually declares.
+func rar3LargeFileEntry(name string, unpLow, highPack, highUnp, declaredCRC uint32, payload []byte) []byte {
+	const large = 0x0100
+	headSize := 40 + len(name)
+	h := make([]byte, headSize)
+	h[2] = 0x74
+	binary.LittleEndian.PutUint16(h[3:5], 0x8000|large)
+	binary.LittleEndian.PutUint16(h[5:7], uint16(headSize))
+	binary.LittleEndian.PutUint32(h[7:11], uint32(len(payload))) // ADD_SIZE: low half only
+	binary.LittleEndian.PutUint32(h[11:15], unpLow)
+	h[15] = 3
+	binary.LittleEndian.PutUint32(h[16:20], declaredCRC)
+	binary.LittleEndian.PutUint32(h[20:24], 0)
+	h[24] = 20
+	h[25] = 0x30
+	binary.LittleEndian.PutUint16(h[26:28], uint16(len(name)))
+	binary.LittleEndian.PutUint32(h[28:32], 0o644)
+	binary.LittleEndian.PutUint32(h[32:36], highPack)
+	binary.LittleEndian.PutUint32(h[36:40], highUnp)
+	copy(h[40:], name)
+	binary.LittleEndian.PutUint16(h[0:2], uint16(crc32.ChecksumIEEE(h[2:])))
+
+	var out bytes.Buffer
+	out.Write(h)
+	out.Write(payload)
+	return out.Bytes()
+}
+
 func rar3ArchiveHeader() []byte {
 	m := make([]byte, 13)
 	m[2] = 0x73
@@ -268,6 +300,12 @@ func TestPackedRemainder_NoReadAfterVolumeClose(t *testing.T) {
 		t.Fatal("Next#2 succeeded; want the archive to end")
 	}
 
+	// Asserted, not assumed. If the file no longer runs past the end of this
+	// volume, nothing closes it and "no reads after close" holds trivially.
+	if !vol.closed {
+		t.Fatal("the volume was never closed, so this test would pass without " +
+			"exercising the path it names")
+	}
 	if vol.readsAfterClose != 0 {
 		t.Errorf("read from the volume %d times after closing it",
 			vol.readsAfterClose)
@@ -370,6 +408,69 @@ func TestRefusedFile_CorruptHeaderPayloadIsDropped(t *testing.T) {
 	}
 }
 
+// TestRefusedFile_RarBombPayloadIsDroppedRAR3 is the RAR3 counterpart of the
+// RAR5 rar-bomb test. The guard exists in both engines and so did the leak.
+func TestRefusedFile_RarBombPayloadIsDroppedRAR3(t *testing.T) {
+	evil := rar3FileEntry("EVIL.txt", 5, crc32.ChecksumIEEE([]byte("PWNED")), []byte("PWNED"))
+
+	var arc bytes.Buffer
+	arc.Write(rar3ArchiveHeader())
+	// Over the 1 MiB floor and more than 1000x the packed size.
+	arc.Write(rar3FileEntry("bomb.txt", 2_000_000, 0, evil))
+
+	sd := decompressorFor(arc.Bytes())
+
+	if _, err := sd.Next(); !errors.Is(err, ErrRarBombDetected) {
+		t.Fatalf("Next#1 = %v; want ErrRarBombDetected", err)
+	}
+	fh, err := sd.Next()
+	if err == nil {
+		t.Fatalf("Next#2 surfaced %q out of the refused file's payload; "+
+			"want an error", fh.Name)
+	}
+}
+
+// TestRefusedFile_RarBombDiscardsFullRAR3PackedSize covers the half of a RAR3
+// packed size that the block framing does not carry.
+//
+// RAR3 splits a large file's packed size between ADD_SIZE and HIGH_PACK_SIZE,
+// and the block header exposes only the low half. Discarding that alone
+// leaves the high half unaccounted for, and the next header is then read from
+// wherever the stream happens to sit.
+//
+// A real >4 GiB payload cannot be built here, so the archive below declares
+// one and supplies a few bytes. The declared size is what the refusal must
+// honour: consuming it runs to the end of the volume and takes the following
+// entry with it, which is the conservative direction -- an archive that lies
+// about its size loses the rest of itself rather than choosing what the
+// library parses next. Trusting the low half instead leaves the stream
+// positioned exactly on the entry after it, which is what this asserts
+// against.
+func TestRefusedFile_RarBombDiscardsFullRAR3PackedSize(t *testing.T) {
+	filler := bytes.Repeat([]byte{0xAA}, 16)
+	second := []byte("SECOND-FILE-INTACT")
+
+	var arc bytes.Buffer
+	arc.Write(rar3ArchiveHeader())
+	// PackedSize = 16 | (1 << 32); UnpackedSize = 1001 << 32, which clears
+	// both the 1 MiB floor and the 1000x ratio the guard rejects.
+	arc.Write(rar3LargeFileEntry("big.bin", 0, 1, 1001, 0, filler))
+	arc.Write(rar3FileEntry("second.txt", uint32(len(second)),
+		crc32.ChecksumIEEE(second), second))
+
+	sd := decompressorFor(arc.Bytes())
+
+	if _, err := sd.Next(); !errors.Is(err, ErrRarBombDetected) {
+		t.Fatalf("Next#1 = %v; want ErrRarBombDetected", err)
+	}
+	fh, err := sd.Next()
+	if err == nil {
+		t.Fatalf("Next#2 returned %q; the refusal discarded only the low half "+
+			"of the declared packed size, leaving the stream positioned on "+
+			"whatever followed", fh.Name)
+	}
+}
+
 // TestPackedRemainder_TracksCurrentVolume pins the invariant that makes the
 // drain safe on multi-volume files: while any packed bytes are still owed,
 // the limiter holding that count must describe the volume actually being
@@ -377,20 +478,33 @@ func TestRefusedFile_CorruptHeaderPayloadIsDropped(t *testing.T) {
 // that the engine never saw again -- so a drain would have consumed the
 // count from a later volume's legitimate header bytes.
 func TestPackedRemainder_TracksCurrentVolume(t *testing.T) {
-	sd := NewStreamDecompressor(multiVolumeChan(t, 300))
+	// Healthy archive, stopped mid-file: the read is large enough to have
+	// crossed several volume boundaries and small enough that the file is
+	// still in progress, which is the only state where the cursor both owes
+	// bytes and has had to follow the stream onto another volume.
+	sd := NewStreamDecompressor(multiVolumeChan(t, -1))
 
 	if _, err := sd.Next(); err != nil {
 		t.Fatalf("Next: %v", err)
 	}
-	_, _ = io.ReadAll(sd)
+	first := sd.currentVol
+	if _, err := io.ReadFull(sd, make([]byte, 4096)); err != nil {
+		t.Fatalf("reading the first half of the file: %v", err)
+	}
 
 	re, ok := sd.engine.(*rar5Engine)
 	if !ok {
 		t.Fatalf("engine is %T, want *rar5Engine", sd.engine)
 	}
-	if re.packed.owed() > 0 && re.packed.lr.R != sd.currentVol {
-		t.Errorf("packed cursor still owes %d bytes but points at a different "+
-			"volume than currentVol; draining it would consume bytes from the "+
-			"wrong stream", re.packed.owed())
+	// Asserted, not assumed. Everything below is about what happens when a
+	// file crosses a volume boundary, so a read that never crossed one would
+	// satisfy the check while proving nothing.
+	if sd.currentVol == first {
+		t.Fatal("the read never left the first volume, so this test would " +
+			"pass without exercising the invariant it names")
+	}
+	if re.packed.lr.R != sd.currentVol {
+		t.Error("the packed cursor points at a volume the stream has already " +
+			"left; draining it would consume bytes from the wrong one")
 	}
 }

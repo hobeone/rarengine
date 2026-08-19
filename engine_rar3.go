@@ -58,14 +58,16 @@ func (re *rar3Engine) processHeader(h *BlockHeader) (*FileHeader, bool, error) {
 	case 0x74: // File Header
 		fh, err := ParseRAR3FileHeader(h)
 		if err != nil {
-			// Refusing a file must not leave its payload in the stream, or
-			// the next header is parsed out of attacker-chosen bytes. The
-			// block header is intact and CRC-checked by this point, so
-			// h.DataSize is trustworthy.
-			if discardErr := re.sd.discardPayload(h.DataSize); discardErr != nil {
-				return nil, false, discardErr
-			}
-			return nil, false, err
+			// Refusing a file must not leave its payload in the stream, or the
+			// next header is parsed out of attacker-chosen bytes.
+			//
+			// h.DataSize is the only size available here: it comes from the
+			// block framing, which is intact, while fh -- and with it the
+			// high half of a large file's packed size -- is exactly what
+			// failed to parse. A corrupt LHD_LARGE header can therefore still
+			// leave its high bytes behind, which no amount of care here can
+			// recover, because nothing in the stream says how many there are.
+			return nil, false, re.sd.refuse(h.DataSize, err)
 		}
 
 		if !fh.FirstBlock {
@@ -79,10 +81,12 @@ func (re *rar3Engine) processHeader(h *BlockHeader) (*FileHeader, bool, error) {
 			// Refused like any other rejected file, and for the same reason:
 			// the caller can keep calling Next(), so leaving the payload lets
 			// the block that was just refused supply the next "file".
-			if discardErr := re.sd.discardPayload(h.DataSize); discardErr != nil {
-				return nil, false, discardErr
-			}
-			return nil, false, ErrRarBombDetected
+			//
+			// fh.PackedSize rather than h.DataSize: RAR3 splits a large file's
+			// packed size across ADD_SIZE and HIGH_PACK_SIZE, and h.DataSize
+			// carries only the low half. The header parsed cleanly here, so
+			// the full size is known and is what has to go.
+			return nil, false, re.sd.refuse(fh.PackedSize, ErrRarBombDetected)
 		}
 
 		re.sd.win.Reset(fh.Solid)
@@ -115,10 +119,7 @@ func (re *rar3Engine) processVolumePayloadHeader(h *BlockHeader) (io.Reader, boo
 	case 0x74: // File Header
 		fh, err := ParseRAR3FileHeader(h)
 		if err != nil {
-			if discardErr := re.sd.discardPayload(h.DataSize); discardErr != nil {
-				return nil, false, discardErr
-			}
-			return nil, false, err
+			return nil, false, re.sd.refuse(h.DataSize, err)
 		}
 		re.sd.file.advanceVolume(fh)
 		// Repointed rather than replaced by a fresh limiter: teardown drains

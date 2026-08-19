@@ -90,10 +90,7 @@ func (re *rar5Engine) processHeader(h *BlockHeader) (*FileHeader, bool, error) {
 			// field an archive corrupts is the archive's choice, so keying the
 			// discard on a particular error left the same fabrication open
 			// through every other one.
-			if discardErr := re.sd.discardPayload(h.DataSize); discardErr != nil {
-				return nil, false, discardErr
-			}
-			return nil, false, err
+			return nil, false, re.sd.refuse(h.DataSize, err)
 		}
 
 		// A continuation block's bytes belong to the file its first block
@@ -106,10 +103,7 @@ func (re *rar5Engine) processHeader(h *BlockHeader) (*FileHeader, bool, error) {
 			// Refused like any other rejected file, and for the same reason:
 			// the caller can keep calling Next(), so leaving the payload lets
 			// the block that was just refused supply the next "file".
-			if discardErr := re.sd.discardPayload(h.DataSize); discardErr != nil {
-				return nil, false, discardErr
-			}
-			return nil, false, ErrRarBombDetected
+			return nil, false, re.sd.refuse(fh.PackedSize, ErrRarBombDetected)
 		}
 
 		re.sd.win.Reset(fh.Solid)
@@ -156,10 +150,7 @@ func (re *rar5Engine) processVolumePayloadHeader(h *BlockHeader) (io.Reader, boo
 	case HeaderTypeFile:
 		fh, err := ParseFileHeader(h)
 		if err != nil {
-			if discardErr := re.sd.discardPayload(h.DataSize); discardErr != nil {
-				return nil, false, discardErr
-			}
-			return nil, false, err
+			return nil, false, re.sd.refuse(h.DataSize, err)
 		}
 		re.sd.file.advanceVolume(fh)
 		// Repointed rather than replaced by a fresh limiter: teardown drains

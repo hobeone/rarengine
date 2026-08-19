@@ -267,6 +267,10 @@ func (fr *fileReader) endFile(packed *packedCursor) error {
 	// completed perfectly can still leave packed bytes behind, and that is
 	// exactly the case an archive uses to fabricate the next entry.
 	packedErr := packed.drain()
+	// The cursor described this file. Dropping the count here keeps a short
+	// drain -- a truncated volume, where the promised bytes were never on the
+	// media -- from leaving a stale count for whatever runs next.
+	packed.invalidate()
 	fr.clear()
 
 	var verdict error
@@ -290,14 +294,21 @@ func (fr *fileReader) endFile(packed *packedCursor) error {
 		verdict = contentErr
 	}
 
-	if packedErr == nil {
+	switch {
+	case packedErr == nil:
 		return verdict
+	case verdict == nil:
+		// Returned unwrapped. errors.Join builds a wrapper even around a
+		// single error, which costs an allocation and defeats the identity
+		// comparisons callers use to recognise a sentinel.
+		return packedErr
+	default:
+		// Both are meaningful and neither subsumes the other: the verdict says
+		// what happened to the file, the drain error says the stream is no
+		// longer positioned at a block boundary. Returning either alone loses
+		// something the caller needs.
+		return errors.Join(verdict, packedErr)
 	}
-	// Both are meaningful and neither subsumes the other: the verdict says what
-	// happened to the file, the drain error says the stream is no longer
-	// positioned at a block boundary. Returning either alone loses something
-	// the caller needs.
-	return errors.Join(verdict, packedErr)
 }
 
 // clear drops the active file. The zero value reports ErrNoActiveFile from
