@@ -386,6 +386,14 @@ func (c *cbcDecryptReader) Read(p []byte) (int, error) {
 				c.err = io.EOF
 				break
 			}
+			// Recorded, not just returned. Left unrecorded, a caller that
+			// reads again re-enters this loop, and a source that then reports
+			// EOF sends the held bytes down the partial-block path below --
+			// reporting ErrUnexpectedEOF and losing the real failure. The
+			// held bytes go with it: after a hard error the stream is broken,
+			// and keeping a fragment only to mislabel it later helps nobody.
+			c.err = err
+			c.inLen = 0
 			return 0, err
 		}
 	}
@@ -394,8 +402,14 @@ func (c *cbcDecryptReader) Read(p []byte) (int, error) {
 			// RAR pads a file's ciphertext to whole blocks, so a partial block
 			// at the end of the stream means it was cut short rather than
 			// that the format allows one.
+			//
+			// Recorded so it survives a second call. Returning it while
+			// leaving c.err at io.EOF let the next Read report a clean end of
+			// stream, decaying a truncation into success -- the exact decay
+			// fileReader.finish exists to prevent one layer up, which is not a
+			// reason for this layer to produce it.
 			c.inLen = 0
-			return 0, io.ErrUnexpectedEOF
+			c.err = io.ErrUnexpectedEOF
 		}
 		return 0, c.err
 	}

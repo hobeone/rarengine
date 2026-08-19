@@ -77,10 +77,25 @@ func rar5FileEntry(name string, unpackedSize uint64, declaredCRC uint32, payload
 // rar3FileEntry is the RAR3 equivalent, with PACK_SIZE and UNP_SIZE set
 // independently for the same reason.
 func rar3FileEntry(name string, unpackedSize uint32, declaredCRC uint32, payload []byte) []byte {
+	return rar3StoreEntry(name, 0, unpackedSize, declaredCRC, payload)
+}
+
+// rar3StoreEntry is rar3FileEntry with the extra header flags exposed, so a
+// test can vary one bit and hold everything else fixed.
+//
+// Setting LHD_PASSWORD (0x0400) appends the 8 salt bytes that follow the name,
+// because ParseRAR3FileHeader reads them there and a header claiming
+// encryption without them is rejected as corrupt rather than exercising
+// anything.
+func rar3StoreEntry(name string, extraFlags uint16, unpackedSize uint32, declaredCRC uint32, payload []byte) []byte {
 	headSize := 32 + len(name)
+	if extraFlags&0x0400 > 0 {
+		headSize += 8
+	}
 	h := make([]byte, headSize)
 	h[2] = 0x74
-	h[4] = 0x80 // LHD_LARGE-free header carrying ADD_SIZE
+	// 0x8000 is LHD_LARGE-free framing carrying ADD_SIZE.
+	binary.LittleEndian.PutUint16(h[3:5], 0x8000|extraFlags)
 	binary.LittleEndian.PutUint16(h[5:7], uint16(headSize))
 	binary.LittleEndian.PutUint32(h[7:11], uint32(len(payload))) // PACK_SIZE
 	binary.LittleEndian.PutUint32(h[11:15], unpackedSize)        // UNP_SIZE

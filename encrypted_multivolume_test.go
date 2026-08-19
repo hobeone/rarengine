@@ -5,7 +5,6 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
-	"encoding/binary"
 	"errors"
 	"hash/crc32"
 	"io"
@@ -28,10 +27,13 @@ func encryptedMultiVolumeChan(t *testing.T, prefix string) <-chan io.ReadCloser 
 	}
 	// Glob sorts lexically and the parts are zero-padded to two digits, so
 	// this is volume order.
+	//
+	// engine_rar5_service_test.go has a fixtureVolumes helper that does this
+	// from bare names, but it is in package rarengine_test and this file has
+	// to be in package rarengine to reach newCBCDecryptReader.
 	volumes := make(chan io.ReadCloser, len(names))
 	for _, name := range names {
-		b := fixtureBytes(t, filepath.Base(name))
-		volumes <- &mockReadCloser{bytes.NewReader(b)}
+		volumes <- &mockReadCloser{bytes.NewReader(fixtureBytes(t, filepath.Base(name)))}
 	}
 	close(volumes)
 	return volumes
@@ -249,38 +251,6 @@ func firstDifference(a, b []byte) int {
 	return -1
 }
 
-// rar3StoreEntryWithFlags builds a stored RAR3 file block whose extra header
-// flags are caller-chosen, so a test can vary one bit and hold everything else
-// fixed. Setting LHD_PASSWORD (0x0400) requires the 8 salt bytes that follow
-// the name, which ParseRAR3FileHeader reads.
-func rar3StoreEntryWithFlags(name string, extraFlags uint16, declaredCRC uint32, payload []byte) []byte {
-	salted := extraFlags&0x0400 > 0
-	headSize := 32 + len(name)
-	if salted {
-		headSize += 8
-	}
-	h := make([]byte, headSize)
-	h[2] = 0x74
-	binary.LittleEndian.PutUint16(h[3:5], 0x8000|extraFlags)
-	binary.LittleEndian.PutUint16(h[5:7], uint16(headSize))
-	binary.LittleEndian.PutUint32(h[7:11], uint32(len(payload)))
-	binary.LittleEndian.PutUint32(h[11:15], uint32(len(payload)))
-	h[15] = 3
-	binary.LittleEndian.PutUint32(h[16:20], declaredCRC)
-	binary.LittleEndian.PutUint32(h[20:24], 0)
-	h[24] = 20
-	h[25] = 0x30 // store
-	binary.LittleEndian.PutUint16(h[26:28], uint16(len(name)))
-	binary.LittleEndian.PutUint32(h[28:32], 0o644)
-	copy(h[32:], name)
-	binary.LittleEndian.PutUint16(h[0:2], uint16(crc32.ChecksumIEEE(h[2:])))
-
-	var out bytes.Buffer
-	out.Write(h)
-	out.Write(payload)
-	return out.Bytes()
-}
-
 // TestRAR3_EncryptedFlagCannotSuppressCRCCheck pins that the RAR3 header's
 // LHD_PASSWORD bit cannot turn checksum verification off.
 //
@@ -313,13 +283,10 @@ func TestRAR3_EncryptedFlagCannotSuppressCRCCheck(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var archive bytes.Buffer
 			archive.Write(rar3ArchiveHeader())
-			archive.Write(rar3StoreEntryWithFlags("victim.bin", tc.flags, wrongCRC, payload))
+			archive.Write(rar3StoreEntry("victim.bin", tc.flags,
+				uint32(len(payload)), wrongCRC, payload))
 
-			volumes := make(chan io.ReadCloser, 1)
-			volumes <- &mockReadCloser{bytes.NewReader(archive.Bytes())}
-			close(volumes)
-
-			sd := NewStreamDecompressor(volumes)
+			sd := decompressorFor(archive.Bytes())
 			fh, err := sd.Next()
 			if err != nil {
 				t.Fatalf("Next: %v", err)
@@ -335,6 +302,141 @@ func TestRAR3_EncryptedFlagCannotSuppressCRCCheck(t *testing.T) {
 			if !errors.Is(err, ErrCRCMismatch) {
 				t.Fatalf("got %v; want ErrCRCMismatch. RAR3 does not decrypt, "+
 					"so this flag must not affect verification", err)
+			}
+		})
+	}
+}
+
+// errAfterBytes hands out data, fails once with a non-EOF error, and reports
+// io.EOF from then on.
+//
+// Failing only once is the whole point. A source that repeats its error makes
+// any consumer look durable, because the durability comes from the source
+// rather than from the code under test -- an earlier version of this helper did
+// exactly that and the subtest passed against the unfixed reader. Reporting EOF
+// afterwards also models the realistic case: a volume that has already failed
+// has nothing further to give.
+type errAfterBytes struct {
+	data      []byte
+	off       int
+	failAt    int
+	err       error
+	together  bool
+	delivered bool
+}
+
+func (e *errAfterBytes) Read(p []byte) (int, error) {
+	if e.delivered {
+		return 0, io.EOF
+	}
+	remaining := e.failAt - e.off
+	if remaining <= 0 {
+		e.delivered = true
+		return 0, e.err
+	}
+	n := min(min(len(p), remaining), len(e.data)-e.off)
+	copy(p, e.data[e.off:e.off+n])
+	e.off += n
+	if e.together && e.off >= e.failAt {
+		e.delivered = true
+		return n, e.err
+	}
+	return n, nil
+}
+
+// TestCBCDecryptReader_TerminalErrorsAreDurable pins that a failure reported by
+// this reader stays reported.
+//
+// CLAUDE.md requires a file's terminal error to be durable, and fileReader
+// enforces that one layer up. That is not a licence for this layer to hand out
+// a failure and then a clean io.EOF: the decoders between the two call Read
+// more than once, so an error that decays here can reach fileReader as success
+// and never become terminal at all.
+func TestCBCDecryptReader_TerminalErrorsAreDurable(t *testing.T) {
+	key := make([]byte, 32)
+	iv := make([]byte, 16)
+	if _, err := rand.Read(key); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rand.Read(iv); err != nil {
+		t.Fatal(err)
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain := make([]byte, 16*4)
+	if _, err := rand.Read(plain); err != nil {
+		t.Fatal(err)
+	}
+	ciphertext := make([]byte, len(plain))
+	cipher.NewCBCEncrypter(block, iv).CryptBlocks(ciphertext, plain)
+
+	readErr := errors.New("source exploded")
+
+	for _, tc := range []struct {
+		name string
+		src  func() io.Reader
+		want error
+	}{
+		{
+			// Ciphertext cut mid-block. RAR pads to whole blocks, so this is
+			// truncation, and it must not become io.EOF on a second call.
+			name: "truncated mid-block",
+			src:  func() io.Reader { return bytes.NewReader(ciphertext[:len(ciphertext)-5]) },
+			want: io.ErrUnexpectedEOF,
+		},
+		{
+			// A hard error after a sub-block fragment is buffered. Without the
+			// error being recorded, the retry path turns it into
+			// ErrUnexpectedEOF and the real cause is gone.
+			name: "hard error, reported separately",
+			src: func() io.Reader {
+				return &errAfterBytes{data: ciphertext, failAt: 20, err: readErr}
+			},
+			want: readErr,
+		},
+		{
+			// Same, but bytes and error arrive from one call, which io.Reader
+			// explicitly allows.
+			name: "hard error, reported with bytes",
+			src: func() io.Reader {
+				return &errAfterBytes{data: ciphertext, failAt: 20, err: readErr, together: true}
+			},
+			want: readErr,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, err := newCBCDecryptReader(tc.src(), key, iv)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			// Drain whatever the reader is willing to produce, then find the
+			// error it settles on.
+			var first error
+			for range 100 {
+				buf := make([]byte, 64)
+				_, first = r.Read(buf)
+				if first != nil {
+					break
+				}
+			}
+			if !errors.Is(first, tc.want) {
+				t.Fatalf("first terminal error = %v, want %v", first, tc.want)
+			}
+
+			// The point of the test: read again.
+			for i := range 3 {
+				buf := make([]byte, 64)
+				n, again := r.Read(buf)
+				if n != 0 {
+					t.Fatalf("call %d produced %d bytes after a terminal error", i+2, n)
+				}
+				if !errors.Is(again, tc.want) {
+					t.Fatalf("call %d returned %v, want %v; a terminal error "+
+						"decayed into a different verdict", i+2, again, tc.want)
+				}
 			}
 		})
 	}
