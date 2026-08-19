@@ -221,22 +221,43 @@ func TestIntegration_Oracle(t *testing.T) {
 		t.Skip("unrar binary not found on path, skipping oracle test")
 	}
 
+	// volumes lists every part in order; the first is what unrar is handed,
+	// and it finds the rest itself. Multi-volume archives are included
+	// because the whole-file CRC lives in the LAST part's header, so they are
+	// the shape most likely to produce a spurious verification failure.
 	testArchives := []struct {
-		filename string
+		name     string
+		volumes  []string
 		password string
 	}{
-		{"rar5_store.rar", ""},
-		{"rar5_compress.rar", ""},
-		{"rar5_solid.rar", ""},
-		{"rar5_encrypted.rar", "test"},
+		{name: "rar5_store.rar", volumes: []string{"rar5_store.rar"}},
+		{name: "rar5_compress.rar", volumes: []string{"rar5_compress.rar"}},
+		{name: "rar5_solid.rar", volumes: []string{"rar5_solid.rar"}},
+		{name: "rar5_encrypted.rar", volumes: []string{"rar5_encrypted.rar"}, password: "test"},
 		// Compiled x86 payload; the only fixture that reaches the filter path.
 		// See testdata/generate.sh for why, and what regenerating it must preserve.
-		{"rar5_exe_filter.rar", ""},
+		{name: "rar5_exe_filter.rar", volumes: []string{"rar5_exe_filter.rar"}},
+		{name: "rar5_multi", volumes: []string{
+			"rar5_multi.part01.rar", "rar5_multi.part02.rar", "rar5_multi.part03.rar",
+			"rar5_multi.part04.rar", "rar5_multi.part05.rar", "rar5_multi.part06.rar",
+			"rar5_multi.part07.rar", "rar5_multi.part08.rar", "rar5_multi.part09.rar",
+			"rar5_multi.part10.rar",
+		}},
+		// rar3_testfile.rar is deliberately absent: it is PPMd-compressed,
+		// which this library does not implement, so it cannot round-trip
+		// against unrar. It is exercised by TestRAR3_RealArchive_Header
+		// instead.
+		{name: "rar5_solid_multi_qo", volumes: []string{
+			"rar5_solid_multi_qo.part1.rar", "rar5_solid_multi_qo.part2.rar",
+			"rar5_solid_multi_qo.part3.rar", "rar5_solid_multi_qo.part4.rar",
+			"rar5_solid_multi_qo.part5.rar", "rar5_solid_multi_qo.part6.rar",
+			"rar5_solid_multi_qo.part7.rar", "rar5_solid_multi_qo.part8.rar",
+		}},
 	}
 
 	for _, tc := range testArchives {
-		t.Run(tc.filename, func(t *testing.T) {
-			archivePath := filepath.Join("testdata", tc.filename)
+		t.Run(tc.name, func(t *testing.T) {
+			archivePath := filepath.Join("testdata", tc.volumes[0])
 			tempDir := t.TempDir()
 
 			// Extract using oracle unrar
@@ -254,14 +275,15 @@ func TestIntegration_Oracle(t *testing.T) {
 			}
 
 			// Open archive using StreamDecompressor
-			f, err := os.Open(archivePath)
-			if err != nil {
-				t.Fatalf("failed to open archive: %v", err)
+			volumes := make(chan io.ReadCloser, len(tc.volumes))
+			for _, name := range tc.volumes {
+				f, err := os.Open(filepath.Join("testdata", name))
+				if err != nil {
+					t.Fatalf("failed to open volume %s: %v", name, err)
+				}
+				t.Cleanup(func() { _ = f.Close() })
+				volumes <- f
 			}
-			t.Cleanup(func() { _ = f.Close() })
-
-			volumes := make(chan io.ReadCloser, 1)
-			volumes <- f
 			close(volumes)
 
 			sd := rarengine.NewStreamDecompressor(volumes)
@@ -294,11 +316,16 @@ func TestIntegration_Oracle(t *testing.T) {
 					t.Fatalf("failed to read oracle file %q: %v", fh.Name, err)
 				}
 
-				// Decompress content using rarengine
-				data := make([]byte, fh.UnpackedSize)
-				_, err = io.ReadFull(sd, data)
+				// Read to completion rather than exactly UnpackedSize:
+				// io.ReadAtLeast discards an error delivered alongside the
+				// final bytes, so io.ReadFull cannot observe a truncation or
+				// checksum verdict at all.
+				data, err := io.ReadAll(sd)
 				if err != nil {
 					t.Fatalf("failed to read content of %s: %v", fh.Name, err)
+				}
+				if int64(len(data)) != fh.UnpackedSize {
+					t.Fatalf("read %d bytes of %s, header declares %d", len(data), fh.Name, fh.UnpackedSize)
 				}
 
 				if !bytes.Equal(data, oracleData) {

@@ -252,9 +252,11 @@ func TestStreamDecompressor_UnknownBlock(t *testing.T) {
 
 func TestMultiVolumePayloadReader_Direct(t *testing.T) {
 	sd := NewStreamDecompressor(nil)
+	re := newRAR5Engine(sd)
+	sd.engine = re
 
 	// 1. Test empty buffer p
-	mv := &multiVolumePayloadReader{sd: sd, r: bytes.NewReader([]byte("test"))}
+	mv := &multiVolumePayloadReader{re: re, r: bytes.NewReader([]byte("test"))}
 	n, err := mv.Read([]byte{})
 	if n != 0 || err != nil {
 		t.Errorf("expected 0, nil for empty buffer, got %d, %v", n, err)
@@ -268,7 +270,7 @@ func TestMultiVolumePayloadReader_Direct(t *testing.T) {
 	}
 
 	// 3. Test EOF when LastBlock is true
-	sd.currHeader = &FileHeader{LastBlock: true}
+	sd.file.advanceVolume(&FileHeader{LastBlock: true})
 	mv.r = bytes.NewReader([]byte{}) // EOF
 	n, err = mv.Read(buf)
 	if n != 0 || err != io.EOF {
@@ -276,7 +278,7 @@ func TestMultiVolumePayloadReader_Direct(t *testing.T) {
 	}
 
 	// 4. Test transition to next volume payload when LastBlock is false
-	sd.currHeader = &FileHeader{LastBlock: false}
+	sd.file.advanceVolume(&FileHeader{LastBlock: false})
 	volumes := make(chan io.ReadCloser, 1)
 
 	var volBuf bytes.Buffer

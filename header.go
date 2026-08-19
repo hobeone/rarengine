@@ -19,6 +19,14 @@ var (
 	ErrCorruptFileHeader    = errors.New("rarengine: corrupt file header")
 	ErrUnknownEncryptMethod = errors.New("rarengine: unknown encryption method")
 	ErrCorruptEncryptData   = errors.New("rarengine: corrupt encryption record")
+
+	// ErrUnpSizeUnknown is returned for a file whose header declares that its
+	// unpacked size is not known (FileFlagUnpSizeUnknown), as produced by
+	// streamed archiving such as "rar -si". Decoding relies on the declared
+	// size to tell a completed file from a truncated one, so a file that
+	// declines to state it is refused rather than decoded on a size that
+	// means nothing.
+	ErrUnpSizeUnknown = errors.New("rarengine: file header declares an unknown unpacked size")
 )
 
 const (
@@ -361,6 +369,13 @@ func ParseFileHeader(h *BlockHeader) (*FileHeader, error) {
 		return nil, err
 	}
 	payload = payload[nFlags:]
+
+	// Refused at parse time rather than later: the flag says UnpackedSize is
+	// not a trustworthy value, which is a structural fact about the header
+	// rather than a policy judgment about the file.
+	if flags&FileFlagUnpSizeUnknown > 0 {
+		return nil, ErrUnpSizeUnknown
+	}
 
 	fh := &FileHeader{
 		IsDir:      flags&FileFlagIsDir > 0,

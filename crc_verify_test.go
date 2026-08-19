@@ -17,6 +17,14 @@ import (
 // verification path without needing a corrupted binary fixture.
 func buildSingleFileRAR5Archive(t *testing.T, name string, content []byte, crc32Value uint32) *bytes.Buffer {
 	t.Helper()
+	return buildSingleFileRAR5ArchiveFlags(t, name, content, crc32Value, 0)
+}
+
+// buildSingleFileRAR5ArchiveFlags is buildSingleFileRAR5Archive with extra
+// file-header flags OR'd in, for exercising flags whose handling is what is
+// under test (e.g. FileFlagUnpSizeUnknown).
+func buildSingleFileRAR5ArchiveFlags(t *testing.T, name string, content []byte, crc32Value uint32, extraFileFlags uint64) *bytes.Buffer {
+	t.Helper()
 
 	// 1. Archive Header
 	arcFlagsV := EncodeVint(ArcFlagMultiVol)
@@ -41,9 +49,9 @@ func buildSingleFileRAR5Archive(t *testing.T, name string, content []byte, crc32
 	// 2. File Header, with FileFlagHasCRC32 set and an explicit (possibly
 	// wrong) CRC32 value, store method (compFlags=0 → Method=0).
 	var filePayload bytes.Buffer
-	filePayload.Write(EncodeVint(FileFlagHasCRC32))     // flags
-	filePayload.Write(EncodeVint(uint64(len(content)))) // unpacked size
-	filePayload.Write(EncodeVint(0))                    // attributes
+	filePayload.Write(EncodeVint(FileFlagHasCRC32 | extraFileFlags)) // flags
+	filePayload.Write(EncodeVint(uint64(len(content))))              // unpacked size
+	filePayload.Write(EncodeVint(0))                                 // attributes
 	var crcBuf [4]byte
 	binary.LittleEndian.PutUint32(crcBuf[:], crc32Value)
 	filePayload.Write(crcBuf[:])     // CRC32 (gated by FileFlagHasCRC32)
