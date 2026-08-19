@@ -34,6 +34,10 @@ type fileReader struct {
 
 	// header is the file header currently in force, which is NOT constant
 	// across a file: see advanceVolume.
+	//
+	// It is non-nil exactly while src is, because begin sets both and clear
+	// drops both. Every method below that reads it is reachable only while a
+	// file is active, so none of them guards against nil.
 	header *FileHeader
 
 	// size is the declared size captured when the file began, kept separately
@@ -101,7 +105,7 @@ func (fr *fileReader) advanceVolume(fh *FileHeader) {
 // file, which is how the multi-volume readers tell a real end of file from a
 // volume boundary.
 func (fr *fileReader) lastBlock() bool {
-	return fr.header != nil && fr.header.LastBlock
+	return fr.header.LastBlock
 }
 
 // Read produces the file's decompressed bytes, and is the only path that

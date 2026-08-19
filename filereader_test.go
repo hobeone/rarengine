@@ -207,7 +207,10 @@ func (r *resurrectingReader) Read(p []byte) (int, error) {
 	if r.calls == 1 {
 		return 0, io.EOF
 	}
-	return copy(p, bytes.Repeat([]byte("X"), len(p))), nil
+	for i := range p {
+		p[i] = 'X'
+	}
+	return len(p), nil
 }
 
 // TestFileReader_TerminatedFileProducesNothingFurther pins the terminal-state
