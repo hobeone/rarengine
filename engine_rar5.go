@@ -46,11 +46,11 @@ func (re *rar5Engine) Next() (*FileHeader, error) {
 			return nil, err
 		}
 
-		fh, shouldContinue, err := re.processHeader(h)
+		fh, err := re.processHeader(h)
 		if err != nil {
 			return nil, err
 		}
-		if shouldContinue {
+		if fh == nil {
 			continue
 		}
 		return fh, nil
@@ -67,11 +67,28 @@ func (re *rar5Engine) readBlockHeader() (*BlockHeader, error) {
 	return ReadBlockHeader(re.sd.currentVol)
 }
 
-func (re *rar5Engine) processHeader(h *BlockHeader) (*FileHeader, bool, error) {
+// processHeader consumes one block and reports what it was.
+//
+// A nil header with a nil error means the block held nothing this caller wants
+// -- an archive header, an encryption header whose key has now been taken, a
+// continuation of a file already announced, a volume terminator, or a service
+// record Next() does not surface -- and scanning continues. The two of those
+// that carry file data have had it discarded by the time this returns: a
+// continuation's packed bytes and a service record's h.DataSize. That discard
+// is not tidiness. A block left in the stream is where the next header would be
+// parsed from, which for a crafted archive means an entry fabricated out of
+// attacker-chosen bytes.
+//
+// A non-nil header is the file to hand back, and by then it has been admitted:
+// the window is reset, the packed cursor repointed, and fileReader begun. There
+// is deliberately no third outcome. Returning a header while asking the caller
+// to keep scanning would discard that header, since the caller returns it only
+// when it stops.
+func (re *rar5Engine) processHeader(h *BlockHeader) (*FileHeader, error) {
 	switch h.Type {
 	case HeaderTypeArchive:
 		if _, err := ParseArchiveHeader(h); err != nil {
-			return nil, false, err
+			return nil, err
 		}
 
 	case HeaderTypeFile:
@@ -90,24 +107,24 @@ func (re *rar5Engine) processHeader(h *BlockHeader) (*FileHeader, bool, error) {
 			// field an archive corrupts is the archive's choice, so keying the
 			// discard on a particular error left the same fabrication open
 			// through every other one.
-			return nil, false, re.sd.refuse(h.DataSize, err)
+			return nil, re.sd.refuse(h.DataSize, err)
 		}
 
 		// A continuation block's bytes belong to the file its first block
 		// already announced.
 		if !fh.FirstBlock {
-			return nil, true, re.sd.discardPayload(fh.PackedSize)
+			return nil, re.sd.discardPayload(fh.PackedSize)
 		}
 
 		if fh.UnpackedSize > 1024*1024 && fh.UnpackedSize > 1000*fh.PackedSize {
 			// Refused like any other rejected file, and for the same reason:
 			// the caller can keep calling Next(), so leaving the payload lets
 			// the block that was just refused supply the next "file".
-			return nil, false, re.sd.refuseFile(fh, ErrRarBombDetected)
+			return nil, re.sd.refuseFile(fh, ErrRarBombDetected)
 		}
 
 		if err := re.sd.admitFile(fh); err != nil {
-			return nil, false, err
+			return nil, err
 		}
 
 		re.sd.win.Reset(fh.Solid)
@@ -115,22 +132,22 @@ func (re *rar5Engine) processHeader(h *BlockHeader) (*FileHeader, bool, error) {
 		re.packed.repoint(re.sd.currentVol, fh.PackedSize)
 
 		re.sd.file.begin(fh, re.newDecompressionReader(fh, re.packed.reader()), re.sd.verifyCRC)
-		return fh, false, nil
+		return fh, nil
 
 	case HeaderTypeEncryption:
 		ch, err := ParseCryptHeader(h)
 		if err != nil {
-			return nil, false, err
+			return nil, err
 		}
 		key, err := headerKeyFromPassword(ch, re.sd.password)
 		if err != nil {
-			return nil, false, err
+			return nil, err
 		}
 		re.headerDec = &headerDecrypter{key: key}
 
 	case HeaderTypeEnd:
 		if err := re.sd.nextVolume(); err != nil {
-			return nil, false, err
+			return nil, err
 		}
 	default:
 		// Everything the caller never sees, including service records — quick
@@ -139,22 +156,34 @@ func (re *rar5Engine) processHeader(h *BlockHeader) (*FileHeader, bool, error) {
 		// Next() as a file named after the record, e.g. "QO", and hand its bytes
 		// over as file data. Their payload length is h.DataSize either way.
 		if err := re.sd.discardPayload(h.DataSize); err != nil {
-			return nil, false, err
+			return nil, err
 		}
 	}
-	return nil, true, nil
+	return nil, nil
 }
 
-func (re *rar5Engine) processVolumePayloadHeader(h *BlockHeader) (io.Reader, bool, error) {
+// processVolumePayloadHeader consumes one block from a freshly opened volume
+// and reports where the current file's bytes continue.
+//
+// A nil reader with a nil error means this block was not that continuation --
+// the new volume's own archive header, a terminator, or a service record whose
+// own data is discarded here -- and scanning continues into the next block. A
+// non-nil reader is the payload source for the file already in progress, with
+// the packed cursor repointed at this volume.
+//
+// The two outcomes are distinguished by the reader alone; there is no separate
+// signal. A non-nil reader always means stop scanning, because the caller
+// splices exactly what it is handed into the decode chain.
+func (re *rar5Engine) processVolumePayloadHeader(h *BlockHeader) (io.Reader, error) {
 	switch h.Type {
 	case HeaderTypeArchive:
 		if _, err := ParseArchiveHeader(h); err != nil {
-			return nil, false, err
+			return nil, err
 		}
 	case HeaderTypeFile:
 		fh, err := ParseFileHeader(h)
 		if err != nil {
-			return nil, false, re.sd.refuse(h.DataSize, err)
+			return nil, re.sd.refuse(h.DataSize, err)
 		}
 		re.sd.file.advanceVolume(fh)
 		// Repointed rather than replaced by a fresh limiter: teardown drains
@@ -162,10 +191,10 @@ func (re *rar5Engine) processVolumePayloadHeader(h *BlockHeader) (io.Reader, boo
 		// describing a volume the stream has already moved past. Reusing it
 		// also drops an allocation per volume.
 		re.packed.repoint(re.sd.currentVol, fh.PackedSize)
-		return re.packed.reader(), false, nil
+		return re.packed.reader(), nil
 	case HeaderTypeEnd:
 		if err := re.sd.nextVolume(); err != nil {
-			return nil, false, err
+			return nil, err
 		}
 	default:
 		// Everything the caller never sees, including service records — quick
@@ -174,10 +203,10 @@ func (re *rar5Engine) processVolumePayloadHeader(h *BlockHeader) (io.Reader, boo
 		// Next() as a file named after the record, e.g. "QO", and hand its bytes
 		// over as file data. Their payload length is h.DataSize either way.
 		if err := re.sd.discardPayload(h.DataSize); err != nil {
-			return nil, false, err
+			return nil, err
 		}
 	}
-	return nil, true, nil
+	return nil, nil
 }
 
 func (re *rar5Engine) nextVolumePayload() (io.Reader, error) {
@@ -194,11 +223,11 @@ func (re *rar5Engine) nextVolumePayload() (io.Reader, error) {
 		if err != nil {
 			return nil, err
 		}
-		r, shouldContinue, err := re.processVolumePayloadHeader(h)
+		r, err := re.processVolumePayloadHeader(h)
 		if err != nil {
 			return nil, err
 		}
-		if shouldContinue {
+		if r == nil {
 			continue
 		}
 		return r, nil
