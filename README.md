@@ -36,6 +36,7 @@ go get github.com/hobeone/rarengine
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -63,8 +64,16 @@ func main() {
 	for {
 		fh, err := sd.Next()
 		if err != nil {
-			if err == io.EOF || err == rarengine.ErrNoNextVolume {
+			if errors.Is(err, io.EOF) || errors.Is(err, rarengine.ErrNoNextVolume) {
 				break
+			}
+			// One member failing does not mean the archive is over. A
+			// *FileError names the member and leaves the stream on the next
+			// block header, so the files behind it are still reachable.
+			var damaged *rarengine.FileError
+			if errors.As(err, &damaged) {
+				fmt.Printf("Skipping %s: %v\n", damaged.Header.Name, damaged.Err)
+				continue
 			}
 			panic(err)
 		}
@@ -100,6 +109,10 @@ sd.Reset(newVolumesChan)
 
 For standard extraction directly to a target directory, `rarengine` provides a robust, sandboxed `UnpackDir` utility. It automatically discovers other volumes (e.g., `.part1.rar`, `.part2.rar`), sorts them by internal headers, sandboxes file generation inside the target directory, and unpacks the contents.
 
+A member that cannot be delivered — it ended short, failed its checksum, tripped the rar-bomb guard, or has a name that is unusable once sanitized — is reported in `UnpackResult.Damaged` rather than aborting the extraction, because in a non-solid archive the members behind it are independently readable. Each member is written under a temporary name and renamed into place only once it has decoded completely, so a damaged member never appears at its destination and `Files` and `Damaged` stay disjoint on disk.
+
+Two cases still end the traversal, each returning the result accumulated so far alongside the error: a solid archive, whose members back-reference their predecessors' decoded bytes and so cannot be resumed past damage (`ErrSolidStreamBroken`), and a member whose header does not parse, which is refused before there is a header to name it with.
+
 ```go
 package main
 
@@ -124,14 +137,23 @@ func main() {
 		OverwriteFiles: true,                             // Overwrite existing files in output directory
 	}
 
-	files, err := rarengine.UnpackDir(ctx, firstVolume, outputDir, opts)
+	res, err := rarengine.UnpackDir(ctx, firstVolume, outputDir, opts)
 	if err != nil {
+		// Archive-level failure: the volumes could not be opened, or the
+		// stream stopped being parseable. res still holds whatever was
+		// extracted before that point.
 		panic(err)
 	}
 
-	fmt.Printf("Successfully extracted %d files:\n", len(files))
-	for _, file := range files {
+	fmt.Printf("Successfully extracted %d files:\n", len(res.Files))
+	for _, file := range res.Files {
 		fmt.Println("-", file)
+	}
+
+	// A damaged member no longer costs you the rest of the archive. Nothing
+	// was written to disk for these, so Files and Damaged never overlap.
+	for _, d := range res.Damaged {
+		fmt.Printf("- DAMAGED %s: %v\n", d.Header.Name, d.Err)
 	}
 }
 ```
