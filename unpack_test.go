@@ -106,7 +106,8 @@ func TestUnpackDir_Options(t *testing.T) {
 		},
 	}
 
-	files, err := UnpackDir(context.Background(), firstVolume, tmpDir, opts)
+	res, err := UnpackDir(context.Background(), firstVolume, tmpDir, opts)
+	files := res.Files
 	if err != nil {
 		t.Fatalf("UnpackDir failed: %v", err)
 	}
@@ -131,7 +132,8 @@ func TestUnpackDir_Options(t *testing.T) {
 		OneFolder:      true,
 		OverwriteFiles: false,
 	}
-	filesCollision, err := UnpackDir(context.Background(), firstVolume, tmpDir, optsCollision)
+	resFilesCollision, err := UnpackDir(context.Background(), firstVolume, tmpDir, optsCollision)
+	filesCollision := resFilesCollision.Files
 	if err != nil {
 		t.Fatalf("UnpackDir with collision failed: %v", err)
 	}
@@ -159,7 +161,8 @@ func TestUnpackDir_OverwriteAndDates(t *testing.T) {
 		IgnoreUnrarDates: false,
 	}
 
-	files, err := UnpackDir(context.Background(), firstVolume, tmpDir, opts)
+	res, err := UnpackDir(context.Background(), firstVolume, tmpDir, opts)
+	files := res.Files
 	if err != nil {
 		t.Fatalf("UnpackDir failed: %v", err)
 	}
@@ -180,7 +183,8 @@ func TestUnpackDir_OverwriteAndDates(t *testing.T) {
 	}
 
 	// 2. Try to extract again with OverwriteFiles = false. It should skip and return an empty slice.
-	filesSkip, err := UnpackDir(context.Background(), firstVolume, tmpDir, opts)
+	resFilesSkip, err := UnpackDir(context.Background(), firstVolume, tmpDir, opts)
+	filesSkip := resFilesSkip.Files
 	if err != nil {
 		t.Fatalf("UnpackDir failed: %v", err)
 	}
@@ -198,7 +202,8 @@ func TestUnpackDir_OverwriteAndDates(t *testing.T) {
 	optsIgnoreDates := UnpackOptions{
 		IgnoreUnrarDates: true,
 	}
-	filesDates, err := UnpackDir(context.Background(), firstVolume, tmpDir2, optsIgnoreDates)
+	resFilesDates, err := UnpackDir(context.Background(), firstVolume, tmpDir2, optsIgnoreDates)
+	filesDates := resFilesDates.Files
 	if err != nil {
 		t.Fatalf("UnpackDir failed: %v", err)
 	}

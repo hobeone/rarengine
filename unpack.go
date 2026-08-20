@@ -23,6 +23,55 @@ type UnpackOptions struct {
 	OnEntry          func(header *FileHeader)
 }
 
+// UnpackResult reports what an extraction produced. Damage is a result rather
+// than an error: one member a RAR archive cannot deliver says nothing about
+// the members behind it, and in a non-solid archive those are independently
+// readable. Returning only an error forced the caller to discard them.
+//
+// A non-nil error from UnpackDir is archive-level -- the volumes could not be
+// opened, or the stream stopped being parseable. The result is still returned
+// alongside it, so an abort partway through reports what it managed first.
+type UnpackResult struct {
+	// Files holds the absolute path of every member written to disk.
+	Files []string
+
+	// Damaged holds one entry per member that could not be delivered. Empty
+	// on a clean archive. A caller reporting success without consulting it
+	// is claiming more than the extraction proved.
+	Damaged []DamagedEntry
+}
+
+// DamagedEntry identifies one member that could not be extracted, and why.
+// Nothing was left on disk for it: a partially written file is removed before
+// the entry is recorded, because a truncated file is indistinguishable from a
+// complete one once extraction has finished.
+type DamagedEntry struct {
+	// Header is the failed member's header, carried over from FileError.
+	// Never nil -- an error that cannot name its member is not damage this
+	// type can describe, and stays an archive-level error instead.
+	Header *FileHeader
+
+	// Err is the underlying cause: ErrTruncatedFile, ErrCRCMismatch, or
+	// whichever sentinel the decode failed with. Match it with errors.Is.
+	Err error
+}
+
+// asDamaged reports whether err is a per-member failure that leaves the stream
+// standing on the next block header, and converts it if so.
+//
+// The *FileError type is the whole test. It is constructed in exactly one
+// place, gated on proof that the failed member's packed remainder was read
+// down to zero, so its presence -- and nothing else about the error -- is what
+// makes continuing to the next member safe. Widening this to any other error
+// would resume parsing at an offset the block structure does not describe.
+func asDamaged(err error) (DamagedEntry, bool) {
+	fe, ok := errors.AsType[*FileError](err)
+	if !ok || fe.Header == nil {
+		return DamagedEntry{}, false
+	}
+	return DamagedEntry{Header: fe.Header, Err: fe.Err}, true
+}
+
 type volumeInfo struct {
 	path  string
 	index int
@@ -177,7 +226,13 @@ func openVolumeChannel(sortedVols []string) (chan io.ReadCloser, error) {
 }
 
 // extractEntry extracts a single decompressed entry into the sandboxed root.
-func extractEntry(ctx context.Context, root *os.Root, sd *StreamDecompressor, header *FileHeader, opts UnpackOptions, absOutputDir string, logger *slog.Logger) (string, error) {
+// extractEntry writes one member to disk.
+//
+// It reports a decode failure separately from a filesystem failure, because
+// only the first is survivable. A *FileError is never available here: it is
+// built in endFile, which Next drives, so a failing read returns the bare
+// cause and the caller must supply the header itself.
+func extractEntry(ctx context.Context, root *os.Root, sd *StreamDecompressor, header *FileHeader, opts UnpackOptions, absOutputDir string, logger *slog.Logger) (path string, streamErr error, err error) {
 	var destRel string
 	if opts.OneFolder {
 		destRel = filepath.Base(header.Name)
@@ -197,16 +252,16 @@ func extractEntry(ctx context.Context, root *os.Root, sd *StreamDecompressor, he
 	if header.IsDir {
 		if !opts.OneFolder {
 			if err := root.MkdirAll(destRel, 0750); err != nil {
-				return "", fmt.Errorf("rarengine: mkdir %s: %w", destRel, err)
+				return "", nil, fmt.Errorf("rarengine: mkdir %s: %w", destRel, err)
 			}
 		}
-		return "", nil
+		return "", nil, nil
 	}
 
 	if !opts.OverwriteFiles {
 		if _, statErr := root.Stat(destRel); statErr == nil {
 			logger.Info("rarengine: skipping existing file", "path", destRel)
-			return "", nil
+			return "", nil, nil
 		}
 	}
 
@@ -215,18 +270,33 @@ func extractEntry(ctx context.Context, root *os.Root, sd *StreamDecompressor, he
 	}
 
 	if err := root.MkdirAll(filepath.Dir(destRel), 0750); err != nil {
-		return "", fmt.Errorf("rarengine: mkdir parent %s: %w", filepath.Dir(destRel), err)
+		return "", nil, fmt.Errorf("rarengine: mkdir parent %s: %w", filepath.Dir(destRel), err)
 	}
 
 	out, err := root.OpenFile(destRel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 	if err != nil {
-		return "", fmt.Errorf("rarengine: create file %s: %w", destRel, err)
+		return "", nil, fmt.Errorf("rarengine: create file %s: %w", destRel, err)
 	}
 
 	n, err := io.Copy(out, &contextReader{ctx: ctx, r: sd})
 	_ = out.Close()
 	if err != nil {
-		return "", fmt.Errorf("rarengine: write file %s: %w", destRel, err)
+		// The file was created and partially written before the failure, and
+		// this function reports no path for it, so leaving it behind puts a
+		// truncated file in the output directory that the result never
+		// mentions. Removing it is what keeps "damaged" and "extracted"
+		// disjoint on disk as well as in UnpackResult.
+		if rmErr := root.Remove(destRel); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
+			logger.Warn("rarengine: could not remove partial file", "path", destRel, "err", rmErr)
+		}
+		// Cancellation is not damage -- the member may have been perfectly
+		// intact and the caller simply stopped. Reporting it as a damaged
+		// entry would put a fabricated failure in the result and blame the
+		// archive for the caller's own decision.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return "", nil, ctxErr
+		}
+		return "", err, nil
 	}
 
 	mode := header.Mode() & 0666
@@ -240,43 +310,54 @@ func extractEntry(ctx context.Context, root *os.Root, sd *StreamDecompressor, he
 
 	absPath := filepath.Join(absOutputDir, destRel)
 	logger.Info("rarengine: extracted entry complete", "name", header.Name, "written_bytes", n)
-	return absPath, nil
+	return absPath, nil, nil
 }
 
-// UnpackDir extracts a RAR archive sequentially from the first volume path into the output directory.
-func UnpackDir(ctx context.Context, firstVolumePath string, outputDir string, opts UnpackOptions) ([]string, error) {
+// UnpackDir extracts a RAR archive sequentially from the first volume path
+// into the output directory.
+//
+// A member that cannot be delivered -- it ended short, or failed its checksum
+// -- does not stop the extraction. It is recorded in UnpackResult.Damaged and
+// traversal continues, because in a non-solid archive the members behind it
+// are independently readable. Nothing is written to disk for such a member.
+//
+// A solid archive is different: its members back-reference their predecessors'
+// decoded bytes, so once one is damaged the rest cannot be reconstructed.
+// Those are refused with ErrSolidStreamBroken, which is returned as the
+// error, along with the result accumulated up to that point.
+func UnpackDir(ctx context.Context, firstVolumePath string, outputDir string, opts UnpackOptions) (UnpackResult, error) {
 	logger := opts.Logger
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return UnpackResult{}, err
 	}
 
 	logger.Info("rarengine: starting volume discovery", "first_volume", firstVolumePath)
 	vols, err := discoverVolumes(firstVolumePath)
 	if err != nil {
-		return nil, fmt.Errorf("rarengine: discover volumes: %w", err)
+		return UnpackResult{}, fmt.Errorf("rarengine: discover volumes: %w", err)
 	}
 	logger.Info("rarengine: discovered volumes", "count", len(vols), "paths", vols)
 
 	logger.Info("rarengine: sorting volumes by internal headers")
 	sortedVols, err := SortVolumes(vols)
 	if err != nil {
-		return nil, fmt.Errorf("rarengine: sort volumes: %w", err)
+		return UnpackResult{}, fmt.Errorf("rarengine: sort volumes: %w", err)
 	}
 	logger.Info("rarengine: sorted volumes order", "paths", sortedVols)
 
 	root, absOutputDir, err := setupSandbox(outputDir)
 	if err != nil {
-		return nil, err
+		return UnpackResult{}, err
 	}
 	defer func() { _ = root.Close() }()
 
 	volumesChan, err := openVolumeChannel(sortedVols)
 	if err != nil {
-		return nil, err
+		return UnpackResult{}, err
 	}
 
 	sd := NewStreamDecompressor(volumesChan)
@@ -284,32 +365,71 @@ func UnpackDir(ctx context.Context, firstVolumePath string, outputDir string, op
 		sd.SetPassword(opts.Password)
 	}
 
-	var extractedFiles []string
+	var res UnpackResult
 
+	// recorded tracks whether the member currently in progress has already
+	// been added to res.Damaged by the read site below, so that the FileError
+	// Next reports for that same member is not counted twice.
+	recorded := false
+
+	// Every exit below returns res, not a zero value. An archive-level failure
+	// partway through still extracted whatever came before it, and discarding
+	// that is the behaviour this reporting exists to remove.
 	logger.Info("rarengine: starting extraction pipeline", "output_dir", absOutputDir)
 	for {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return res, err
 		}
 		header, err := sd.Next()
 		if err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, ErrNoNextVolume) {
 				break
 			}
-			return nil, fmt.Errorf("rarengine: read next file: %w", err)
+			// Damage reaches this site for a member that was never read --
+			// a directory entry, or a file skipped because it already
+			// existed -- which Next drains on the caller's behalf. A member
+			// that WAS read has already been recorded below and arrives
+			// here only carrying its verdict; see recorded.
+			if d, ok := asDamaged(err); ok {
+				// A file whose read already failed reaches here a second time,
+				// now carrying its verdict. Recording it again would report
+				// one damaged member as two.
+				if !recorded {
+					logger.Warn("rarengine: skipping damaged entry", "name", d.Header.Name, "err", d.Err)
+					res.Damaged = append(res.Damaged, d)
+				}
+				recorded = false
+				continue
+			}
+			return res, fmt.Errorf("rarengine: read next file: %w", err)
 		}
+		recorded = false
 
-		filePath, err := extractEntry(ctx, root, sd, header, opts, absOutputDir, logger)
+		filePath, streamErr, err := extractEntry(ctx, root, sd, header, opts, absOutputDir, logger)
 		if err != nil {
-			return nil, err
+			return res, err
+		}
+		if streamErr != nil {
+			// Recorded here rather than from the FileError below because the
+			// two sites see different things. A file that reached its
+			// declared size and then failed its CRC32 surfaces the mismatch
+			// during the read and Next afterwards returns the NEXT header
+			// cleanly, so waiting for a FileError would drop that member from
+			// both Files and Damaged and report the archive as fully
+			// extracted. The header needed to describe it is already in hand.
+			logger.Warn("rarengine: skipping damaged entry", "name", header.Name, "err", streamErr)
+			res.Damaged = append(res.Damaged, DamagedEntry{Header: header, Err: streamErr})
+			recorded = true
+			continue
 		}
 		if filePath != "" {
-			extractedFiles = append(extractedFiles, filePath)
+			res.Files = append(res.Files, filePath)
 		}
 	}
 
-	logger.Info("rarengine: extraction pipeline complete", "extracted_count", len(extractedFiles))
-	return extractedFiles, nil
+	logger.Info("rarengine: extraction pipeline complete",
+		"extracted_count", len(res.Files), "damaged_count", len(res.Damaged))
+	return res, nil
 }
 
 func uniquePath(root *os.Root, destRel string) string {

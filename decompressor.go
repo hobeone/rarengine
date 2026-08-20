@@ -387,7 +387,31 @@ func detectVersion(r io.Reader) (ArchiveVersion, error) {
 	return VersionUnknown, errors.New("rarengine: invalid RAR magic signature")
 }
 
-// Next advances to the next file in the RAR archive stream, returning its header.
+// Next advances to the next file in the RAR archive stream, returning its
+// header.
+//
+// io.EOF reports that the archive is over. Any other error ends the file that
+// was in progress, and a *FileError specifically means that file alone failed
+// -- it carries the failed header and the underlying cause, and the stream is
+// left standing on the next block header, so calling Next again continues the
+// traversal:
+//
+//	for {
+//		fh, err := sd.Next()
+//		if err != nil {
+//			var damaged *rarengine.FileError
+//			if errors.As(err, &damaged) {
+//				log.Printf("skipping %s: %v", damaged.Header.Name, damaged.Err)
+//				continue
+//			}
+//			break // io.EOF, or the archive stopped being parseable
+//		}
+//		// ... read the file from sd ...
+//	}
+//
+// A caller that breaks on every error gets the previous behaviour: correct,
+// but it abandons every member behind the damaged one. Errors from the
+// returned reader carry the same distinction, so both sites want this test.
 func (sd *StreamDecompressor) Next() (*FileHeader, error) {
 	if sd.currentVol == nil {
 		if err := sd.nextVolume(); err != nil {
