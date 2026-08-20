@@ -247,6 +247,14 @@ func TestSkipDamagedFile_ShortDrainIsNotContinuable(t *testing.T) {
 	_, _ = io.Copy(io.Discard, sd)
 
 	_, err := sd.Next()
+	// Checked before the type assertion: AsType also reports false for a nil
+	// error, so without this a regression where Next simply succeeds -- the
+	// worse outcome, since it surfaces whatever the stream is sitting on --
+	// would satisfy the assertion below.
+	if err == nil {
+		t.Fatal("Next reported success after a short drain; the stream is " +
+			"wherever the media ran out, so there is nothing safe to return")
+	}
 	if _, ok := errors.AsType[*FileError](err); ok {
 		t.Fatalf("a short drain was offered as continuable (%v); the stream is "+
 			"wherever the media ran out, not on a block header", err)
@@ -411,7 +419,19 @@ func TestSkipDamagedFile_AbandonedCursorIsNotContinuable(t *testing.T) {
 	}
 	_, _ = io.Copy(io.Discard, sd)
 
-	_, err = sd.Next()
+	fh, err = sd.Next()
+	// A nil error here is the worst outcome, not a passing one: it means Next
+	// surfaced whatever the failed advance left the stream pointing at. AsType
+	// reports false for nil, so this has to be rejected first.
+	if err == nil {
+		t.Fatalf("Next reported success after a failed volume advance and "+
+			"returned %q; the offset it parsed that from was chosen by the "+
+			"archive", fh.Name)
+	}
+	if fh != nil && fh.Name == "PWNED.bin" {
+		t.Fatalf("Next surfaced the entry planted after the CRC-failing "+
+			"header: %q", fh.Name)
+	}
 	if fe, ok := errors.AsType[*FileError](err); ok {
 		t.Fatalf("a file whose cursor was abandoned on a failed volume advance "+
 			"was offered as continuable (%v, header %v). No drain established "+
@@ -630,5 +650,48 @@ func TestSkipDamagedFile_ChecksumFailureDamagesWindow(t *testing.T) {
 		t.Fatalf("a solid file after a CRC-mismatched one returned %v; want "+
 			"ErrSolidStreamBroken. Its back-references reach into bytes known "+
 			"to be wrong", err)
+	}
+}
+
+// TestSkipDamagedFile_RefusedFileDamagesWindow covers a file that never
+// decoded at all.
+//
+// A refusal drops the payload and returns before fileReader.begin, so the file
+// never becomes active and finishCurrentFile never sees it. Its output is
+// nonetheless absent from the shared window, and a solid successor's
+// back-references assume it is there. Window.CopyBytes bounds distances by the
+// history actually written, but the shortfall here sits INSIDE that bound --
+// the successor reads an earlier file's bytes rather than reading past the
+// end -- so nothing catches it and the output is silently wrong.
+func TestSkipDamagedFile_RefusedFileDamagesWindow(t *testing.T) {
+	// A rar bomb: declared unpacked size far exceeds both 1 MiB and 1000x the
+	// packed size, so processHeader refuses it before any decoding.
+	bomb := rar5FileEntry("bomb.bin", 2*1024*1024, 0x1234, []byte("ten bytes!"))
+
+	var archive bytes.Buffer
+	archive.Write(rar5ArchiveHeader())
+	archive.Write(bomb)
+	archive.Write(rar5EntryComp("solid.bin", FileCompSolid, 20, 0x1234,
+		[]byte("twenty bytes exactly")))
+	archive.Write(rar5EndHeader())
+
+	sd := decompressorFor(archive.Bytes())
+
+	_, err := sd.Next()
+	if !errors.Is(err, ErrRarBombDetected) {
+		t.Fatalf("the first entry returned %v; want ErrRarBombDetected, or "+
+			"this test is not exercising a refusal", err)
+	}
+	if !sd.damaged {
+		t.Error("a refused file was not recorded as damaging the window; its " +
+			"output never reached the window, so a solid successor's " +
+			"back-references land on an earlier file's bytes")
+	}
+
+	_, err = sd.Next()
+	if !errors.Is(err, ErrSolidStreamBroken) {
+		t.Fatalf("a solid file after a refused one returned %v; want "+
+			"ErrSolidStreamBroken. The refused file contributed nothing to "+
+			"the window it back-references", err)
 	}
 }

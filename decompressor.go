@@ -247,6 +247,17 @@ func (sd *StreamDecompressor) discardPayload(n int64) error {
 // over cause -- if the stream cannot be repositioned, nothing later can be
 // trusted regardless of why this file was refused.
 func (sd *StreamDecompressor) refuse(n int64, cause error) error {
+	// A refused file contributes nothing to the shared window, and a solid
+	// successor's back-references assume it does. The shortfall sits INSIDE
+	// what CopyBytes bounds by -- the successor reads an earlier file's bytes
+	// rather than reading past the written history -- so the window guard
+	// cannot catch it and the output is silently wrong.
+	//
+	// Recorded here rather than at each refusal site because every refusal has
+	// the same consequence, whatever its reason, and a refused file never
+	// reaches fileReader at all: it returns before begin, so finishCurrentFile
+	// never sees it.
+	sd.damaged = true
 	if err := sd.discardPayload(n); err != nil {
 		return err
 	}
