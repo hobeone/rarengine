@@ -3,6 +3,7 @@ package rarengine
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -260,7 +261,7 @@ func TestUnpackDir_CancelMidCopy(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected UnpackDir to fail with context error, but it succeeded")
 	}
-	if !reflect.DeepEqual(err, context.Canceled) && !bytes.Contains([]byte(err.Error()), []byte("context canceled")) {
+	if !errors.Is(err, context.Canceled) {
 		t.Errorf("expected context canceled error, got: %v", err)
 	}
 }
