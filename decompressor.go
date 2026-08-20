@@ -249,6 +249,33 @@ func (sd *StreamDecompressor) discardPayload(n int64) error {
 // refusal site keeps the two from drifting apart, and a failed discard wins
 // over cause -- if the stream cannot be repositioned, nothing later can be
 // trusted regardless of why this file was refused.
+// refuseFile refuses a file whose header parsed, so the refusal can name the
+// member it cost and the caller can continue past it.
+//
+// It routes through markContinuable rather than building a FileError, which
+// keeps that the single construction site: the promise a FileError makes is
+// that the stream is standing on the next block header, and this is the one
+// refusal path that can prove it.
+//
+// The proof is settled(), not a nil error from the drop. io.Copy reports a
+// source that ended early as success, so discardPayload returns nil for a
+// short drop that left the count standing and the stream parked mid-payload.
+// Promising continuation there is exactly the fabrication the packed-cursor
+// rules exist to prevent.
+//
+// Only for refusals whose cause does not also invalidate the window for
+// later files -- ErrSolidStreamBroken keeps using refuse, because a solid
+// run cannot be resumed and offering to continue would be a lie of a
+// different kind.
+func (sd *StreamDecompressor) refuseFile(fh *FileHeader, cause error) error {
+	sd.damaged = true
+	if err := sd.discardPayload(fh.PackedSize); err != nil {
+		return err
+	}
+	settled := fh.PackedSize <= 0 || sd.discard.settled()
+	return markContinuable(fh, cause, settled)
+}
+
 func (sd *StreamDecompressor) refuse(n int64, cause error) error {
 	// A refused file contributes nothing to the shared window, and a solid
 	// successor's back-references assume it does. The shortfall sits INSIDE

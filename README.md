@@ -109,7 +109,9 @@ sd.Reset(newVolumesChan)
 
 For standard extraction directly to a target directory, `rarengine` provides a robust, sandboxed `UnpackDir` utility. It automatically discovers other volumes (e.g., `.part1.rar`, `.part2.rar`), sorts them by internal headers, sandboxes file generation inside the target directory, and unpacks the contents.
 
-A member that cannot be delivered — it ended short, or failed its checksum — is reported in `UnpackResult.Damaged` rather than aborting the extraction, because in a non-solid archive the members behind it are independently readable. Nothing is written to disk for a damaged member, so `Files` and `Damaged` are disjoint. A solid archive is the exception: its members back-reference their predecessors' decoded bytes, so once one is damaged the rest are refused with `ErrSolidStreamBroken`, returned as the error alongside the result accumulated so far.
+A member that cannot be delivered — it ended short, failed its checksum, tripped the rar-bomb guard, or has a name that is unusable once sanitized — is reported in `UnpackResult.Damaged` rather than aborting the extraction, because in a non-solid archive the members behind it are independently readable. Each member is written under a temporary name and renamed into place only once it has decoded completely, so a damaged member never appears at its destination and `Files` and `Damaged` stay disjoint on disk.
+
+Two cases still end the traversal, each returning the result accumulated so far alongside the error: a solid archive, whose members back-reference their predecessors' decoded bytes and so cannot be resumed past damage (`ErrSolidStreamBroken`), and a member whose header does not parse, which is refused before there is a header to name it with.
 
 ```go
 package main

@@ -162,3 +162,63 @@ func TestUnpackDir_RealArchive_MissingFinalVolume(t *testing.T) {
 		t.Errorf("output directory holds %d entries; the incomplete member must not be left behind", len(left))
 	}
 }
+
+// TestUnpackDir_RealArchive_SkippedMemberTruncatedIsRecorded covers the member
+// this loop never reads.
+//
+// With the default OverwriteFiles: false, a member already present on disk is
+// skipped, so its payload is drained by Next rather than read here. When that
+// drain runs out of volumes the failure arrives as a bare ErrNoNextVolume,
+// which the Next site treats as end-of-archive -- so the extraction reported
+// total success, with no entry in Files OR Damaged, while a stale file sat at
+// the destination looking extracted. That is the silent truncation every
+// constraint in this library exists to prevent.
+func TestUnpackDir_RealArchive_SkippedMemberTruncatedIsRecorded(t *testing.T) {
+	parts, err := filepath.Glob(filepath.Join("testdata", "rar5_multi.part*.rar"))
+	if err != nil || len(parts) < 2 {
+		t.Fatalf("multi-volume fixture missing: %v (%d parts)", err, len(parts))
+	}
+	slices.Sort(parts)
+
+	vols := t.TempDir()
+	for _, p := range parts[:len(parts)-1] { // final segment never arrived
+		b, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatalf("read %s: %v", p, err)
+		}
+		if err := os.WriteFile(filepath.Join(vols, filepath.Base(p)), b, 0600); err != nil {
+			t.Fatalf("write volume: %v", err)
+		}
+	}
+
+	// A stale copy from an earlier run is what makes the member get skipped.
+	out := t.TempDir()
+	stale := []byte("stale")
+	if err := os.WriteFile(filepath.Join(out, "large.bin"), stale, 0600); err != nil {
+		t.Fatalf("seed stale file: %v", err)
+	}
+
+	res, err := UnpackDir(context.Background(), filepath.Join(vols, filepath.Base(parts[0])), out,
+		UnpackOptions{OverwriteFiles: false})
+	if err != nil {
+		t.Fatalf("UnpackDir: %v", err)
+	}
+
+	d := onlyDamaged(t, res)
+	if d.Header.Name != "large.bin" {
+		t.Errorf("damaged entry names %q; want large.bin", d.Header.Name)
+	}
+	if !errors.Is(d.Err, ErrNoNextVolume) {
+		t.Errorf("damaged entry carries %v; want ErrNoNextVolume", d.Err)
+	}
+	if len(res.Files) != 0 {
+		t.Errorf("reported %v as extracted; the member was skipped, not written", res.Files)
+	}
+
+	// The stale file is left alone -- skipping means not touching it -- but the
+	// caller must be told the archive's copy never arrived.
+	got, err := os.ReadFile(filepath.Join(out, "large.bin"))
+	if err != nil || string(got) != string(stale) {
+		t.Errorf("stale file reads %q (%v); skipping must not modify it", got, err)
+	}
+}

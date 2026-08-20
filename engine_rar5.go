@@ -103,7 +103,7 @@ func (re *rar5Engine) processHeader(h *BlockHeader) (*FileHeader, bool, error) {
 			// Refused like any other rejected file, and for the same reason:
 			// the caller can keep calling Next(), so leaving the payload lets
 			// the block that was just refused supply the next "file".
-			return nil, false, re.sd.refuse(fh.PackedSize, ErrRarBombDetected)
+			return nil, false, re.sd.refuseFile(fh, ErrRarBombDetected)
 		}
 
 		if err := re.sd.admitFile(fh); err != nil {

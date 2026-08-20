@@ -86,7 +86,7 @@ func (re *rar3Engine) processHeader(h *BlockHeader) (*FileHeader, bool, error) {
 			// packed size across ADD_SIZE and HIGH_PACK_SIZE, and h.DataSize
 			// carries only the low half. The header parsed cleanly here, so
 			// the full size is known and is what has to go.
-			return nil, false, re.sd.refuse(fh.PackedSize, ErrRarBombDetected)
+			return nil, false, re.sd.refuseFile(fh, ErrRarBombDetected)
 		}
 
 		if err := re.sd.admitFile(fh); err != nil {
