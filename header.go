@@ -377,33 +377,44 @@ func parseTimeRecord(fh *FileHeader, data []byte) error {
 	}
 	data = data[n:]
 
+	// Every declared time is checked for, not just the one kept. A record
+	// promising three times and carrying one is malformed however little of
+	// it this function goes on to read, and accepting it would let a header
+	// declare fields it does not have.
+	unix := flags&extraTimeUnix != 0
+	present := bits.OnesCount64(flags & (extraTimeMtime | extraTimeCtime | extraTimeAtime))
+
+	need := 8 * present
+	if unix {
+		need = 4 * present
+		if flags&extraTimeUnixNS != 0 {
+			need += 4 * present
+		}
+	}
+	if len(data) < need {
+		return ErrCorruptFileHeader
+	}
+
 	// mtime is stored first when present, so its absence means everything
-	// this function would read belongs to a time FileHeader does not carry.
+	// this record carries belongs to a time FileHeader does not expose.
 	if flags&extraTimeMtime == 0 {
 		return nil
 	}
 
-	if flags&extraTimeUnix == 0 {
-		if len(data) < 8 {
-			return ErrCorruptFileHeader
-		}
+	if !unix {
 		ticks := int64(binary.LittleEndian.Uint64(data[:8])) - filetimeEpochOffset
 		fh.ModificationTime = time.Unix(ticks/1e7, (ticks%1e7)*100)
 		return nil
 	}
 
-	if len(data) < 4 {
-		return ErrCorruptFileHeader
-	}
 	sec := int64(binary.LittleEndian.Uint32(data[:4]))
 
 	var nsec int64
 	if flags&extraTimeUnixNS != 0 {
-		present := bits.OnesCount64(flags & (extraTimeMtime | extraTimeCtime | extraTimeAtime))
+		// Every present time's seconds precede all of the nanoseconds, so
+		// mtime's nanosecond field sits past the ctime and atime seconds
+		// rather than beside its own.
 		off := 4 * present
-		if len(data) < off+4 {
-			return ErrCorruptFileHeader
-		}
 		// Attacker-supplied: a value at or beyond a second would roll the
 		// time forward into a different second than the archive recorded.
 		if ns := int64(binary.LittleEndian.Uint32(data[off : off+4])); ns < 1e9 {

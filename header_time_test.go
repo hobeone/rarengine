@@ -3,6 +3,7 @@ package rarengine
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -156,4 +157,45 @@ func TestParseTimeRecord_Rejects(t *testing.T) {
 			t.Error("a record promising a nanosecond field it does not carry was accepted")
 		}
 	})
+}
+
+// TestParseTimeRecord_DeclaredFieldsMustBePresent covers times the parser does
+// not keep.
+//
+// A record declaring ctime and atime while carrying only mtime is malformed
+// however little of it this parser reads. Validating just the fields it uses
+// would let a header declare data it does not have and still be accepted.
+func TestParseTimeRecord_DeclaredFieldsMustBePresent(t *testing.T) {
+	cases := []struct {
+		name string
+		rec  []byte
+	}{
+		{
+			"unix: three declared, one carried",
+			timeRecord(extraTimeUnix|extraTimeMtime|extraTimeCtime|extraTimeAtime,
+				[]uint32{500}, nil),
+		},
+		{
+			"unix with nanoseconds: seconds complete, nanoseconds short",
+			timeRecord(extraTimeUnix|extraTimeMtime|extraTimeCtime|extraTimeUnixNS,
+				[]uint32{500, 600}, []uint32{7}),
+		},
+		{
+			"filetime: two declared, one carried",
+			append(EncodeVint(extraTimeMtime|extraTimeCtime), make([]byte, 8)...),
+		},
+		{
+			"mtime absent but ctime declared and missing",
+			timeRecord(extraTimeUnix|extraTimeCtime, nil, nil),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var fh FileHeader
+			if err := parseTimeRecord(&fh, tc.rec); !errors.Is(err, ErrCorruptFileHeader) {
+				t.Errorf("parseTimeRecord = %v; want ErrCorruptFileHeader", err)
+			}
+		})
+	}
 }

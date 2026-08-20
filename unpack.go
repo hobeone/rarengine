@@ -3,6 +3,8 @@ package rarengine
 import (
 	"cmp"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -254,6 +256,37 @@ func (wc *writeCounter) Write(p []byte) (int, error) {
 	return n, err
 }
 
+// createTemp opens the file a member is written into before it is renamed
+// into place.
+//
+// The suffix is random, and a name already taken is never reclaimed by
+// removing it. Both matter because the archive chooses member names: a
+// derivable suffix is a name the archive can also contain, and the earlier
+// version removed the colliding file, so an archive holding both "a.bin" and
+// "a.bin.rarengine-part" destroyed the extraction of the second and still
+// listed it in Files -- the same defect the temporary name exists to prevent,
+// through a door the archive picks.
+func createTemp(root *os.Root, destRel string) (string, *os.File, error) {
+	var buf [8]byte
+	for attempt := 0; attempt < 8; attempt++ {
+		if _, err := rand.Read(buf[:]); err != nil {
+			return "", nil, fmt.Errorf("rarengine: temporary name for %s: %w", destRel, err)
+		}
+		tmpRel := destRel + ".rarengine-part-" + hex.EncodeToString(buf[:])
+
+		out, err := root.OpenFile(tmpRel, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0600)
+		switch {
+		case err == nil:
+			return tmpRel, out, nil
+		case errors.Is(err, os.ErrExist):
+			continue // taken by a member of this archive; pick another
+		default:
+			return "", nil, fmt.Errorf("rarengine: create file %s: %w", tmpRel, err)
+		}
+	}
+	return "", nil, fmt.Errorf("rarengine: no free temporary name for %s", destRel)
+}
+
 // extractEntry writes one member into the sandboxed root.
 //
 // It reports a decode failure separately from a filesystem failure, because
@@ -287,7 +320,11 @@ func extractEntry(ctx context.Context, root *os.Root, sd *StreamDecompressor, he
 	// broken archive -- but it costs this one member, not the extraction: an
 	// unusable name used to reach OpenFile and come back as a fatal error,
 	// so a single odd name discarded every member behind it.
-	if destRel == "" || destRel == "." {
+	// A NUL byte survives sanitizePath and reaches the filesystem calls,
+	// which reject it -- as a fatal error, so one such name would cost every
+	// member behind it. It is this member's loss, like any other name that
+	// cannot be written.
+	if destRel == "" || destRel == "." || strings.ContainsRune(destRel, 0) {
 		return "", fmt.Errorf("%w: %q", ErrUnusableName, header.Name), nil
 	}
 
@@ -317,19 +354,9 @@ func extractEntry(ctx context.Context, root *os.Root, sd *StreamDecompressor, he
 		return "", nil, fmt.Errorf("rarengine: mkdir parent %s: %w", filepath.Dir(destRel), err)
 	}
 
-	tmpRel := destRel + ".rarengine-part"
-	out, err := root.OpenFile(tmpRel, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0600)
-	if errors.Is(err, os.ErrExist) {
-		// Left by an interrupted run, or by two members mapping to the same
-		// destination. Either way it is ours to reclaim: the name is derived
-		// from destRel and nothing else writes it.
-		if rmErr := root.Remove(tmpRel); rmErr != nil {
-			return "", nil, fmt.Errorf("rarengine: remove stale partial %s: %w", tmpRel, rmErr)
-		}
-		out, err = root.OpenFile(tmpRel, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0600)
-	}
+	tmpRel, out, err := createTemp(root, destRel)
 	if err != nil {
-		return "", nil, fmt.Errorf("rarengine: create file %s: %w", tmpRel, err)
+		return "", nil, err
 	}
 
 	dropPartial := func() {

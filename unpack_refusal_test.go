@@ -211,3 +211,80 @@ func TestRefuseFile_ShortDropIsNotContinuable(t *testing.T) {
 		t.Errorf("error is %v; want it to still name the refusal cause", err)
 	}
 }
+
+// TestUnpackDir_MemberCannotCollideWithATemporaryName covers the name the
+// archive gets to choose.
+//
+// The in-progress copy of a member used to be written to a name derived from
+// its destination, and a name already taken was reclaimed by removing it. Both
+// halves are the archive's to exploit: an archive holding "a.bin" and
+// "a.bin.rarengine-part" had the second extracted, then destroyed when the
+// first claimed that name -- while Files still listed it. That is the defect
+// the temporary name exists to prevent, reintroduced through the suffix.
+func TestUnpackDir_MemberCannotCollideWithATemporaryName(t *testing.T) {
+	first := []byte("a member whose name looks like a temporary")
+	archive := writeArchive(t,
+		goodEntry("a.bin.rarengine-part", first),
+		goodEntry("a.bin", []byte("an ordinary member")),
+	)
+	out := t.TempDir()
+
+	res, err := UnpackDir(context.Background(), archive, out, UnpackOptions{})
+	if err != nil {
+		t.Fatalf("UnpackDir: %v", err)
+	}
+	if len(res.Files) != 2 {
+		t.Fatalf("expected both members extracted, got %v (damaged: %+v)", res.Files, res.Damaged)
+	}
+
+	for _, f := range res.Files {
+		if _, err := os.Stat(f); err != nil {
+			t.Errorf("UnpackResult.Files names a path that does not exist: %s (%v)", f, err)
+		}
+	}
+	got, err := os.ReadFile(filepath.Join(out, "a.bin.rarengine-part"))
+	if err != nil {
+		t.Fatalf("the member named like a temporary was removed: %v", err)
+	}
+	if string(got) != string(first) {
+		t.Errorf("member reads %q; want %q", got, first)
+	}
+
+	// No temporary may outlive the extraction.
+	entries, err := os.ReadDir(out)
+	if err != nil {
+		t.Fatalf("read output dir: %v", err)
+	}
+	if len(entries) != 2 {
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("output directory holds %d entries: %v", len(entries), names)
+	}
+}
+
+// TestUnpackDir_NulInNameCostsOneMember covers a name sanitizePath preserves.
+//
+// sanitizePath drops "." and ".." components but leaves a NUL byte in place,
+// and the filesystem calls reject it -- as a fatal error, so one such member
+// cost every member behind it.
+func TestUnpackDir_NulInNameCostsOneMember(t *testing.T) {
+	archive := writeArchive(t,
+		goodEntry("bad\x00name.bin", []byte("unwritable")),
+		goodEntry("good.bin", []byte("fine")),
+	)
+	out := t.TempDir()
+
+	res, err := UnpackDir(context.Background(), archive, out, UnpackOptions{})
+	if err != nil {
+		t.Fatalf("a NUL in a member name stopped the extraction: %v", err)
+	}
+	d := onlyDamaged(t, res)
+	if !errors.Is(d.Err, ErrUnusableName) {
+		t.Errorf("damaged entry carries %v; want ErrUnusableName", d.Err)
+	}
+	if len(res.Files) != 1 || filepath.Base(res.Files[0]) != "good.bin" {
+		t.Errorf("the member behind the unusable name was lost: %v", res.Files)
+	}
+}
