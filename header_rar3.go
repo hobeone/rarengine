@@ -7,6 +7,43 @@ import (
 	"time"
 )
 
+// RAR3 file header flags (LHD_*), named because these values are not
+// checkable by eye against a spec and one of them was previously read wrong.
+//
+// lhdPassword and lhdSalt are adjacent in meaning but far apart in value, and
+// conflating them is the specific mistake this block exists to prevent:
+// lhdSalt only says eight salt bytes follow the name, which is a statement
+// about the header's layout, while lhdPassword is what says the member is
+// encrypted. Real RAR 3.x encryption sets both, so the difference is invisible
+// on any honest archive and shows up only on a crafted one.
+const (
+	lhdSplitBefore = 0x0001
+	lhdSplitAfter  = 0x0002
+	lhdPassword    = 0x0004
+	lhdSolid       = 0x0010
+	lhdLarge       = 0x0100
+	lhdSalt        = 0x0400
+)
+
+// mhdPassword marks a RAR3 archive whose block headers are themselves
+// encrypted, in the main (0x73) header's flags.
+const mhdPassword = 0x0080
+
+// rar3ClaimsEncryption reports whether a RAR3 file header claims encryption by
+// either of the two bits that can say so.
+//
+// Either alone is a claim: lhdPassword says the member is encrypted, lhdSalt
+// says a salt accompanies it, and a salt is meaningless on anything else. Real
+// RAR 3.x sets both; a crafted archive need not, so both are tested.
+//
+// One predicate rather than the condition written twice, because it is checked
+// at two sites -- file admission and every volume advance -- whose responses
+// differ but whose question does not. Narrowing what counts as a claim should
+// take one edit, not two kept in step by hand.
+func rar3ClaimsEncryption(fh *FileHeader) bool {
+	return fh.Encrypted || len(fh.Salt) > 0
+}
+
 // ReadRAR3BlockHeader reads and validates a RAR3 block header.
 func ReadRAR3BlockHeader(r io.Reader) (*BlockHeader, error) {
 	var baseBuf [7]byte
@@ -91,7 +128,7 @@ func ParseRAR3FileHeader(h *BlockHeader) (*FileHeader, error) {
 	offset := 21
 
 	var highPack, highUnp uint32
-	if h.Flags&0x0100 > 0 {
+	if h.Flags&lhdLarge > 0 {
 		if len(payload) < offset+8 {
 			return nil, ErrCorruptFileHeader
 		}
@@ -117,7 +154,7 @@ func ParseRAR3FileHeader(h *BlockHeader) (*FileHeader, error) {
 	offset += int(nameSize)
 
 	var salt []byte
-	if h.Flags&0x0400 > 0 {
+	if h.Flags&lhdSalt > 0 {
 		if len(payload) < offset+8 {
 			return nil, ErrCorruptFileHeader
 		}
@@ -139,17 +176,21 @@ func ParseRAR3FileHeader(h *BlockHeader) (*FileHeader, error) {
 	}
 
 	fh := &FileHeader{
-		Name:             sanitizePath(rawName),
-		IsDir:            isDir,
-		PackedSize:       finalPackSize,
-		UnpackedSize:     finalUnpSize,
-		Solid:            (h.Flags & 0x0010) > 0,
-		FirstBlock:       (h.Flags & 0x0001) == 0,
-		LastBlock:        (h.Flags & 0x0002) == 0,
-		Method:           finalMethod,
-		CRC32:            fileCrc,
-		HasCRC32:         true,
-		Encrypted:        (h.Flags & 0x0400) > 0,
+		Name:         sanitizePath(rawName),
+		IsDir:        isDir,
+		PackedSize:   finalPackSize,
+		UnpackedSize: finalUnpSize,
+		Solid:        (h.Flags & lhdSolid) > 0,
+		FirstBlock:   (h.Flags & lhdSplitBefore) == 0,
+		LastBlock:    (h.Flags & lhdSplitAfter) == 0,
+		Method:       finalMethod,
+		CRC32:        fileCrc,
+		HasCRC32:     true,
+		// lhdPassword, not lhdSalt. This field previously carried the salt
+		// bit, which says only that eight salt bytes are present -- so a
+		// member encrypted without a salt reported Encrypted false and was
+		// decoded as though its ciphertext were content.
+		Encrypted:        (h.Flags & lhdPassword) > 0,
 		Salt:             salt,
 		ModificationTime: mtime,
 		HostOS:           uint64(hostOS),

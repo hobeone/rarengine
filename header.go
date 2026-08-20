@@ -89,19 +89,28 @@ type ArchiveHeader struct {
 
 // FileHeader represents a parsed file header inside the archive.
 type FileHeader struct {
-	Name             string
-	IsDir            bool
-	PackedSize       int64
-	UnpackedSize     int64
-	Solid            bool
-	FirstBlock       bool // true if this is the first block/volume-part of the file
-	LastBlock        bool // true if this is the last block/volume-part of the file
-	Method           int  // compression method: 0 = store, 1..5 = compress
-	DictSize         int64
-	CRC32            uint32
-	HasCRC32         bool
-	HasBlake2sp      bool
-	Blake2sp         []byte // 32-byte BLAKE2sp hash
+	Name         string
+	IsDir        bool
+	PackedSize   int64
+	UnpackedSize int64
+	Solid        bool
+	FirstBlock   bool // true if this is the first block/volume-part of the file
+	LastBlock    bool // true if this is the last block/volume-part of the file
+	Method       int  // compression method: 0 = store, 1..5 = compress
+	DictSize     int64
+	CRC32        uint32
+	HasCRC32     bool
+	HasBlake2sp  bool
+	Blake2sp     []byte // 32-byte BLAKE2sp hash
+	// Encrypted reports that the member's content is encrypted: RAR5's
+	// encryption record, or RAR3's LHD_PASSWORD (0x0004). Not RAR3's
+	// LHD_SALT (0x0400), which says only that eight salt bytes follow the
+	// name -- reading the salt bit as encryption is how an encrypted member
+	// carrying no salt came to be decoded as though it were plaintext.
+	//
+	// A RAR3 member is refused before Next returns it, so a true value on
+	// that path is only ever observed through a FileError's Header. RAR5
+	// members are decrypted normally and returned with this set.
 	Encrypted        bool
 	KdfCount         int
 	Salt             []byte
