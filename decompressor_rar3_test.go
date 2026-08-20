@@ -215,8 +215,9 @@ func TestStreamDecompressor_RAR3_HighSize(t *testing.T) {
 // eight bytes following the name are parsed, and the member is refused,
 // because a salt is a claim of encryption this library cannot honour.
 //
-// It does not assert fh.Encrypted. That field tracks LHD_PASSWORD (0x0004),
-// not the salt bit set here -- an earlier version of this test asserted the
+// It asserts Encrypted is false, which is the point rather than an aside: that
+// field tracks LHD_PASSWORD (0x0004), not the salt bit set here, so a salt on
+// its own must not set it. An earlier version of this test asserted the
 // opposite, which is how the two came to be conflated in the parser.
 func TestStreamDecompressor_RAR3_Salt(t *testing.T) {
 	content := []byte("hello rar3 salt")
