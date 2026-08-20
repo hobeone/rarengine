@@ -49,17 +49,21 @@ func mtimeOf(t *testing.T, fixture string) time.Time {
 // for every archive rar actually produces -- which made IgnoreUnrarDates a
 // no-op and left extracted files without their archive timestamps.
 func TestParseFileHeader_ModificationTimeMatchesUnrar(t *testing.T) {
-	// Compared as the oracle's own rendering rather than as a unix instant:
-	// the epoch seconds are not something to derive by hand, and writing one
-	// down from memory is how the first version of this test asserted a value
-	// five days from the truth while the parser was correct.
+	// Asserted in UTC. The instant is what the archive records and what this
+	// parser must reproduce; the rendering is not. An earlier version of this
+	// test compared the local-time string `unrar lt` printed on the author's
+	// machine, which passed there and failed in CI purely because CI runs in
+	// UTC -- the parsed instant was identical in both.
+	//
+	// The values below are that same instant: `unrar lt` renders it as
+	// 16:31:14 at UTC-7 and CI rendered it as 23:31:14 at UTC.
 	cases := []struct {
 		fixture string
-		want    string // verbatim from: unrar lt <fixture>  (comma decimal separator)
+		want    time.Time
 	}{
-		{"rar5_store.rar", "2026-05-17 16:31:14,684961927"},
-		{"rar5_times.rar", "2026-05-17 16:31:14,684961927"},
-		{"rar5_multi.part01.rar", "2026-05-17 16:31:14,685972798"},
+		{"rar5_store.rar", time.Date(2026, 5, 17, 23, 31, 14, 684961927, time.UTC)},
+		{"rar5_times.rar", time.Date(2026, 5, 17, 23, 31, 14, 684961927, time.UTC)},
+		{"rar5_multi.part01.rar", time.Date(2026, 5, 17, 23, 31, 14, 685972798, time.UTC)},
 	}
 
 	for _, tc := range cases {
@@ -68,9 +72,9 @@ func TestParseFileHeader_ModificationTimeMatchesUnrar(t *testing.T) {
 			t.Errorf("%s: modification time is zero; the extra record was not parsed", tc.fixture)
 			continue
 		}
-		// unrar prints in local time, which is what mtimeOf returns.
-		if rendered := got.Format("2006-01-02 15:04:05,000000000"); rendered != tc.want {
-			t.Errorf("%s: mtime = %s; unrar reports %s", tc.fixture, rendered, tc.want)
+		if !got.Equal(tc.want) {
+			t.Errorf("%s: mtime = %s; want %s",
+				tc.fixture, got.UTC().Format(time.RFC3339Nano), tc.want.Format(time.RFC3339Nano))
 		}
 	}
 }
