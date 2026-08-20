@@ -80,6 +80,60 @@ type StreamDecompressor struct {
 	// discard backs discardPayload. Reused so discarding a block's payload
 	// costs no allocation, per the no-new-allocations rule in CLAUDE.md.
 	discard packedCursor
+	// damaged records that a file left the LZ77 window holding something other
+	// than what a solid successor's back-references assume: bytes missing
+	// because it ended short, wrong because it failed its CRC32, or absent
+	// because the file was refused and never decoded at all.
+	//
+	// Set by finishCurrentFile and by refuse; consulted and cleared by
+	// admitFile; cleared by Reset, because damage belongs to the stream that
+	// caused it. Those four are the only places that touch it, and a fifth
+	// would need to answer the same question they do -- is the window still
+	// what a solid file may build on.
+	damaged bool
+}
+
+// finishCurrentFile ends the active file and remembers whether it left the
+// window incomplete.
+//
+// The engines call this rather than sd.file.endFile directly so that the
+// damage state has exactly one writer. Reading it back out of the returned
+// error at each call site would put the same rule in two engines and let them
+// drift, which is how the refusal paths diverged before.
+func (sd *StreamDecompressor) finishCurrentFile(packed *packedCursor) error {
+	damaged, err := sd.file.endFile(packed)
+	// Keyed on what endFile saw happen to the file, NOT on whether a FileError
+	// came back. The two answer different questions -- FileError asks "may the
+	// caller resume?", this asks "is the window intact?" -- and deriving one
+	// from the other left every non-continuable failure recorded as undamaged,
+	// so a solid file on the next volume decoded against history its
+	// predecessor never wrote.
+	if damaged {
+		sd.damaged = true
+	}
+	return err
+}
+
+// admitFile decides whether a file may begin, given what happened to the
+// files before it.
+//
+// A non-solid file resets the window, so it and everything built on it are
+// unaffected by earlier damage -- that is what clears the state. A solid file
+// after damage cannot be decoded correctly and is refused: see
+// ErrSolidStreamBroken.
+func (sd *StreamDecompressor) admitFile(fh *FileHeader) error {
+	if !fh.Solid {
+		sd.damaged = false
+		return nil
+	}
+	if sd.damaged {
+		// Refused here rather than at each engine's call site. The refusal and
+		// the admission decision are one rule, and this codebase's two engines
+		// have repeatedly diverged where a rule was written down twice --
+		// which is the same reason the damage state has a single writer.
+		return sd.refuse(fh.PackedSize, ErrSolidStreamBroken)
+	}
+	return nil
 }
 
 // packedCursor tracks how many packed bytes a block still owes the stream, and
@@ -97,6 +151,16 @@ type StreamDecompressor struct {
 // is both an allocation and a value the previous holder cannot see.
 type packedCursor struct {
 	lr io.LimitedReader
+	// abandoned records that the count reached zero by being dropped rather
+	// than by being read.
+	//
+	// Both outcomes leave owed() == 0, and they mean opposite things about
+	// where the stream is: a drained cursor leaves it on the next block
+	// header, an abandoned one leaves it wherever the volume advance gave up.
+	// Anything deciding whether the traversal can safely resume has to tell
+	// them apart, so the distinction lives here rather than being inferred
+	// from a count that cannot carry it.
+	abandoned bool
 }
 
 // repoint aims the cursor at n bytes of r, replacing whatever it described
@@ -104,6 +168,7 @@ type packedCursor struct {
 // count always belongs to the volume actually being read.
 func (c *packedCursor) repoint(r io.Reader, n int64) {
 	c.lr.R, c.lr.N = r, n
+	c.abandoned = false
 }
 
 // invalidate forgets the outstanding count without reading anything.
@@ -114,6 +179,7 @@ func (c *packedCursor) repoint(r io.Reader, n int64) {
 // was told would not happen, on a handle it may already have recycled.
 func (c *packedCursor) invalidate() {
 	c.lr.N = 0
+	c.abandoned = true
 }
 
 // reader exposes the cursor as the payload source for a decode chain.
@@ -124,6 +190,19 @@ func (c *packedCursor) reader() io.Reader {
 // owed reports how many packed bytes remain unread.
 func (c *packedCursor) owed() int64 {
 	return c.lr.N
+}
+
+// settled reports that every byte this cursor promised was actually read, and
+// so that the stream is standing on the next block header.
+//
+// It is deliberately not owed() == 0. invalidate zeroes the count without
+// reading, and the volume-advance path invalidates before it discovers whether
+// a next volume exists -- so a failure there (a header that fails its CRC, a
+// refused header, a channel that closed) leaves the count at zero with the
+// stream parked wherever the failed read stopped. Treating that as drained is
+// what let a crafted archive choose the offset a later header was parsed from.
+func (c *packedCursor) settled() bool {
+	return c.lr.N == 0 && !c.abandoned
 }
 
 // drain discards whatever the cursor still owes, so the next block header is
@@ -171,6 +250,21 @@ func (sd *StreamDecompressor) discardPayload(n int64) error {
 // over cause -- if the stream cannot be repositioned, nothing later can be
 // trusted regardless of why this file was refused.
 func (sd *StreamDecompressor) refuse(n int64, cause error) error {
+	// A refused file contributes nothing to the shared window, and a solid
+	// successor's back-references assume it does. The shortfall sits INSIDE
+	// what CopyBytes bounds by -- the successor reads an earlier file's bytes
+	// rather than reading past the written history -- so the window guard
+	// cannot catch it and the output is silently wrong.
+	//
+	// Recorded here rather than at each refusal site because every refusal has
+	// the same consequence whatever its reason. At the processHeader sites the
+	// file is refused before begin, so finishCurrentFile never sees it and
+	// this is the only record. At the processVolumePayloadHeader sites a file
+	// is already active and finishCurrentFile would record it too; writing it
+	// twice costs nothing and is cheaper than a rule about which sites need
+	// it, which is the kind of distinction these two engines have drifted on
+	// before.
+	sd.damaged = true
 	if err := sd.discardPayload(n); err != nil {
 		return err
 	}
@@ -227,6 +321,10 @@ func (sd *StreamDecompressor) Reset(volumes <-chan io.ReadCloser) {
 	// Clearing the file drops any terminal error with it; without this a
 	// reused decompressor would inherit the previous stream's failure.
 	sd.file.clear()
+	// Same reason as clearing the file: damage belongs to the stream that
+	// caused it, and a reused decompressor would otherwise refuse the next
+	// archive's solid files over a failure they had nothing to do with.
+	sd.damaged = false
 	sd.version = VersionUnknown
 	sd.engine = nil
 	sd.win.Reset(false)

@@ -30,7 +30,7 @@ func newRAR5Engine(sd *StreamDecompressor) *rar5Engine {
 func (re *rar5Engine) Next() (*FileHeader, error) {
 	// Draining goes through the owner, so a file the caller skipped is
 	// verified on the same terms as one it read.
-	if err := re.sd.file.endFile(&re.packed); err != nil {
+	if err := re.sd.finishCurrentFile(&re.packed); err != nil {
 		return nil, err
 	}
 
@@ -104,6 +104,10 @@ func (re *rar5Engine) processHeader(h *BlockHeader) (*FileHeader, bool, error) {
 			// the caller can keep calling Next(), so leaving the payload lets
 			// the block that was just refused supply the next "file".
 			return nil, false, re.sd.refuse(fh.PackedSize, ErrRarBombDetected)
+		}
+
+		if err := re.sd.admitFile(fh); err != nil {
+			return nil, false, err
 		}
 
 		re.sd.win.Reset(fh.Solid)

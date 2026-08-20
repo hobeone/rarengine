@@ -25,6 +25,72 @@ var ErrTruncatedFile = errors.New("rarengine: archive ended before the file's de
 // content regardless can disable verification; see SetVerifyCRC.
 var ErrChecksumUnsupported = errors.New("rarengine: file records a checksum this library cannot verify")
 
+// ErrSolidStreamBroken is returned when a solid file cannot be decoded
+// because an earlier file in the same solid run was damaged.
+//
+// Solid files share one LZ77 history: a file's back-references reach into the
+// bytes its predecessors wrote. A predecessor that ended short never wrote
+// some of them; one that failed its CRC32 wrote the wrong ones; one that was
+// refused before it decoded -- a rar bomb, an unparsable header -- wrote none
+// at all. In every case the successor decodes against history the archive did
+// not assume, producing plausible-looking output with nothing in the format to
+// mark it, so all three count as damage. Refusing is the only answer that cannot silently hand over
+// fabricated content. A non-solid file resets the window and clears the
+// condition, so a solid run beginning after the damage is unaffected.
+//
+// A predecessor whose content was wrong in a way this library cannot detect --
+// verification disabled via SetVerifyCRC, or a digest it cannot check -- is not
+// covered, because nothing observed the damage.
+var ErrSolidStreamBroken = errors.New("rarengine: solid file depends on history a damaged file did not write")
+
+// FileError reports that one file could not be delivered while the archive
+// itself is still readable, and is what makes skipping a damaged file
+// possible without guessing.
+//
+// Next returns it in place of the next header. The stream is already
+// positioned at the following block when it is returned -- the failed file's
+// packed remainder has been drained -- so calling Next again continues the
+// traversal. Any other error means traversal has stopped.
+//
+// That distinction is the whole point of the type. Both outcomes previously
+// arrived as the same bare error, so a caller had no way to tell "this file
+// is unreadable, the rest are fine" from "the archive is over", and the only
+// safe reading was to stop and lose every later file.
+//
+// Header identifies the file that failed. It is the part header in force when
+// the failure was decided, which for a file spanning volumes is the LAST
+// part's, not the one Next originally returned: Name matches, but FirstBlock
+// is false and PackedSize describes only that part. Use it to name the file,
+// not to describe the whole entry.
+//
+// Unwrap exposes the underlying cause, so errors.Is(err, ErrTruncatedFile)
+// and the other sentinels keep working.
+type FileError struct {
+	Header *FileHeader
+	Err    error
+}
+
+func (e *FileError) Error() string { return e.Err.Error() }
+
+// Unwrap keeps errors.Is/As working through the wrapper, so a caller that
+// does not care about the distinction behaves exactly as before.
+func (e *FileError) Unwrap() error { return e.Err }
+
+// markContinuable is the ONLY place a FileError is constructed.
+//
+// The type's promise -- that the traversal may resume -- is worth exactly what
+// the check behind it is worth, so that check lives in one named function
+// whose signature demands the proof. A second construction site that forgot to
+// establish canContinue would hand callers a licence to read on from an
+// offset nothing has verified, which is how a block header gets parsed out of
+// a previous file's payload.
+func markContinuable(fh *FileHeader, cause error, canContinue bool) error {
+	if cause == nil || !canContinue {
+		return cause
+	}
+	return &FileError{Header: fh, Err: cause}
+}
+
 // fileReader owns every piece of state that belongs to one file being
 // decoded: the reader chain it comes from, the header in force, how many
 // bytes are still owed, the running checksum, and whether the file has
@@ -269,60 +335,97 @@ func (fr *fileReader) truncated() error {
 // engine repoints it on every volume advance: read at the point of use it is
 // current by construction, where a copy kept here would describe whichever
 // volume the file started on.
-func (fr *fileReader) endFile(packed *packedCursor) error {
+func (fr *fileReader) endFile(packed *packedCursor) (damaged bool, err error) {
 	if fr.src == nil {
-		return nil
+		return false, nil
 	}
 	reported := fr.done
 	_, contentErr := io.Copy(io.Discard, fr)
 	// Captured before clear: whether the file delivered everything it
-	// promised decides whether traversal can continue.
+	// promised decides whether traversal can continue, and which file to name
+	// when reporting that it did not.
 	short := fr.remaining > 0
+	failed := fr.header
 	// Drained on every terminal path, not only the failing ones. A file that
 	// completed perfectly can still leave packed bytes behind, and that is
 	// exactly the case an archive uses to fabricate the next entry.
 	packedErr := packed.drain()
+	// Read before invalidate, which sets abandoned: afterwards every cursor
+	// reports unsettled, and no file could be offered as continuable at all.
+	settled := packed.settled()
 	// The cursor described this file. Dropping the count here keeps a short
 	// drain -- a truncated volume, where the promised bytes were never on the
 	// media -- from leaving a stale count for whatever runs next.
 	packed.invalidate()
 	fr.clear()
 
+	// outcome is what actually happened to this file's content, whether or not
+	// the caller has already been told about it. The verdict below answers a
+	// different question -- what to return now -- and deliberately reports
+	// nothing for a failure already delivered.
+	outcome := reported
+	if outcome == nil {
+		outcome = contentErr
+	}
+	// damaged asks about the window, not about the caller: did this file leave
+	// the history a solid successor back-references in the state the archive
+	// assumed?
+	//
+	// Any non-clean outcome says no. Ending short leaves bytes unwritten; a
+	// CRC32 mismatch means the bytes written are wrong; and a decoder that
+	// fails on the final block returns those bytes alongside the error, so the
+	// budget is satisfied while the content is whatever it managed before
+	// giving up -- that last case reaches finish(err) without verifyChecksum
+	// ever running, so it is neither short nor a CRC mismatch.
+	//
+	// ErrChecksumUnsupported is the one exclusion, and it is not an exception
+	// to the rule but an instance of it: that file decoded normally and this
+	// library merely cannot check its digest. Counting it would refuse the
+	// solid successors of every encrypted file recording a MAC, all of which
+	// decode correctly.
+	damaged = short || (outcome != nil &&
+		!errors.Is(outcome, io.EOF) &&
+		!errors.Is(outcome, ErrChecksumUnsupported))
+
 	var verdict error
 	switch {
 	case short:
-		// The file stopped before its declared size. Its packed remainder is
-		// drained by now, so the stream sits at a real block boundary and
-		// traversal *could* continue -- but a caller cannot tell this failure
-		// apart from "the archive is over", and the permissive guess silently
-		// truncates whatever it is assembling. Reporting is the reading that
-		// cannot lose data, until the error contract can carry the difference.
-		verdict = reported
-		if verdict == nil {
-			verdict = contentErr
-		}
+		// The file stopped before its declared size. Its packed remainder has
+		// been drained by now, so the stream sits at a real block boundary and
+		// traversal can continue -- but only a caller that can tell this
+		// failure apart from "the archive is over" may act on that, or the
+		// permissive reading silently truncates whatever it is assembling.
+		// FileError is what carries the difference; it is applied below, once
+		// the drain is known to have succeeded.
+		verdict = outcome
 	case reported != nil:
 		// Already delivered to the caller once; saying it again would make one
 		// corrupt file an archive nobody can read past.
 		verdict = nil
 	default:
-		verdict = contentErr
+		// reported is nil here, so outcome is contentErr.
+		verdict = outcome
 	}
 
 	switch {
 	case packedErr == nil:
-		return verdict
+		// settled alone, not short && settled. A file that reached its
+		// declared size and then failed its checksum is just as continuable --
+		// the cursor is drained and the stream is on the next header -- and
+		// requiring short left the commonest damage signal in a Usenet
+		// download reported as an error indistinguishable from end-of-archive.
+		return damaged, markContinuable(failed, verdict, settled)
 	case verdict == nil:
 		// Returned unwrapped. errors.Join builds a wrapper even around a
 		// single error, which costs an allocation and defeats the identity
 		// comparisons callers use to recognise a sentinel.
-		return packedErr
+		return damaged, packedErr
 	default:
 		// Both are meaningful and neither subsumes the other: the verdict says
 		// what happened to the file, the drain error says the stream is no
 		// longer positioned at a block boundary. Returning either alone loses
 		// something the caller needs.
-		return errors.Join(verdict, packedErr)
+		return damaged, errors.Join(verdict, packedErr)
 	}
 }
 
