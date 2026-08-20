@@ -57,6 +57,13 @@ func rar5FileEntry(name string, unpackedSize uint64, declaredCRC uint32, payload
 // test can set FileCompSolid (0x40) or a method without rebuilding the block.
 // Method lives in bits 7-9 of the same vint, so 0 is store either way.
 func rar5EntryComp(name string, compFlags uint64, unpackedSize uint64, declaredCRC uint32, payload []byte) []byte {
+	return rar5EntryFlags(name, compFlags, HeaderFlagHasData, unpackedSize, declaredCRC, payload)
+}
+
+// rar5EntryFlags is rar5EntryComp with the BLOCK header flags exposed as well,
+// so a test can mark an entry as continuing into the next volume
+// (HeaderFlagDataNotLast) without restating the header layout.
+func rar5EntryFlags(name string, compFlags uint64, blockFlags uint64, unpackedSize uint64, declaredCRC uint32, payload []byte) []byte {
 	var fp bytes.Buffer
 	fp.Write(EncodeVint(FileFlagHasCRC32))
 	fp.Write(EncodeVint(unpackedSize))
@@ -71,7 +78,7 @@ func rar5EntryComp(name string, compFlags uint64, unpackedSize uint64, declaredC
 
 	var hp bytes.Buffer
 	hp.Write(EncodeVint(HeaderTypeFile))
-	hp.Write(EncodeVint(HeaderFlagHasData))
+	hp.Write(EncodeVint(blockFlags))
 	hp.Write(EncodeVint(uint64(len(payload))))
 	hp.Write(fp.Bytes())
 

@@ -367,13 +367,25 @@ func (fr *fileReader) endFile(packed *packedCursor) (damaged bool, err error) {
 	if outcome == nil {
 		outcome = contentErr
 	}
-	// damaged asks about the window, not about the caller. A file that ended
-	// short left bytes unwritten; one that failed its CRC32 wrote the wrong
-	// ones. Either way a solid successor back-references history that is not
-	// what the archive assumed, so both have to count -- keying this on short
-	// alone let a CRC-mismatched predecessor admit a solid file that then
-	// decoded against known-bad bytes.
-	damaged = short || errors.Is(outcome, ErrCRCMismatch)
+	// damaged asks about the window, not about the caller: did this file leave
+	// the history a solid successor back-references in the state the archive
+	// assumed?
+	//
+	// Any non-clean outcome says no. Ending short leaves bytes unwritten; a
+	// CRC32 mismatch means the bytes written are wrong; and a decoder that
+	// fails on the final block returns those bytes alongside the error, so the
+	// budget is satisfied while the content is whatever it managed before
+	// giving up -- that last case reaches finish(err) without verifyChecksum
+	// ever running, so it is neither short nor a CRC mismatch.
+	//
+	// ErrChecksumUnsupported is the one exclusion, and it is not an exception
+	// to the rule but an instance of it: that file decoded normally and this
+	// library merely cannot check its digest. Counting it would refuse the
+	// solid successors of every encrypted file recording a MAC, all of which
+	// decode correctly.
+	damaged = short || (outcome != nil &&
+		!errors.Is(outcome, io.EOF) &&
+		!errors.Is(outcome, ErrChecksumUnsupported))
 
 	var verdict error
 	switch {
@@ -385,16 +397,14 @@ func (fr *fileReader) endFile(packed *packedCursor) (damaged bool, err error) {
 		// permissive reading silently truncates whatever it is assembling.
 		// FileError is what carries the difference; it is applied below, once
 		// the drain is known to have succeeded.
-		verdict = reported
-		if verdict == nil {
-			verdict = contentErr
-		}
+		verdict = outcome
 	case reported != nil:
 		// Already delivered to the caller once; saying it again would make one
 		// corrupt file an archive nobody can read past.
 		verdict = nil
 	default:
-		verdict = contentErr
+		// reported is nil here, so outcome is contentErr.
+		verdict = outcome
 	}
 
 	switch {

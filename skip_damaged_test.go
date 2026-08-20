@@ -449,27 +449,8 @@ func TestSkipDamagedFile_AbandonedCursorIsNotContinuable(t *testing.T) {
 // rar5SplitEntry emits a file block marked as continuing into the next volume,
 // so reading it drives the multi-volume advance path.
 func rar5SplitEntry(name string, unpackedSize uint64, payload []byte) []byte {
-	var fp bytes.Buffer
-	fp.Write(EncodeVint(FileFlagHasCRC32))
-	fp.Write(EncodeVint(unpackedSize))
-	fp.Write(EncodeVint(0))
-	fp.Write([]byte{0, 0, 0, 0})
-	fp.Write(EncodeVint(0))
-	fp.Write(EncodeVint(1))
-	fp.Write(EncodeVint(uint64(len(name))))
-	fp.WriteString(name)
-
-	var hp bytes.Buffer
-	hp.Write(EncodeVint(HeaderTypeFile))
-	// HasData + DataNotLast: the payload continues in the next volume.
-	hp.Write(EncodeVint(HeaderFlagHasData | HeaderFlagDataNotLast))
-	hp.Write(EncodeVint(uint64(len(payload))))
-	hp.Write(fp.Bytes())
-
-	var out bytes.Buffer
-	out.Write(rar5Block(hp.Bytes()))
-	out.Write(payload)
-	return out.Bytes()
+	return rar5EntryFlags(name, 0, HeaderFlagHasData|HeaderFlagDataNotLast,
+		unpackedSize, 0, payload)
 }
 
 // TestSkipDamagedFile_SolidRefusalDropsPayload pins that ErrSolidStreamBroken
@@ -699,5 +680,74 @@ func TestSkipDamagedFile_RefusedFileDamagesWindow(t *testing.T) {
 		t.Fatalf("a solid file after a refused one returned %v; want "+
 			"ErrSolidStreamBroken. The refused file contributed nothing to "+
 			"the window it back-references", err)
+	}
+}
+
+// errWithFinalBytes delivers its data and reports err alongside the last of
+// it, the shape a decoder takes when it fails on a file's final block: the
+// byte budget is satisfied, and the bytes are still suspect.
+type errWithFinalBytes struct {
+	data []byte
+	off  int
+	err  error
+}
+
+func (e *errWithFinalBytes) Read(p []byte) (int, error) {
+	if e.off >= len(e.data) {
+		return 0, e.err
+	}
+	n := copy(p, e.data[e.off:])
+	e.off += n
+	if e.off >= len(e.data) {
+		return n, e.err
+	}
+	return n, nil
+}
+
+// TestEndFile_DamageOnNonCleanOutcome covers a file that met its declared size
+// and still failed.
+//
+// A decoder that errors on the final block -- an invalid Huffman code, a
+// corrupt bitstream, bad AES padding -- returns the last bytes together with
+// the error, so remaining reaches zero and Read takes finish(err) without ever
+// running verifyChecksum. The file is neither short nor CRC-mismatched, but
+// the bytes it put in the window are whatever the decoder produced before it
+// gave up, and a solid successor back-references them.
+//
+// ErrChecksumUnsupported is deliberately NOT damage: that file decoded
+// normally and the library simply cannot check its digest. Treating every
+// non-nil outcome as damage would refuse the solid successors of every
+// encrypted file recording a MAC, which decode correctly.
+func TestEndFile_DamageOnNonCleanOutcome(t *testing.T) {
+	content := []byte("bytes the decoder produced before it gave up")
+
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"decode error on the final block", errors.New("invalid huffman code"), true},
+		{"unverifiable digest", ErrChecksumUnsupported, false},
+		{"clean completion", nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var fr fileReader
+			fh := &FileHeader{Name: "x.bin", UnpackedSize: int64(len(content))}
+			fr.begin(fh, &errWithFinalBytes{data: content, err: tc.err}, true)
+
+			// Drives Read to the terminal switch with remaining == 0.
+			_, _ = io.Copy(io.Discard, &fr)
+			if fr.remaining != 0 {
+				t.Fatalf("remaining = %d; this case must reach the byte budget, "+
+					"or it is testing the short path instead", fr.remaining)
+			}
+
+			var cursor packedCursor
+			cursor.repoint(bytes.NewReader(nil), 0)
+			damaged, _ := fr.endFile(&cursor)
+			if damaged != tc.want {
+				t.Errorf("damaged = %v, want %v for outcome %v", damaged, tc.want, tc.err)
+			}
+		})
 	}
 }
