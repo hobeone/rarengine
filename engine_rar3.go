@@ -89,11 +89,8 @@ func (re *rar3Engine) processHeader(h *BlockHeader) (*FileHeader, bool, error) {
 			return nil, false, re.sd.refuse(fh.PackedSize, ErrRarBombDetected)
 		}
 
-		// Refused like any other rejected file, so the payload is dropped and
-		// the traversal stays able to reach whatever follows -- a later
-		// non-solid file is still perfectly readable.
 		if err := re.sd.admitFile(fh); err != nil {
-			return nil, false, re.sd.refuse(fh.PackedSize, err)
+			return nil, false, err
 		}
 
 		re.sd.win.Reset(fh.Solid)

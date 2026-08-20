@@ -51,7 +51,12 @@ var ErrSolidStreamBroken = errors.New("rarengine: solid file depends on history 
 // is unreadable, the rest are fine" from "the archive is over", and the only
 // safe reading was to stop and lose every later file.
 //
-// Header is the file that failed, captured before its state was cleared.
+// Header identifies the file that failed. It is the part header in force when
+// the failure was decided, which for a file spanning volumes is the LAST
+// part's, not the one Next originally returned: Name matches, but FirstBlock
+// is false and PackedSize describes only that part. Use it to name the file,
+// not to describe the whole entry.
+//
 // Unwrap exposes the underlying cause, so errors.Is(err, ErrTruncatedFile)
 // and the other sentinels keep working.
 type FileError struct {
@@ -64,6 +69,21 @@ func (e *FileError) Error() string { return e.Err.Error() }
 // Unwrap keeps errors.Is/As working through the wrapper, so a caller that
 // does not care about the distinction behaves exactly as before.
 func (e *FileError) Unwrap() error { return e.Err }
+
+// markContinuable is the ONLY place a FileError is constructed.
+//
+// The type's promise -- that the traversal may resume -- is worth exactly what
+// the check behind it is worth, so that check lives in one named function
+// whose signature demands the proof. A second construction site that forgot to
+// establish canContinue would hand callers a licence to read on from an
+// offset nothing has verified, which is how a block header gets parsed out of
+// a previous file's payload.
+func markContinuable(fh *FileHeader, cause error, canContinue bool) error {
+	if cause == nil || !canContinue {
+		return cause
+	}
+	return &FileError{Header: fh, Err: cause}
+}
 
 // fileReader owns every piece of state that belongs to one file being
 // decoded: the reader chain it comes from, the header in force, how many
@@ -309,28 +329,23 @@ func (fr *fileReader) truncated() error {
 // engine repoints it on every volume advance: read at the point of use it is
 // current by construction, where a copy kept here would describe whichever
 // volume the file started on.
-func (fr *fileReader) endFile(packed *packedCursor) error {
+func (fr *fileReader) endFile(packed *packedCursor) (short bool, err error) {
 	if fr.src == nil {
-		return nil
+		return false, nil
 	}
 	reported := fr.done
 	_, contentErr := io.Copy(io.Discard, fr)
 	// Captured before clear: whether the file delivered everything it
 	// promised decides whether traversal can continue, and which file to name
 	// when reporting that it did not.
-	short := fr.remaining > 0
+	short = fr.remaining > 0
 	failed := fr.header
 	// Drained on every terminal path, not only the failing ones. A file that
 	// completed perfectly can still leave packed bytes behind, and that is
 	// exactly the case an archive uses to fabricate the next entry.
 	packedErr := packed.drain()
-	// Whether the remainder was actually consumed, read before invalidate
-	// clears the count. This is the mechanical test for "the stream is at the
-	// next block": a full drain means every promised byte was accounted for.
-	// A short drain means the payload ran out early -- truncated media, or a
-	// source that failed -- and the traversal is somewhere the block structure
-	// does not describe.
-	fullyDrained := packed.owed() == 0
+	// Read before invalidate, which would make every cursor look settled.
+	settled := packed.settled()
 	// The cursor described this file. Dropping the count here keeps a short
 	// drain -- a truncated volume, where the promised bytes were never on the
 	// media -- from leaving a stale count for whatever runs next.
@@ -361,30 +376,18 @@ func (fr *fileReader) endFile(packed *packedCursor) error {
 
 	switch {
 	case packedErr == nil:
-		if short && verdict != nil && fullyDrained {
-			// Continuable only when the remainder was fully consumed, which is
-			// what puts the stream on the next block header. Anything less --
-			// a drain that errored, or one that ran out of payload early --
-			// leaves the offset undescribed by the block structure, and
-			// inviting the caller to read on from there is how a header gets
-			// parsed out of a previous file's payload.
-			//
-			// This costs nothing real in the cases it excludes: a volume that
-			// ran out has no further files to reach on it anyway.
-			return &FileError{Header: failed, Err: verdict}
-		}
-		return verdict
+		return short, markContinuable(failed, verdict, short && settled)
 	case verdict == nil:
 		// Returned unwrapped. errors.Join builds a wrapper even around a
 		// single error, which costs an allocation and defeats the identity
 		// comparisons callers use to recognise a sentinel.
-		return packedErr
+		return short, packedErr
 	default:
 		// Both are meaningful and neither subsumes the other: the verdict says
 		// what happened to the file, the drain error says the stream is no
 		// longer positioned at a block boundary. Returning either alone loses
 		// something the caller needs.
-		return errors.Join(verdict, packedErr)
+		return short, errors.Join(verdict, packedErr)
 	}
 }
 

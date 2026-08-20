@@ -95,19 +95,14 @@ type StreamDecompressor struct {
 // error at each call site would put the same rule in two engines and let them
 // drift, which is how the refusal paths diverged before.
 func (sd *StreamDecompressor) finishCurrentFile(packed *packedCursor) error {
-	err := sd.file.endFile(packed)
-	if err == nil {
-		return nil
-	}
-	// A FileError is precisely the case where a file ended without producing
-	// what it declared. Matching on the type rather than on a bare bool keeps
-	// this in step with whatever endFile decides is continuable.
-	//
-	// AsType rather than As: As takes its target as an any, and boxing the
-	// pointer allocates on every call. This runs once per file, so the
-	// non-generic form put an allocation on the success path of Next -- which
-	// the nil check above also now skips entirely.
-	if _, ok := errors.AsType[*FileError](err); ok {
+	short, err := sd.file.endFile(packed)
+	// Keyed on short, NOT on whether a FileError came back. The two answer
+	// different questions: FileError asks "may the caller resume?", short asks
+	// "is the window intact?". Deriving one from the other left every
+	// non-continuable short file -- a truncated volume, a failed drain --
+	// recorded as undamaged, so a solid file on the next volume decoded
+	// against history its predecessor never wrote.
+	if short {
 		sd.damaged = true
 	}
 	return err
@@ -126,7 +121,11 @@ func (sd *StreamDecompressor) admitFile(fh *FileHeader) error {
 		return nil
 	}
 	if sd.damaged {
-		return ErrSolidStreamBroken
+		// Refused here rather than at each engine's call site. The refusal and
+		// the admission decision are one rule, and this codebase's two engines
+		// have repeatedly diverged where a rule was written down twice --
+		// which is the same reason the damage state has a single writer.
+		return sd.refuse(fh.PackedSize, ErrSolidStreamBroken)
 	}
 	return nil
 }
@@ -146,6 +145,16 @@ func (sd *StreamDecompressor) admitFile(fh *FileHeader) error {
 // is both an allocation and a value the previous holder cannot see.
 type packedCursor struct {
 	lr io.LimitedReader
+	// abandoned records that the count reached zero by being dropped rather
+	// than by being read.
+	//
+	// Both outcomes leave owed() == 0, and they mean opposite things about
+	// where the stream is: a drained cursor leaves it on the next block
+	// header, an abandoned one leaves it wherever the volume advance gave up.
+	// Anything deciding whether the traversal can safely resume has to tell
+	// them apart, so the distinction lives here rather than being inferred
+	// from a count that cannot carry it.
+	abandoned bool
 }
 
 // repoint aims the cursor at n bytes of r, replacing whatever it described
@@ -153,6 +162,7 @@ type packedCursor struct {
 // count always belongs to the volume actually being read.
 func (c *packedCursor) repoint(r io.Reader, n int64) {
 	c.lr.R, c.lr.N = r, n
+	c.abandoned = false
 }
 
 // invalidate forgets the outstanding count without reading anything.
@@ -163,6 +173,7 @@ func (c *packedCursor) repoint(r io.Reader, n int64) {
 // was told would not happen, on a handle it may already have recycled.
 func (c *packedCursor) invalidate() {
 	c.lr.N = 0
+	c.abandoned = true
 }
 
 // reader exposes the cursor as the payload source for a decode chain.
@@ -173,6 +184,19 @@ func (c *packedCursor) reader() io.Reader {
 // owed reports how many packed bytes remain unread.
 func (c *packedCursor) owed() int64 {
 	return c.lr.N
+}
+
+// settled reports that every byte this cursor promised was actually read, and
+// so that the stream is standing on the next block header.
+//
+// It is deliberately not owed() == 0. invalidate zeroes the count without
+// reading, and the volume-advance path invalidates before it discovers whether
+// a next volume exists -- so a failure there (a header that fails its CRC, a
+// refused header, a channel that closed) leaves the count at zero with the
+// stream parked wherever the failed read stopped. Treating that as drained is
+// what let a crafted archive choose the offset a later header was parsed from.
+func (c *packedCursor) settled() bool {
+	return c.lr.N == 0 && !c.abandoned
 }
 
 // drain discards whatever the cursor still owes, so the next block header is
