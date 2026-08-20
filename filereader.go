@@ -297,8 +297,14 @@ func (fr *fileReader) verifyChecksum() error {
 	//
 	// The gate is UseMac and not Encrypted: encryption alone does not make a
 	// digest uncheckable, RAR says so by setting this flag. Gating on
-	// Encrypted would also hand RAR3 -- which never sets UseMac and never
-	// decrypts -- a header bit that switches CRC verification off.
+	// Encrypted would also hand RAR3 -- which never sets UseMac -- a header
+	// bit that switches CRC verification off.
+	//
+	// An encrypted RAR3 member no longer reaches this point at all: it is
+	// refused at its header, so the bit cannot reach verification by any
+	// route. The gate stays keyed on UseMac regardless, because what makes
+	// Encrypted the wrong gate is that it is the archive's claim about
+	// itself rather than something this code enforces.
 	if fr.accumulate && fr.header.UseMac {
 		return fmt.Errorf("%w: file %q", ErrChecksumUnsupported, fr.header.Name)
 	}

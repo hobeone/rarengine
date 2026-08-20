@@ -53,6 +53,18 @@ func (re *rar3Engine) Next() (*FileHeader, error) {
 func (re *rar3Engine) processHeader(h *BlockHeader) (*FileHeader, bool, error) {
 	switch h.Type {
 	case 0x73: // Archive Header
+		if h.Flags&mhdPassword > 0 {
+			// Every block header after this one is ciphertext, so there is no
+			// member to name and nothing to continue to -- this ends
+			// traversal rather than producing a FileError.
+			//
+			// Left unchecked it ends traversal anyway, but only because the
+			// encrypted bytes are unlikely to form a valid header. RAR3's
+			// header checksum is a 16-bit truncation of CRC32, so each block
+			// has roughly a 1-in-65536 chance of passing regardless, which
+			// would surface a wholly fabricated file entry.
+			return nil, false, ErrRAR3EncryptionUnsupported
+		}
 		return nil, true, nil
 
 	case 0x74: // File Header
@@ -75,6 +87,25 @@ func (re *rar3Engine) processHeader(h *BlockHeader) (*FileHeader, bool, error) {
 				return nil, false, err
 			}
 			return nil, true, nil
+		}
+
+		if rar3ClaimsEncryption(fh) {
+			// This library implements no RAR3 key derivation, so the content
+			// cannot be produced whatever the caller supplies -- refused
+			// rather than decrypted, and unconditionally rather than only
+			// when no password was given.
+			//
+			// Refused here rather than deferred to a reader the way
+			// engine_rar5.go handles its own encrypted files. The same
+			// condition has to be caught again on every volume advance, where
+			// the file is already begun and no reader is left to substitute,
+			// so refusing at the header keeps one shape for both sites.
+			//
+			// Ahead of the rar-bomb check on purpose: both refuse through the
+			// same path with the same payload discard, so a member that is
+			// both merely reports the cause found first, and an encrypted
+			// member is never decompressed either way.
+			return nil, false, re.sd.refuseFile(fh, ErrRAR3EncryptionUnsupported)
 		}
 
 		if fh.UnpackedSize > 1024*1024 && fh.UnpackedSize > 1000*fh.PackedSize {
@@ -119,12 +150,48 @@ func (re *rar3Engine) processHeader(h *BlockHeader) (*FileHeader, bool, error) {
 func (re *rar3Engine) processVolumePayloadHeader(h *BlockHeader) (io.Reader, bool, error) {
 	switch h.Type {
 	case 0x73: // Archive Header
+		if h.Flags&mhdPassword > 0 {
+			// Checked again here for the same reason the file-header flag is:
+			// a volume carries its own main header, and one that claims
+			// header encryption when the opening volume did not is a claim
+			// this engine would otherwise never look at. Ends traversal
+			// rather than refusing a member -- the following headers are
+			// ciphertext, so there is no member to name.
+			return nil, false, ErrRAR3EncryptionUnsupported
+		}
 		return nil, true, nil
 	case 0x74: // File Header
 		fh, err := ParseRAR3FileHeader(h)
 		if err != nil {
 			return nil, false, re.sd.refuse(h.DataSize, err)
 		}
+		if rar3ClaimsEncryption(fh) {
+			// The first-block guard cannot see this: a file's header is
+			// parsed again on every volume advance, and this path builds no
+			// reader -- it repoints the packed cursor and feeds the bytes
+			// into the chain the first block already established. A member
+			// whose first block was plain and whose continuation claims
+			// encryption therefore had this volume's bytes delivered verbatim
+			// as content, with a nil error and a header reporting
+			// Encrypted false.
+			//
+			// refuse, not refuseFile. Not because refuseFile could not settle
+			// its drain here -- it drives sd.discard itself and would settle
+			// fine, which is exactly what makes the wrong choice easy to
+			// make. The reason is that a file is still active at this point:
+			// an error built here is laundered through endFile's verdict and
+			// reaches the caller as the *FileError refuseFile constructed,
+			// promising the stream is standing on the next block header. It
+			// is not. nextVolumePayload abandoned re.packed on the advance,
+			// so nothing backs that promise, and the caller would resume
+			// traversal against an offset chosen by the archive.
+			//
+			// fh.PackedSize rather than h.DataSize, for the same reason the
+			// rar-bomb site gives: the header parsed cleanly, so a large
+			// file's high half is known.
+			return nil, false, re.sd.refuse(fh.PackedSize, ErrRAR3EncryptionUnsupported)
+		}
+
 		re.sd.file.advanceVolume(fh)
 		// Repointed rather than replaced by a fresh limiter: teardown drains
 		// this cursor, and a limiter it cannot see would leave the count

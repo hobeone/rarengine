@@ -36,6 +36,31 @@ var (
 	// given" the same as "wrong password" (e.g. to prompt for one) can
 	// check for either with errors.Is.
 	ErrPasswordRequired = errors.New("rarengine: password required for encrypted file")
+
+	// ErrRAR3EncryptionUnsupported reports a RAR3 member, or a whole RAR3
+	// archive, that is encrypted. This library implements no RAR3 key
+	// derivation -- RAR3 uses a SHA-1 based scheme unrelated to RAR5's
+	// PBKDF2-HMAC-SHA256 -- so the content cannot be produced at all.
+	//
+	// Distinct from ErrPasswordRequired, and deliberately not that sentinel:
+	// SetPassword configures RAR5 decryption only, so no password can turn
+	// this into a readable member and reporting "password required" would
+	// invite a retry that cannot succeed. It is likewise not ErrCRCMismatch,
+	// which is what an unfixed engine reported once it had already handed the
+	// caller the undecrypted bytes.
+	//
+	// Reported as a *FileError when a member is refused at admission, naming
+	// it so traversal continues and the rest of the archive stays reachable.
+	//
+	// Returned bare in the other two cases, both of which end traversal.
+	// Archive-level header encryption ends it because the headers that would
+	// name the remaining members are themselves ciphertext. A member whose
+	// continuation claims encryption -- its first block did not -- ends it
+	// because the packed cursor is invalidated on the volume advance before
+	// this is detected, so no continuation promise can honestly be made even
+	// though that header parsed. A readable header is therefore not on its
+	// own a reason to expect a *FileError here.
+	ErrRAR3EncryptionUnsupported = errors.New("rarengine: RAR3 encryption is not supported")
 )
 
 type ArchiveVersion int
@@ -298,7 +323,11 @@ func (sd *StreamDecompressor) refuse(n int64, cause error) error {
 	return cause
 }
 
-// SetPassword configures the decryption password for encrypted RAR archives.
+// SetPassword configures the decryption password for encrypted RAR5 archives.
+//
+// RAR5 only. This library implements no RAR3 key derivation, so an encrypted
+// RAR3 member is refused with ErrRAR3EncryptionUnsupported whether or not a
+// password was set here.
 func (sd *StreamDecompressor) SetPassword(password string) {
 	sd.password = password
 }
@@ -576,6 +605,18 @@ func (c *cbcDecryptReader) Read(p []byte) (int, error) {
 	return n, nil
 }
 
+// pbkdf2HmacSha256 runs RAR5's key derivation, which reads three values off
+// one continuous PBKDF2 chain rather than three separate derivations: the
+// first iter iterations produce the AES key, the next 16 produce
+// HashKeyValue, and 16 after that produce PswCheckValue.
+//
+// The two 16-iteration loops below are therefore identical by coincidence of
+// count, not duplication -- the boundary between them is where HashKeyValue
+// falls. This function discards it, because HashKeyValue is only needed for
+// the key-derived MAC that UseMac selects, which this library refuses with
+// ErrChecksumUnsupported rather than checking. Collapsing the two into a
+// single 32-iteration loop computes the same bytes and erases the only place
+// that value could be taken from.
 func pbkdf2HmacSha256(password, salt []byte, iter int) ([]byte, []byte) {
 	mac := hmac.New(sha256.New, password)
 	var block [4]byte

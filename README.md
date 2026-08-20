@@ -12,7 +12,7 @@ Designed specifically for high-throughput Usenet downloaders (like `gonzbd`), `r
 - **Automatic Volume Unpacker**: Unpacks directory-based multi-volume archives automatically via `UnpackDir`, discovering and ordering `.partX.rar` files dynamically.
 - **Process In-Process**: Runs entirely within Go—no slow C++ `unrar` binary subprocess forks or shell pipeline parsing.
 - **Spec Conformance**: Fully audited and tested for strict conformance to the official RAR 5.0 technote specifications.
-- **Differential Oracle Tested**: Verified byte-for-byte against the system-installed canonical `unrar` binary for standard, compressed, solid, and password-encrypted archives.
+- **Differential Oracle Tested**: Verified byte-for-byte against the system-installed canonical `unrar` binary for standard, compressed, solid, and password-encrypted RAR5 archives.
 - **Robust Security Boundaries**:
   - **Path Sanitization**: Dynamic, OS-independent path sanitization neutralizes directory traversal exploits (strips relative upward `..` and absolute paths safely).
   - **Rar-Bomb Protection**: Aborts decompression instantly when file expansion ratios exceed `1000x` for files larger than `1MB`.
@@ -58,7 +58,7 @@ func main() {
 
 	// 2. Initialize the decompressor
 	sd := rarengine.NewStreamDecompressor(volumes)
-	sd.SetPassword("my-safe-password") // Configure if archive is encrypted
+	sd.SetPassword("my-safe-password") // Configure if archive is encrypted (RAR5 only)
 
 	// 3. Process files sequentially
 	for {
@@ -113,6 +113,8 @@ A member that cannot be delivered — it ended short, failed its checksum, tripp
 
 Two cases still end the traversal, each returning the result accumulated so far alongside the error: a solid archive, whose members back-reference their predecessors' decoded bytes and so cannot be resumed past damage (`ErrSolidStreamBroken`), and a member whose header does not parse, which is refused before there is a header to name it with.
 
+Encryption is supported for RAR5 only. An encrypted RAR3 member is refused with `ErrRAR3EncryptionUnsupported` rather than decoded, because this library implements no RAR3 key derivation and so cannot produce the content whatever password is supplied — `SetPassword` and `UnpackOptions.Password` configure RAR5 decryption alone. The refusal names the member, so it is reported in `Damaged` and the rest of the archive stays readable. Two variants end the traversal instead: an archive whose block headers are themselves encrypted, since the headers that would name the remaining members cannot be read, and a member whose *continuation* claims encryption when its first block did not, since the stream is no longer known to be standing on a block header.
+
 ```go
 package main
 
@@ -131,7 +133,7 @@ func main() {
 	outputDir := "./extracted"
 
 	opts := rarengine.UnpackOptions{
-		Password:       "my-secret-password",             // If password-encrypted
+		Password:       "my-secret-password",             // If password-encrypted (RAR5 only)
 		Logger:         slog.New(slog.NewTextHandler(os.Stdout, nil)), // Enable internal trace logging
 		OneFolder:      false,                            // Retain internal folder structures
 		OverwriteFiles: true,                             // Overwrite existing files in output directory

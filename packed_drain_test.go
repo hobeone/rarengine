@@ -97,13 +97,24 @@ func rar3FileEntry(name string, unpackedSize uint32, declaredCRC uint32, payload
 // rar3StoreEntry is rar3FileEntry with the extra header flags exposed, so a
 // test can vary one bit and hold everything else fixed.
 //
-// Setting LHD_PASSWORD (0x0400) appends the 8 salt bytes that follow the name,
-// because ParseRAR3FileHeader reads them there and a header claiming
-// encryption without them is rejected as corrupt rather than exercising
-// anything.
+// Setting LHD_SALT (0x0400) appends the 8 salt bytes that follow the name,
+// because ParseRAR3FileHeader reads them there and a header claiming a salt
+// without them is rejected as corrupt rather than exercising anything.
+// LHD_PASSWORD is 0x0004 and carries no payload of its own, so it can be set
+// on its own -- which is the case a guard keyed on the salt bit alone misses.
 func rar3StoreEntry(name string, extraFlags uint16, unpackedSize uint32, declaredCRC uint32, payload []byte) []byte {
+	return rar3MethodEntry(name, extraFlags, 0x30, unpackedSize, declaredCRC, payload)
+}
+
+// rar3MethodEntry is rar3StoreEntry with the compression method byte exposed.
+//
+// A refusal decided at header time never reaches a decoder, so a test for one
+// can hand this garbage bytes under a compressed method and still prove the
+// guard fired before the method was consulted -- which is the whole point of
+// covering a method other than store.
+func rar3MethodEntry(name string, extraFlags uint16, method byte, unpackedSize uint32, declaredCRC uint32, payload []byte) []byte {
 	headSize := 32 + len(name)
-	if extraFlags&0x0400 > 0 {
+	if extraFlags&lhdSalt > 0 {
 		headSize += 8
 	}
 	h := make([]byte, headSize)
@@ -117,7 +128,7 @@ func rar3StoreEntry(name string, extraFlags uint16, unpackedSize uint32, declare
 	binary.LittleEndian.PutUint32(h[16:20], declaredCRC)
 	binary.LittleEndian.PutUint32(h[20:24], 0)
 	h[24] = 20
-	h[25] = 0x30 // store
+	h[25] = method
 	binary.LittleEndian.PutUint16(h[26:28], uint16(len(name)))
 	binary.LittleEndian.PutUint32(h[28:32], 0o644)
 	copy(h[32:], name)
@@ -162,8 +173,15 @@ func rar3LargeFileEntry(name string, unpLow, highPack, highUnp, declaredCRC uint
 }
 
 func rar3ArchiveHeader() []byte {
+	return rar3ArchiveHeaderFlags(0)
+}
+
+// rar3ArchiveHeaderFlags is rar3ArchiveHeader with the main header's flags
+// exposed, so a test can set MHD_PASSWORD (0x0080) and hold the rest fixed.
+func rar3ArchiveHeaderFlags(flags uint16) []byte {
 	m := make([]byte, 13)
 	m[2] = 0x73
+	binary.LittleEndian.PutUint16(m[3:5], flags)
 	binary.LittleEndian.PutUint16(m[5:7], 13)
 	binary.LittleEndian.PutUint16(m[0:2], uint16(crc32.ChecksumIEEE(m[2:])))
 	var out bytes.Buffer

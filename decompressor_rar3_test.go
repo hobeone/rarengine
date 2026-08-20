@@ -136,11 +136,11 @@ func makeRAR3CustomArchive(filename string, content, unpacked []byte, flags uint
 
 	// 3. File Header
 	payloadSize := 21
-	if flags&0x0100 > 0 {
+	if flags&lhdLarge > 0 {
 		payloadSize += 8
 	}
 	payloadSize += len(filename)
-	if flags&0x0400 > 0 {
+	if flags&lhdSalt > 0 {
 		payloadSize += 8
 	}
 
@@ -162,7 +162,7 @@ func makeRAR3CustomArchive(filename string, content, unpacked []byte, flags uint
 	binary.LittleEndian.PutUint32(fileHead[28:32], 0o644)
 
 	offset := 32
-	if flags&0x0100 > 0 {
+	if flags&lhdLarge > 0 {
 		binary.LittleEndian.PutUint32(fileHead[offset:offset+4], highPack)
 		binary.LittleEndian.PutUint32(fileHead[offset+4:offset+8], highUnp)
 		offset += 8
@@ -171,7 +171,7 @@ func makeRAR3CustomArchive(filename string, content, unpacked []byte, flags uint
 	copy(fileHead[offset:offset+len(filename)], filename)
 	offset += len(filename)
 
-	if flags&0x0400 > 0 {
+	if flags&lhdSalt > 0 {
 		copy(fileHead[offset:offset+8], salt)
 	}
 
@@ -188,7 +188,7 @@ func makeRAR3CustomArchive(filename string, content, unpacked []byte, flags uint
 func TestStreamDecompressor_RAR3_HighSize(t *testing.T) {
 	content := []byte("hello rar3 high size")
 	filename := "hello_rar3_high.txt"
-	archiveData := makeRAR3CustomArchive(filename, content, content, 0x0100, 2, 3, nil, 0x30)
+	archiveData := makeRAR3CustomArchive(filename, content, content, lhdLarge, 2, 3, nil, 0x30)
 
 	volumes := make(chan io.ReadCloser, 1)
 	volumes <- &mockReadCloser{bytes.NewReader(archiveData)}
@@ -211,27 +211,42 @@ func TestStreamDecompressor_RAR3_HighSize(t *testing.T) {
 	}
 }
 
+// TestStreamDecompressor_RAR3_Salt covers the salt bit's two effects: the
+// eight bytes following the name are parsed, and the member is refused,
+// because a salt is a claim of encryption this library cannot honour.
+//
+// It asserts Encrypted is false, which is the point rather than an aside: that
+// field tracks LHD_PASSWORD (0x0004), not the salt bit set here, so a salt on
+// its own must not set it. An earlier version of this test asserted the
+// opposite, which is how the two came to be conflated in the parser.
 func TestStreamDecompressor_RAR3_Salt(t *testing.T) {
 	content := []byte("hello rar3 salt")
 	filename := "hello_rar3_salt.txt"
 	salt := []byte{1, 2, 3, 4, 5, 6, 7, 8}
-	archiveData := makeRAR3CustomArchive(filename, content, content, 0x0400, 0, 0, salt, 0x30)
+	archiveData := makeRAR3CustomArchive(filename, content, content, lhdSalt, 0, 0, salt, 0x30)
 
 	volumes := make(chan io.ReadCloser, 1)
 	volumes <- &mockReadCloser{bytes.NewReader(archiveData)}
 	close(volumes)
 
 	sd := NewStreamDecompressor(volumes)
-	fh, err := sd.Next()
-	if err != nil {
-		t.Fatalf("Next() failed: %v", err)
+	_, err := sd.Next()
+	if !errors.Is(err, ErrRAR3EncryptionUnsupported) {
+		t.Fatalf("Next() = %v; want ErrRAR3EncryptionUnsupported", err)
 	}
 
-	if !bytes.Equal(fh.Salt, salt) {
-		t.Errorf("expected salt %v, got %v", salt, fh.Salt)
+	// The refusal names the member, so the parsed header is still reachable
+	// and the salt it carries can be checked.
+	fe, ok := errors.AsType[*FileError](err)
+	if !ok {
+		t.Fatalf("Next() = %v (%T); want a *FileError", err, err)
 	}
-	if !fh.Encrypted {
-		t.Errorf("expected Encrypted to be true since salt is present")
+	if !bytes.Equal(fe.Header.Salt, salt) {
+		t.Errorf("salt = %v, want %v", fe.Header.Salt, salt)
+	}
+	if fe.Header.Encrypted {
+		t.Error("Encrypted set on a member carrying the salt bit but not " +
+			"LHD_PASSWORD; that field must track the password bit alone")
 	}
 }
 
