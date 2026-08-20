@@ -136,11 +136,11 @@ func makeRAR3CustomArchive(filename string, content, unpacked []byte, flags uint
 
 	// 3. File Header
 	payloadSize := 21
-	if flags&0x0100 > 0 {
+	if flags&lhdLarge > 0 {
 		payloadSize += 8
 	}
 	payloadSize += len(filename)
-	if flags&0x0400 > 0 {
+	if flags&lhdSalt > 0 {
 		payloadSize += 8
 	}
 
@@ -162,7 +162,7 @@ func makeRAR3CustomArchive(filename string, content, unpacked []byte, flags uint
 	binary.LittleEndian.PutUint32(fileHead[28:32], 0o644)
 
 	offset := 32
-	if flags&0x0100 > 0 {
+	if flags&lhdLarge > 0 {
 		binary.LittleEndian.PutUint32(fileHead[offset:offset+4], highPack)
 		binary.LittleEndian.PutUint32(fileHead[offset+4:offset+8], highUnp)
 		offset += 8
@@ -171,7 +171,7 @@ func makeRAR3CustomArchive(filename string, content, unpacked []byte, flags uint
 	copy(fileHead[offset:offset+len(filename)], filename)
 	offset += len(filename)
 
-	if flags&0x0400 > 0 {
+	if flags&lhdSalt > 0 {
 		copy(fileHead[offset:offset+8], salt)
 	}
 
@@ -188,7 +188,7 @@ func makeRAR3CustomArchive(filename string, content, unpacked []byte, flags uint
 func TestStreamDecompressor_RAR3_HighSize(t *testing.T) {
 	content := []byte("hello rar3 high size")
 	filename := "hello_rar3_high.txt"
-	archiveData := makeRAR3CustomArchive(filename, content, content, 0x0100, 2, 3, nil, 0x30)
+	archiveData := makeRAR3CustomArchive(filename, content, content, lhdLarge, 2, 3, nil, 0x30)
 
 	volumes := make(chan io.ReadCloser, 1)
 	volumes <- &mockReadCloser{bytes.NewReader(archiveData)}

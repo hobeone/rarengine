@@ -605,6 +605,18 @@ func (c *cbcDecryptReader) Read(p []byte) (int, error) {
 	return n, nil
 }
 
+// pbkdf2HmacSha256 runs RAR5's key derivation, which reads three values off
+// one continuous PBKDF2 chain rather than three separate derivations: the
+// first iter iterations produce the AES key, the next 16 produce
+// HashKeyValue, and 16 after that produce PswCheckValue.
+//
+// The two 16-iteration loops below are therefore identical by coincidence of
+// count, not duplication -- the boundary between them is where HashKeyValue
+// falls. This function discards it, because HashKeyValue is only needed for
+// the key-derived MAC that UseMac selects, which this library refuses with
+// ErrChecksumUnsupported rather than checking. Collapsing the two into a
+// single 32-iteration loop computes the same bytes and erases the only place
+// that value could be taken from.
 func pbkdf2HmacSha256(password, salt []byte, iter int) ([]byte, []byte) {
 	mac := hmac.New(sha256.New, password)
 	var block [4]byte
