@@ -400,7 +400,13 @@ func TestSkipDamagedFile_AbandonedCursorIsNotContinuable(t *testing.T) {
 	pwned := []byte("ATTACKER CONTROLLED BYTES")
 	var vol2 bytes.Buffer
 	vol2.Write([]byte{0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x01, 0x00})
-	vol2.Write([]byte{0xff, 0xff, 0xff, 0xff, 0x80, 0x80, 0x02, 0x00})
+	// Sized so the parser consumes exactly these 8 bytes and stops ON the
+	// planted entry: ReadBlockHeader reads 7, decodes a 1-byte size vint of 3,
+	// then reads bufSize-3 = 1 more. The CRC then fails. An oversized vint
+	// here would make it swallow the rest of the volume instead, and the
+	// planted entry would be unreachable -- which is what an earlier version
+	// of this fixture did, leaving the assertions below unable to fire.
+	vol2.Write([]byte{0xff, 0xff, 0xff, 0xff, 0x03, 0xaa, 0xbb, 0xcc})
 	vol2.Write(goodEntry("PWNED.bin", pwned))
 	vol2.Write(rar5EndHeader())
 

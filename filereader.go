@@ -30,10 +30,11 @@ var ErrChecksumUnsupported = errors.New("rarengine: file records a checksum this
 //
 // Solid files share one LZ77 history: a file's back-references reach into the
 // bytes its predecessors wrote. A predecessor that ended short never wrote
-// some of them; one that failed its CRC32 wrote the wrong ones. Either way the
-// successor decodes against history the archive did not assume, producing
-// plausible-looking output with nothing in the format to mark it -- so both
-// count as damage. Refusing is the only answer that cannot silently hand over
+// some of them; one that failed its CRC32 wrote the wrong ones; one that was
+// refused before it decoded -- a rar bomb, an unparsable header -- wrote none
+// at all. In every case the successor decodes against history the archive did
+// not assume, producing plausible-looking output with nothing in the format to
+// mark it, so all three count as damage. Refusing is the only answer that cannot silently hand over
 // fabricated content. A non-solid file resets the window and clears the
 // condition, so a solid run beginning after the damage is unaffected.
 //

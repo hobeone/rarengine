@@ -81,12 +81,15 @@ type StreamDecompressor struct {
 	// costs no allocation, per the no-new-allocations rule in CLAUDE.md.
 	discard packedCursor
 	// damaged records that a file left the LZ77 window holding something other
-	// than what a solid successor's back-references assume -- bytes missing
-	// because it ended short, or wrong because it failed its CRC32.
+	// than what a solid successor's back-references assume: bytes missing
+	// because it ended short, wrong because it failed its CRC32, or absent
+	// because the file was refused and never decoded at all.
 	//
-	// Written by finishCurrentFile, consulted and cleared by admitFile, and
-	// cleared by Reset because damage belongs to the stream that caused it.
-	// Nothing else may touch it.
+	// Set by finishCurrentFile and by refuse; consulted and cleared by
+	// admitFile; cleared by Reset, because damage belongs to the stream that
+	// caused it. Those four are the only places that touch it, and a fifth
+	// would need to answer the same question they do -- is the window still
+	// what a solid file may build on.
 	damaged bool
 }
 
@@ -254,9 +257,13 @@ func (sd *StreamDecompressor) refuse(n int64, cause error) error {
 	// cannot catch it and the output is silently wrong.
 	//
 	// Recorded here rather than at each refusal site because every refusal has
-	// the same consequence, whatever its reason, and a refused file never
-	// reaches fileReader at all: it returns before begin, so finishCurrentFile
-	// never sees it.
+	// the same consequence whatever its reason. At the processHeader sites the
+	// file is refused before begin, so finishCurrentFile never sees it and
+	// this is the only record. At the processVolumePayloadHeader sites a file
+	// is already active and finishCurrentFile would record it too; writing it
+	// twice costs nothing and is cheaper than a rule about which sites need
+	// it, which is the kind of distinction these two engines have drifted on
+	// before.
 	sd.damaged = true
 	if err := sd.discardPayload(n); err != nil {
 		return err
