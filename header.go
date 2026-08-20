@@ -7,6 +7,7 @@ import (
 	"hash/crc32"
 	"io"
 	"io/fs"
+	"math/bits"
 	"path"
 	"strings"
 	"time"
@@ -343,6 +344,77 @@ func parseHashRecord(fh *FileHeader, b []byte) error {
 	return nil
 }
 
+// Extra record 3 (file times) flags.
+const (
+	extraTimeUnix   = 0x0001 // times are unix seconds rather than Windows FILETIME
+	extraTimeMtime  = 0x0002
+	extraTimeCtime  = 0x0004
+	extraTimeAtime  = 0x0008
+	extraTimeUnixNS = 0x0010 // a nanosecond field follows for each unix time
+)
+
+// filetimeEpochOffset is the number of 100ns ticks between the Windows FILETIME
+// epoch (1601-01-01 UTC) and the Unix epoch.
+const filetimeEpochOffset = 116444736000000000
+
+// parseTimeRecord decodes the file-times extra record.
+//
+// The modification time is not read from the file header's own mtime field
+// alone: rar only sets FileFlagHasUnixMtime for whole-second times, and
+// current versions record the time here instead. Parsing only the flag left
+// ModificationTime zero for every archive rar actually produces, which made
+// UnpackOptions.IgnoreUnrarDates a no-op -- extracted files never carried
+// their archive timestamps in either mode.
+//
+// Only the modification time is kept, because FileHeader exposes only that.
+// The others still have to be stepped over: every present time's seconds are
+// stored before any of the nanoseconds, so the mtime nanosecond field sits
+// after the ctime and atime seconds rather than next to its own.
+func parseTimeRecord(fh *FileHeader, data []byte) error {
+	flags, n, err := DecodeVint(data)
+	if err != nil {
+		return ErrCorruptFileHeader
+	}
+	data = data[n:]
+
+	// mtime is stored first when present, so its absence means everything
+	// this function would read belongs to a time FileHeader does not carry.
+	if flags&extraTimeMtime == 0 {
+		return nil
+	}
+
+	if flags&extraTimeUnix == 0 {
+		if len(data) < 8 {
+			return ErrCorruptFileHeader
+		}
+		ticks := int64(binary.LittleEndian.Uint64(data[:8])) - filetimeEpochOffset
+		fh.ModificationTime = time.Unix(ticks/1e7, (ticks%1e7)*100)
+		return nil
+	}
+
+	if len(data) < 4 {
+		return ErrCorruptFileHeader
+	}
+	sec := int64(binary.LittleEndian.Uint32(data[:4]))
+
+	var nsec int64
+	if flags&extraTimeUnixNS != 0 {
+		present := bits.OnesCount64(flags & (extraTimeMtime | extraTimeCtime | extraTimeAtime))
+		off := 4 * present
+		if len(data) < off+4 {
+			return ErrCorruptFileHeader
+		}
+		// Attacker-supplied: a value at or beyond a second would roll the
+		// time forward into a different second than the archive recorded.
+		if ns := int64(binary.LittleEndian.Uint32(data[off : off+4])); ns < 1e9 {
+			nsec = ns
+		}
+	}
+
+	fh.ModificationTime = time.Unix(sec, nsec)
+	return nil
+}
+
 // parseExtraRecords iterates over extra records and parses encryption or file hash blocks.
 func parseExtraRecords(fh *FileHeader, extra []ExtraRecord) error {
 	for _, e := range extra {
@@ -353,6 +425,10 @@ func parseExtraRecords(fh *FileHeader, extra []ExtraRecord) error {
 			}
 		case 2: // File hash (Blake2sp)
 			if err := parseHashRecord(fh, e.Data); err != nil {
+				return err
+			}
+		case 3: // File times
+			if err := parseTimeRecord(fh, e.Data); err != nil {
 				return err
 			}
 		}
