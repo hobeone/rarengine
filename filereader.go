@@ -29,12 +29,17 @@ var ErrChecksumUnsupported = errors.New("rarengine: file records a checksum this
 // because an earlier file in the same solid run was damaged.
 //
 // Solid files share one LZ77 history: a file's back-references reach into the
-// bytes its predecessors wrote. A damaged predecessor never writes them, so
-// every solid file after it would decode against history that is simply
-// absent -- producing plausible-looking bytes that are wrong, with nothing in
-// the format to mark them. Refusing is the only answer that cannot silently
-// hand over fabricated content. A non-solid file resets the window and clears
-// the condition, so a solid run that begins after the damage is unaffected.
+// bytes its predecessors wrote. A predecessor that ended short never wrote
+// some of them; one that failed its CRC32 wrote the wrong ones. Either way the
+// successor decodes against history the archive did not assume, producing
+// plausible-looking output with nothing in the format to mark it -- so both
+// count as damage. Refusing is the only answer that cannot silently hand over
+// fabricated content. A non-solid file resets the window and clears the
+// condition, so a solid run beginning after the damage is unaffected.
+//
+// A predecessor whose content was wrong in a way this library cannot detect --
+// verification disabled via SetVerifyCRC, or a digest it cannot check -- is not
+// covered, because nothing observed the damage.
 var ErrSolidStreamBroken = errors.New("rarengine: solid file depends on history a damaged file did not write")
 
 // FileError reports that one file could not be delivered while the archive
@@ -329,7 +334,7 @@ func (fr *fileReader) truncated() error {
 // engine repoints it on every volume advance: read at the point of use it is
 // current by construction, where a copy kept here would describe whichever
 // volume the file started on.
-func (fr *fileReader) endFile(packed *packedCursor) (short bool, err error) {
+func (fr *fileReader) endFile(packed *packedCursor) (damaged bool, err error) {
 	if fr.src == nil {
 		return false, nil
 	}
@@ -338,19 +343,36 @@ func (fr *fileReader) endFile(packed *packedCursor) (short bool, err error) {
 	// Captured before clear: whether the file delivered everything it
 	// promised decides whether traversal can continue, and which file to name
 	// when reporting that it did not.
-	short = fr.remaining > 0
+	short := fr.remaining > 0
 	failed := fr.header
 	// Drained on every terminal path, not only the failing ones. A file that
 	// completed perfectly can still leave packed bytes behind, and that is
 	// exactly the case an archive uses to fabricate the next entry.
 	packedErr := packed.drain()
-	// Read before invalidate, which would make every cursor look settled.
+	// Read before invalidate, which sets abandoned: afterwards every cursor
+	// reports unsettled, and no file could be offered as continuable at all.
 	settled := packed.settled()
 	// The cursor described this file. Dropping the count here keeps a short
 	// drain -- a truncated volume, where the promised bytes were never on the
 	// media -- from leaving a stale count for whatever runs next.
 	packed.invalidate()
 	fr.clear()
+
+	// outcome is what actually happened to this file's content, whether or not
+	// the caller has already been told about it. The verdict below answers a
+	// different question -- what to return now -- and deliberately reports
+	// nothing for a failure already delivered.
+	outcome := reported
+	if outcome == nil {
+		outcome = contentErr
+	}
+	// damaged asks about the window, not about the caller. A file that ended
+	// short left bytes unwritten; one that failed its CRC32 wrote the wrong
+	// ones. Either way a solid successor back-references history that is not
+	// what the archive assumed, so both have to count -- keying this on short
+	// alone let a CRC-mismatched predecessor admit a solid file that then
+	// decoded against known-bad bytes.
+	damaged = short || errors.Is(outcome, ErrCRCMismatch)
 
 	var verdict error
 	switch {
@@ -376,18 +398,23 @@ func (fr *fileReader) endFile(packed *packedCursor) (short bool, err error) {
 
 	switch {
 	case packedErr == nil:
-		return short, markContinuable(failed, verdict, short && settled)
+		// settled alone, not short && settled. A file that reached its
+		// declared size and then failed its checksum is just as continuable --
+		// the cursor is drained and the stream is on the next header -- and
+		// requiring short left the commonest damage signal in a Usenet
+		// download reported as an error indistinguishable from end-of-archive.
+		return damaged, markContinuable(failed, verdict, settled)
 	case verdict == nil:
 		// Returned unwrapped. errors.Join builds a wrapper even around a
 		// single error, which costs an allocation and defeats the identity
 		// comparisons callers use to recognise a sentinel.
-		return short, packedErr
+		return damaged, packedErr
 	default:
 		// Both are meaningful and neither subsumes the other: the verdict says
 		// what happened to the file, the drain error says the stream is no
 		// longer positioned at a block boundary. Returning either alone loses
 		// something the caller needs.
-		return short, errors.Join(verdict, packedErr)
+		return damaged, errors.Join(verdict, packedErr)
 	}
 }
 

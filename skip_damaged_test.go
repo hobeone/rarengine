@@ -445,3 +445,190 @@ func rar5SplitEntry(name string, unpackedSize uint64, payload []byte) []byte {
 	out.Write(payload)
 	return out.Bytes()
 }
+
+// TestSkipDamagedFile_SolidRefusalDropsPayload pins that ErrSolidStreamBroken
+// obeys the rule every other refusal in this package obeys.
+//
+// CLAUDE.md: "Refusing a file means dropping its payload, whatever the reason
+// for the refusal ... Do not narrow it to particular errors." A refused block
+// that keeps its payload supplies the next entry, because traversal continues
+// afterwards -- the caller gets the error and calls Next again. This refusal
+// reason is newer than that rule, and asserting the error alone would not have
+// noticed: replacing the refuse() call with a bare return leaves every other
+// test in this file passing while a crafted archive gets a fabricated entry.
+func TestSkipDamagedFile_SolidRefusalDropsPayload(t *testing.T) {
+	// The solid file's payload is itself a well-formed entry. If the refusal
+	// leaves those bytes in the stream, the next header is parsed out of them.
+	pwned := []byte("ATTACKER CONTROLLED BYTES")
+	smuggled := goodEntry("PWNED.bin", pwned)
+
+	tail := []byte("the real next file")
+	var archive bytes.Buffer
+	archive.Write(rar5ArchiveHeader())
+	archive.Write(shortEntry("truncated.bin"))
+	archive.Write(rar5EntryComp("solid.bin", FileCompSolid,
+		uint64(len(smuggled)), 0x1234, smuggled))
+	archive.Write(goodEntry("legit.bin", tail))
+	archive.Write(rar5EndHeader())
+
+	sd, _ := damageFirstFile(t, archive.Bytes())
+
+	if _, err := sd.Next(); !errors.Is(err, ErrSolidStreamBroken) {
+		t.Fatalf("the solid file was not refused (%v); this test cannot check "+
+			"what a refusal drops if nothing was refused", err)
+	}
+
+	// Traversal continues, so whatever the refusal left behind is what gets
+	// parsed next.
+	fh, err := sd.Next()
+	if err != nil {
+		t.Fatalf("Next after a refusal returned %v; the refused payload should "+
+			"have been dropped, leaving the stream on the next real header", err)
+	}
+	if fh.Name == "PWNED.bin" {
+		t.Fatalf("the refused file's payload supplied the next entry: got %q. "+
+			"ErrSolidStreamBroken must drop the payload like every other "+
+			"refusal, or it becomes a header-fabrication route", fh.Name)
+	}
+	if fh.Name != "legit.bin" {
+		t.Fatalf("reached %q; want legit.bin", fh.Name)
+	}
+	got, err := io.ReadAll(sd)
+	if err != nil && !errors.Is(err, io.EOF) {
+		t.Fatalf("reading the file after a refusal: %v", err)
+	}
+	if !bytes.Equal(got, tail) {
+		t.Errorf("the file after a refusal decoded to %q; want %q", got, tail)
+	}
+}
+
+// TestRAR3_SolidRefusalAfterDamage covers admitFile in the RAR3 engine, which
+// had no coverage at all -- the guard was added to both engines but only
+// exercised in one, and this codebase's two engines have repeatedly diverged.
+func TestRAR3_SolidRefusalAfterDamage(t *testing.T) {
+	const solidFlag = 0x0010 // LHD_SOLID
+
+	var archive bytes.Buffer
+	archive.Write(rar3ArchiveHeader())
+	// Declares 100 unpacked bytes but carries 10: ends short.
+	archive.Write(rar3StoreEntry("truncated.bin", 0, 100, 0xdeadbeef,
+		[]byte("only ten!!")))
+	archive.Write(rar3StoreEntry("solid.bin", solidFlag, 20, 0x1234,
+		[]byte("twenty bytes exactly")))
+
+	sd := decompressorFor(archive.Bytes())
+	fh, err := sd.Next()
+	if err != nil {
+		t.Fatalf("Next #1: %v", err)
+	}
+	if fh.Name != "truncated.bin" {
+		t.Fatalf("first entry is %q; fixture is not the shape this tests", fh.Name)
+	}
+	if _, err := io.Copy(io.Discard, sd); !errors.Is(err, ErrTruncatedFile) {
+		t.Fatalf("reading the damaged file returned %v; want ErrTruncatedFile", err)
+	}
+	if _, err := sd.Next(); err == nil {
+		t.Fatal("the damaged file was not reported")
+	}
+
+	_, err = sd.Next()
+	if !errors.Is(err, ErrSolidStreamBroken) {
+		t.Fatalf("a RAR3 solid file after a damaged one returned %v; want "+
+			"ErrSolidStreamBroken. The guard exists in both engines and must "+
+			"fire in both", err)
+	}
+}
+
+// badCRCEntry carries its full declared length but records a checksum the
+// content does not match: damage by wrong bytes rather than missing ones.
+func badCRCEntry(name string, content []byte) []byte {
+	wrong := crc32.ChecksumIEEE(content) ^ 0xffffffff
+	return rar5FileEntry(name, uint64(len(content)), wrong, content)
+}
+
+// TestSkipDamagedFile_ChecksumFailureIsContinuable covers the commonest damage
+// signal in the workload this feature targets.
+//
+// A file that reached its declared size and then failed its CRC32 is just as
+// skippable as a truncated one: the cursor is drained and the stream is on the
+// next header. Requiring the file to have ended short left this case reported
+// as a bare error indistinguishable from end-of-archive -- and asymmetrically
+// so, since reading the same file to EOF surfaces the mismatch during Read and
+// then returns cleanly from Next.
+func TestSkipDamagedFile_ChecksumFailureIsContinuable(t *testing.T) {
+	tail := []byte("an entirely intact second file")
+
+	var archive bytes.Buffer
+	archive.Write(rar5ArchiveHeader())
+	archive.Write(badCRCEntry("bad.bin", []byte("content whose CRC will not match")))
+	archive.Write(goodEntry("good.bin", tail))
+	archive.Write(rar5EndHeader())
+
+	sd := decompressorFor(archive.Bytes())
+	fh, err := sd.Next()
+	if err != nil {
+		t.Fatalf("Next #1: %v", err)
+	}
+	if fh.Name != "bad.bin" {
+		t.Fatalf("first entry is %q; fixture is not the shape this tests", fh.Name)
+	}
+
+	// Skipped, not read: the mismatch is found by the teardown drain.
+	_, err = sd.Next()
+	fe, ok := errors.AsType[*FileError](err)
+	if !ok {
+		t.Fatalf("skipping a CRC-mismatched file returned %v (%T); want a "+
+			"*FileError. The stream is on the next header, so the caller has "+
+			"no way to learn it may continue", err, err)
+	}
+	if !errors.Is(err, ErrCRCMismatch) {
+		t.Errorf("the wrapper hid the cause: %v", err)
+	}
+	if fe.Header == nil || fe.Header.Name != "bad.bin" {
+		t.Errorf("FileError names %v; want bad.bin", fe.Header)
+	}
+
+	fh, err = sd.Next()
+	if err != nil {
+		t.Fatalf("Next after the FileError returned %v; it promised the "+
+			"traversal could continue", err)
+	}
+	if fh.Name != "good.bin" {
+		t.Fatalf("continued to %q; want good.bin", fh.Name)
+	}
+}
+
+// TestSkipDamagedFile_ChecksumFailureDamagesWindow pins the other half. A file
+// whose CRC32 did not match wrote the WRONG bytes into the shared history, so
+// a solid successor decodes against content the archive never assumed --
+// silently, since nothing in the format marks it. Keying damage on "ended
+// short" alone admitted exactly this.
+func TestSkipDamagedFile_ChecksumFailureDamagesWindow(t *testing.T) {
+	var archive bytes.Buffer
+	archive.Write(rar5ArchiveHeader())
+	archive.Write(badCRCEntry("bad.bin", []byte("content whose CRC will not match")))
+	archive.Write(rar5EntryComp("solid.bin", FileCompSolid, 20, 0x1234,
+		[]byte("twenty bytes exactly")))
+	archive.Write(rar5EndHeader())
+
+	sd := decompressorFor(archive.Bytes())
+	if _, err := sd.Next(); err != nil {
+		t.Fatalf("Next #1: %v", err)
+	}
+	if _, err := io.Copy(io.Discard, sd); !errors.Is(err, ErrCRCMismatch) {
+		t.Fatalf("reading bad.bin returned %v; want ErrCRCMismatch, or this "+
+			"test is not exercising a checksum failure", err)
+	}
+	// No second report from Next: the mismatch was already delivered during
+	// Read, and repeating it would make one corrupt file an archive nobody can
+	// read past. So this call goes straight on to the solid successor.
+	_, err := sd.Next()
+	if !sd.damaged {
+		t.Fatal("a CRC-mismatched file was not recorded as damaging the window")
+	}
+	if !errors.Is(err, ErrSolidStreamBroken) {
+		t.Fatalf("a solid file after a CRC-mismatched one returned %v; want "+
+			"ErrSolidStreamBroken. Its back-references reach into bytes known "+
+			"to be wrong", err)
+	}
+}

@@ -80,10 +80,13 @@ type StreamDecompressor struct {
 	// discard backs discardPayload. Reused so discarding a block's payload
 	// costs no allocation, per the no-new-allocations rule in CLAUDE.md.
 	discard packedCursor
-	// damaged records that a file was skipped without delivering everything
-	// it declared, so the LZ77 window is missing bytes a solid successor
-	// would back-reference. Set by finishCurrentFile, consulted and cleared
-	// by admitFile -- those two are the only places allowed to touch it.
+	// damaged records that a file left the LZ77 window holding something other
+	// than what a solid successor's back-references assume -- bytes missing
+	// because it ended short, or wrong because it failed its CRC32.
+	//
+	// Written by finishCurrentFile, consulted and cleared by admitFile, and
+	// cleared by Reset because damage belongs to the stream that caused it.
+	// Nothing else may touch it.
 	damaged bool
 }
 
@@ -95,14 +98,14 @@ type StreamDecompressor struct {
 // error at each call site would put the same rule in two engines and let them
 // drift, which is how the refusal paths diverged before.
 func (sd *StreamDecompressor) finishCurrentFile(packed *packedCursor) error {
-	short, err := sd.file.endFile(packed)
-	// Keyed on short, NOT on whether a FileError came back. The two answer
-	// different questions: FileError asks "may the caller resume?", short asks
-	// "is the window intact?". Deriving one from the other left every
-	// non-continuable short file -- a truncated volume, a failed drain --
-	// recorded as undamaged, so a solid file on the next volume decoded
-	// against history its predecessor never wrote.
-	if short {
+	damaged, err := sd.file.endFile(packed)
+	// Keyed on what endFile saw happen to the file, NOT on whether a FileError
+	// came back. The two answer different questions -- FileError asks "may the
+	// caller resume?", this asks "is the window intact?" -- and deriving one
+	// from the other left every non-continuable failure recorded as undamaged,
+	// so a solid file on the next volume decoded against history its
+	// predecessor never wrote.
+	if damaged {
 		sd.damaged = true
 	}
 	return err
