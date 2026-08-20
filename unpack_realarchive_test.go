@@ -163,62 +163,37 @@ func TestUnpackDir_RealArchive_MissingFinalVolume(t *testing.T) {
 	}
 }
 
-// TestUnpackDir_RealArchive_SkippedMemberTruncatedIsRecorded covers the member
-// this loop never reads.
+// TestUnpackDir_RealArchive_SkippedMemberIsNotDamage pins the absence of a
+// false report.
 //
-// With the default OverwriteFiles: false, a member already present on disk is
-// skipped, so its payload is drained by Next rather than read here. When that
-// drain runs out of volumes the failure arrives as a bare ErrNoNextVolume,
-// which the Next site treats as end-of-archive -- so the extraction reported
-// total success, with no entry in Files OR Damaged, while a stale file sat at
-// the destination looking extracted. That is the silent truncation every
-// constraint in this library exists to prevent.
-func TestUnpackDir_RealArchive_SkippedMemberTruncatedIsRecorded(t *testing.T) {
-	parts, err := filepath.Glob(filepath.Join("testdata", "rar5_multi.part*.rar"))
-	if err != nil || len(parts) < 2 {
-		t.Fatalf("multi-volume fixture missing: %v (%d parts)", err, len(parts))
-	}
-	slices.Sort(parts)
-
-	vols := t.TempDir()
-	for _, p := range parts[:len(parts)-1] { // final segment never arrived
-		b, err := os.ReadFile(p)
-		if err != nil {
-			t.Fatalf("read %s: %v", p, err)
-		}
-		if err := os.WriteFile(filepath.Join(vols, filepath.Base(p)), b, 0600); err != nil {
-			t.Fatalf("write volume: %v", err)
-		}
-	}
-
-	// A stale copy from an earlier run is what makes the member get skipped.
+// With the default OverwriteFiles: false, a member already on disk is skipped,
+// so its payload is drained by Next rather than read here. A healthy
+// multi-volume archive ends in ErrNoNextVolume regardless -- draining the last
+// member consumes every volume and the engine then asks for one more -- so
+// attributing that error to the skipped member reported an intact archive as
+// damaged. This is the whole archive, complete, extracted twice.
+func TestUnpackDir_RealArchive_SkippedMemberIsNotDamage(t *testing.T) {
+	first := filepath.Join("testdata", "rar5_multi.part01.rar")
 	out := t.TempDir()
-	stale := []byte("stale")
-	if err := os.WriteFile(filepath.Join(out, "large.bin"), stale, 0600); err != nil {
-		t.Fatalf("seed stale file: %v", err)
-	}
 
-	res, err := UnpackDir(context.Background(), filepath.Join(vols, filepath.Base(parts[0])), out,
-		UnpackOptions{OverwriteFiles: false})
+	res, err := UnpackDir(context.Background(), first, out, UnpackOptions{OverwriteFiles: false})
 	if err != nil {
-		t.Fatalf("UnpackDir: %v", err)
+		t.Fatalf("first extraction: %v", err)
+	}
+	if len(res.Files) != 1 || len(res.Damaged) != 0 {
+		t.Fatalf("first extraction: files=%v damaged=%+v; want one file and no damage",
+			res.Files, res.Damaged)
 	}
 
-	d := onlyDamaged(t, res)
-	if d.Header.Name != "large.bin" {
-		t.Errorf("damaged entry names %q; want large.bin", d.Header.Name)
+	// Second pass: the member exists, so it is skipped rather than read.
+	again, err := UnpackDir(context.Background(), first, out, UnpackOptions{OverwriteFiles: false})
+	if err != nil {
+		t.Fatalf("second extraction: %v", err)
 	}
-	if !errors.Is(d.Err, ErrNoNextVolume) {
-		t.Errorf("damaged entry carries %v; want ErrNoNextVolume", d.Err)
+	if len(again.Files) != 0 {
+		t.Errorf("second extraction wrote %v; the member already existed", again.Files)
 	}
-	if len(res.Files) != 0 {
-		t.Errorf("reported %v as extracted; the member was skipped, not written", res.Files)
-	}
-
-	// The stale file is left alone -- skipping means not touching it -- but the
-	// caller must be told the archive's copy never arrived.
-	got, err := os.ReadFile(filepath.Join(out, "large.bin"))
-	if err != nil || string(got) != string(stale) {
-		t.Errorf("stale file reads %q (%v); skipping must not modify it", got, err)
+	if len(again.Damaged) != 0 {
+		t.Errorf("an intact member skipped over was reported as damaged: %+v", again.Damaged)
 	}
 }

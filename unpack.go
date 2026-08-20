@@ -80,7 +80,7 @@ type DamagedEntry struct {
 // would resume parsing at an offset the block structure does not describe.
 func asDamaged(err error) (DamagedEntry, bool) {
 	fe, ok := errors.AsType[*FileError](err)
-	if !ok || fe.Header == nil {
+	if !ok || fe == nil || fe.Header == nil {
 		return DamagedEntry{}, false
 	}
 	return DamagedEntry{Header: fe.Header, Err: fe.Err}, true
@@ -256,6 +256,12 @@ func (wc *writeCounter) Write(p []byte) (int, error) {
 	return n, err
 }
 
+// nameMax is the longest single path component POSIX filesystems accept, and
+// the ceiling a temporary name has to stay under as well.
+const nameMax = 255
+
+const tempPrefix = ".rarengine-part-"
+
 // createTemp opens the file a member is written into before it is renamed
 // into place.
 //
@@ -267,12 +273,25 @@ func (wc *writeCounter) Write(p []byte) (int, error) {
 // listed it in Files -- the same defect the temporary name exists to prevent,
 // through a door the archive picks.
 func createTemp(root *os.Root, destRel string) (string, *os.File, error) {
+	dir, base := filepath.Split(destRel)
+
+	// The suffix has to fit inside the same NAME_MAX the destination fits
+	// in. A 254-byte member name is legal on every filesystem this runs on,
+	// and appending to it produced ENAMETOOLONG -- returned as an
+	// archive-level error, so a long but perfectly valid name cost every
+	// member behind it. Trimming the base keeps the temporary within the
+	// limit; it never becomes the final name, which is set by the rename.
+	const suffixLen = len(tempPrefix) + 16
+	if len(base)+suffixLen > nameMax {
+		base = base[:max(0, nameMax-suffixLen)]
+	}
+
 	var buf [8]byte
 	for attempt := 0; attempt < 8; attempt++ {
 		if _, err := rand.Read(buf[:]); err != nil {
 			return "", nil, fmt.Errorf("rarengine: temporary name for %s: %w", destRel, err)
 		}
-		tmpRel := destRel + ".rarengine-part-" + hex.EncodeToString(buf[:])
+		tmpRel := dir + base + tempPrefix + hex.EncodeToString(buf[:])
 
 		out, err := root.OpenFile(tmpRel, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0600)
 		switch {
@@ -308,24 +327,25 @@ func extractEntry(ctx context.Context, root *os.Root, sd *StreamDecompressor, he
 		destRel = header.Name
 	}
 
-	if opts.OneFolder && !opts.OverwriteFiles {
-		destRel = uniquePath(root, destRel)
-	}
-
 	// Convert slashes to host-native separators for relative path (needed for Windows)
 	destRel = filepath.FromSlash(destRel)
 
-	// sanitizePath drops "." and ".." components, so a member named ".." or
-	// "/" arrives here as the empty string. That is the guard working, not a
-	// broken archive -- but it costs this one member, not the extraction: an
-	// unusable name used to reach OpenFile and come back as a fatal error,
-	// so a single odd name discarded every member behind it.
-	// A NUL byte survives sanitizePath and reaches the filesystem calls,
-	// which reject it -- as a fatal error, so one such name would cost every
-	// member behind it. It is this member's loss, like any other name that
-	// cannot be written.
+	// Checked before uniquePath, which resolves collisions and so turns an
+	// unusable name into a usable one. sanitizePath reduces a member named
+	// ".." to the empty string, filepath.Base makes that ".", and uniquePath
+	// -- seeing the sandbox root itself already exists -- renames it to
+	// "_1.". The member then lands on disk as an ordinary file instead of
+	// being refused, recorded nowhere.
+	//
+	// A NUL byte is the same story from the other side: sanitizePath
+	// preserves it and the filesystem calls reject it, which used to end the
+	// whole extraction rather than costing the one member.
 	if destRel == "" || destRel == "." || strings.ContainsRune(destRel, 0) {
 		return "", fmt.Errorf("%w: %q", ErrUnusableName, header.Name), nil
+	}
+
+	if opts.OneFolder && !opts.OverwriteFiles {
+		destRel = uniquePath(root, destRel)
 	}
 
 	logger.Info("rarengine: extracting entry", "name", header.Name, "target_rel", destRel, "size", header.UnpackedSize, "is_dir", header.IsDir)
@@ -359,11 +379,18 @@ func extractEntry(ctx context.Context, root *os.Root, sd *StreamDecompressor, he
 		return "", nil, err
 	}
 
-	dropPartial := func() {
+	// Disarmed on success rather than called from each failure branch: the
+	// staging file must not outlive this function by any path, including one
+	// added later.
+	renamed := false
+	defer func() {
+		if renamed {
+			return
+		}
 		if rmErr := root.Remove(tmpRel); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
 			logger.Warn("rarengine: could not remove partial file", "path", tmpRel, "err", rmErr)
 		}
-	}
+	}()
 
 	wc := &writeCounter{w: out}
 	n, copyErr := io.Copy(wc, &contextReader{ctx: ctx, r: sd})
@@ -371,7 +398,6 @@ func extractEntry(ctx context.Context, root *os.Root, sd *StreamDecompressor, he
 
 	switch {
 	case copyErr != nil:
-		dropPartial()
 		// Cancellation is not damage -- the member may have been perfectly
 		// intact and the caller simply stopped. Tested against the error
 		// actually returned rather than against ctx.Err() independently,
@@ -385,22 +411,26 @@ func extractEntry(ctx context.Context, root *os.Root, sd *StreamDecompressor, he
 		}
 		return "", copyErr, nil
 	case closeErr != nil:
-		dropPartial()
 		return "", nil, fmt.Errorf("rarengine: close file %s: %w", tmpRel, closeErr)
 	}
 
+	if err := root.Rename(tmpRel, destRel); err != nil {
+		return "", nil, fmt.Errorf("rarengine: rename %s: %w", tmpRel, err)
+	}
+	renamed = true
+
+	// Applied after the rename, not before. A member recorded read-only left
+	// the staging file read-only, which on Windows blocks both the cleanup
+	// that removes it and a later rename over it -- turning one member's
+	// failure into a stranded file and every subsequent attempt into an
+	// archive-level error.
 	mode := header.Mode() & 0666
 	if mode != 0 && header.HostOS != 0 {
-		_ = root.Chmod(tmpRel, mode)
+		_ = root.Chmod(destRel, mode)
 	}
 
 	if !opts.IgnoreUnrarDates && !header.ModificationTime.IsZero() {
-		_ = root.Chtimes(tmpRel, header.ModificationTime, header.ModificationTime)
-	}
-
-	if err := root.Rename(tmpRel, destRel); err != nil {
-		dropPartial()
-		return "", nil, fmt.Errorf("rarengine: rename %s: %w", tmpRel, err)
+		_ = root.Chtimes(destRel, header.ModificationTime, header.ModificationTime)
 	}
 
 	absPath := filepath.Join(absOutputDir, destRel)
@@ -430,6 +460,12 @@ func extractEntry(ctx context.Context, root *os.Root, sd *StreamDecompressor, he
 // name it with, so it cannot be reported as a damaged member and is returned
 // as the error instead. The payload is still dropped, so this is a reporting
 // limit rather than a stream-alignment one.
+//
+// One case is silent: a member skipped because it already exists on disk,
+// whose copy in the archive is then truncated, is not reported. Nothing
+// distinguishes it at this level -- a healthy multi-volume archive also ends
+// in ErrNoNextVolume -- and the file already on disk is untouched either way.
+// Read the member (OverwriteFiles) to have its truncation reported.
 func UnpackDir(ctx context.Context, firstVolumePath string, outputDir string, opts UnpackOptions) (UnpackResult, error) {
 	logger := opts.Logger
 	if logger == nil {
@@ -464,6 +500,17 @@ func UnpackDir(ctx context.Context, firstVolumePath string, outputDir string, op
 	if err != nil {
 		return UnpackResult{}, err
 	}
+	// Every volume is opened up front and consumed lazily, so any exit that
+	// does not walk the archive to its end -- a cancelled context, an
+	// archive-level failure, a refusal partway through -- leaves the rest of
+	// the handles open. A long-running caller extracting many archives runs
+	// out of descriptors on the failures rather than on the successes, which
+	// is the harder version to attribute.
+	defer func() {
+		for v := range volumesChan {
+			_ = v.Close()
+		}
+	}()
 
 	sd := NewStreamDecompressor(volumesChan)
 	if opts.Password != "" {
@@ -477,13 +524,6 @@ func UnpackDir(ctx context.Context, firstVolumePath string, outputDir string, op
 	// Next reports for that same member is not counted twice.
 	recorded := false
 
-	// unread names a member this loop accepted but never read -- a directory
-	// entry, or a file skipped because it already existed. Next drains those
-	// on the caller's behalf, and that drain can fail. Without the header
-	// held here there is nothing to attribute the failure to, and a member
-	// lost that way was reported in neither Files nor Damaged.
-	var unread *FileHeader
-
 	// Every exit below returns res, not a zero value. An archive-level failure
 	// partway through still extracted whatever came before it, and discarding
 	// that is the behaviour this reporting exists to remove.
@@ -495,16 +535,14 @@ func UnpackDir(ctx context.Context, firstVolumePath string, outputDir string, op
 		header, err := sd.Next()
 		if err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, ErrNoNextVolume) {
-				// ErrNoNextVolume means two different things depending on
-				// what was in flight. With nothing in progress the archive
-				// simply ended. Reaching the drain of a member this loop
-				// skipped, it means that member never completed -- and
-				// treating it as an ordinary end-of-archive reported total
-				// success while a stale file sat at its destination.
-				if unread != nil && !errors.Is(err, io.EOF) {
-					logger.Warn("rarengine: skipping damaged entry", "name", unread.Name, "err", err)
-					res.Damaged = append(res.Damaged, DamagedEntry{Header: unread, Err: err})
-				}
+				// Both mean the archive is over. ErrNoNextVolume is not a
+				// weaker signal than io.EOF here: a healthy multi-volume
+				// archive ends with it too, because draining the last
+				// member's payload consumes every volume and the engine then
+				// asks for one more. It therefore says nothing about whether
+				// a member this loop skipped completed, and an earlier
+				// version that read it that way recorded intact members as
+				// damaged on every archive that ends this way.
 				break
 			}
 			// Damage reaches this site for a member that was never read --
@@ -521,13 +559,11 @@ func UnpackDir(ctx context.Context, firstVolumePath string, outputDir string, op
 					res.Damaged = append(res.Damaged, d)
 				}
 				recorded = false
-				unread = nil
 				continue
 			}
 			return res, fmt.Errorf("rarengine: read next file: %w", err)
 		}
 		recorded = false
-		unread = nil
 
 		filePath, streamErr, err := extractEntry(ctx, root, sd, header, opts, absOutputDir, logger)
 		if err != nil {
@@ -544,17 +580,11 @@ func UnpackDir(ctx context.Context, firstVolumePath string, outputDir string, op
 			logger.Warn("rarengine: skipping damaged entry", "name", header.Name, "err", streamErr)
 			res.Damaged = append(res.Damaged, DamagedEntry{Header: header, Err: streamErr})
 			recorded = true
-			unread = nil
 			continue
 		}
 		if filePath != "" {
 			res.Files = append(res.Files, filePath)
-			unread = nil
-			continue
 		}
-		// Read to completion is what clears unread; returning no path means
-		// the member still owes its payload to the drain Next performs.
-		unread = header
 	}
 
 	logger.Info("rarengine: extraction pipeline complete",

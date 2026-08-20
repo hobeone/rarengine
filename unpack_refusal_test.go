@@ -3,8 +3,10 @@ package rarengine
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -286,5 +288,95 @@ func TestUnpackDir_NulInNameCostsOneMember(t *testing.T) {
 	}
 	if len(res.Files) != 1 || filepath.Base(res.Files[0]) != "good.bin" {
 		t.Errorf("the member behind the unusable name was lost: %v", res.Files)
+	}
+}
+
+// TestUnpackDir_UnusableNameSurvivesUniquePath covers the collision resolver
+// turning an unusable name into a usable one.
+//
+// sanitizePath reduces a member named ".." to the empty string; with OneFolder
+// filepath.Base makes that ".", and uniquePath -- seeing that the sandbox root
+// itself exists -- renames it to "_1.". Validating after that step let the
+// member land on disk as an ordinary file, recorded in neither list.
+func TestUnpackDir_UnusableNameSurvivesUniquePath(t *testing.T) {
+	archive := writeArchive(t,
+		goodEntry("..", []byte("must never reach disk")),
+		goodEntry("ok.bin", []byte("fine")),
+	)
+	out := t.TempDir()
+
+	res, err := UnpackDir(context.Background(), archive, out,
+		UnpackOptions{OneFolder: true, OverwriteFiles: false})
+	if err != nil {
+		t.Fatalf("UnpackDir: %v", err)
+	}
+
+	d := onlyDamaged(t, res)
+	if !errors.Is(d.Err, ErrUnusableName) {
+		t.Errorf("damaged entry carries %v; want ErrUnusableName", d.Err)
+	}
+	if len(res.Files) != 1 || filepath.Base(res.Files[0]) != "ok.bin" {
+		t.Errorf("extracted %v; want only ok.bin", res.Files)
+	}
+
+	entries, err := os.ReadDir(out)
+	if err != nil {
+		t.Fatalf("read output dir: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "ok.bin" {
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("output directory holds %v; the unusable member reached disk", names)
+	}
+}
+
+// TestUnpackDir_LongMemberNameExtracts covers a name that is legal but leaves
+// no room for a suffix.
+//
+// A 254-byte component fits NAME_MAX on every filesystem this runs on. The
+// staging name appended to it did not, so openat returned ENAMETOOLONG -- as
+// an archive-level error, costing every member behind a perfectly valid name.
+func TestUnpackDir_LongMemberNameExtracts(t *testing.T) {
+	long := strings.Repeat("n", 250) + ".bin" // 254 bytes
+	content := []byte("payload of a very long name")
+	archive := writeArchive(t, goodEntry(long, content), goodEntry("after.bin", []byte("behind it")))
+	out := t.TempDir()
+
+	res, err := UnpackDir(context.Background(), archive, out, UnpackOptions{})
+	if err != nil {
+		t.Fatalf("a legal 254-byte member name stopped the extraction: %v", err)
+	}
+	if len(res.Damaged) != 0 {
+		t.Errorf("damage reported for a healthy archive: %+v", res.Damaged)
+	}
+	if len(res.Files) != 2 {
+		t.Fatalf("extracted %d members, want 2: %v", len(res.Files), res.Files)
+	}
+
+	got, err := os.ReadFile(filepath.Join(out, long))
+	if err != nil {
+		t.Fatalf("the long-named member is not at its full name: %v", err)
+	}
+	if string(got) != string(content) {
+		t.Errorf("content = %q; want %q", got, content)
+	}
+
+	// The staging name is trimmed, never the destination.
+	if _, err := os.Stat(filepath.Join(out, "after.bin")); err != nil {
+		t.Errorf("the member behind the long name was lost: %v", err)
+	}
+}
+
+// TestAsDamaged_TypedNilFileError covers the shape errors.AsType matches while
+// leaving the pointer nil.
+func TestAsDamaged_TypedNilFileError(t *testing.T) {
+	var typed *FileError
+	if _, ok := asDamaged(fmt.Errorf("wrapped: %w", typed)); ok {
+		t.Error("a nil *FileError was accepted as a damaged member")
+	}
+	if _, ok := asDamaged(&FileError{Err: ErrCRCMismatch}); ok {
+		t.Error("a FileError with no header was accepted; it cannot name the member")
 	}
 }
