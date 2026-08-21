@@ -5,7 +5,7 @@ The commit sequence belongs in the implementation plan.
 
 ## Why
 
-The library is ~4,800 lines of non-test code. The RAR decoding itself — Huffman,
+The library is 5,670 lines of non-test code. The RAR decoding itself — Huffman,
 LZ77, bit reader, window, filters, vint, header parsing — is ~1,600 of those and
 has produced almost none of the last twenty pull requests.
 
@@ -32,28 +32,69 @@ whether the stream sits on a block boundary, and whether the previous member
 failed. Neither is a fact about any value, so neither could be checked. This
 design attaches each to a value that owns it.
 
+## The consumer
+
+gonzbd is the only consumer, and what it actually uses was surveyed rather than
+assumed. It uses rarengine two ways:
+
+- **Decode** — `NewStreamDecompressor` + `Next`/`Read`, in
+  `internal/unpack/go_unrar.go` and `internal/directunpack/directunpack.go`.
+- **Inspect** — the raw header API in `internal/rarheader/rarheader.go`:
+  `ReadBlockHeader`, `ParseFileHeader`, `ParseArchiveHeader`,
+  `ParseCryptHeader`, the `HeaderType*` constants, `VerifyPassword`,
+  `VerifyFilePassword`, `ErrBadHeaderCRC`, and — for RAR3 — 
+  `ReadRAR3BlockHeader` and `ParseRAR3FileHeader`.
+
+It uses **no part of `UnpackDir`**: not `UnpackOptions`, `UnpackResult`,
+`DamagedEntry` or `SortVolumes`. It reimplements extraction policy itself,
+including its own path sanitizer (`internal/unpack/sanitized_path.go`).
+
+Both usages shape the scope below.
+
 ## Scope decisions
 
-- **RAR3 is dropped.** A RAR3 signature is detected and reported as an
-  unsupported format. This removes `decoder30.go`, `engine_rar3.go`,
-  `header_rar3.go`, the `fatal` latch, and the entire `lhdLarge` /
-  unmeasurable-payload surface.
-- **Everything else stays**: solid archives, `UnpackDir` with volume discovery,
-  RAR5 per-file encryption, archive-level header encryption.
+- **RAR3 decoding is dropped; RAR3 header parsing is kept.** `decoder30.go` and
+  `engine_rar3.go` go. `header_rar3.go` stays: `InspectRar3` uses it, and its
+  own comment records that it deliberately avoids the RAR3 engine because that
+  engine only implements the store method. Every RAR3 security constraint being
+  retired is engine-side, not parser-side.
+- **`UnpackDir` is deleted**, with `UnpackOptions`, `UnpackResult`,
+  `DamagedEntry`, `SortVolumes`, `ErrUnusableName`, `uniquePath`, the `os.Root`
+  sandbox and `sanitizePath`. It has no caller and duplicates logic gonzbd
+  already owns. rarengine becomes a decode-and-inspect library that never
+  touches the filesystem.
+- **Verification is unconditional.** `SetVerifyCRC` is deleted along with the
+  `accumulate` branch.
+- **Passwords are a list**, resolved inside the reader. See below.
+- **Kept**: solid archives, RAR5 per-file encryption, archive-level header
+  encryption, multi-volume streaming.
 - **No backwards compatibility.** `StreamDecompressor` is deleted outright; the
   gonzbd integration is reimplemented against the new API.
 - **Zero-allocation applies to the 32 MB window and `Reset` reuse only.**
-  Per-file objects are ordinary allocations, amortised over megabytes of payload.
-  The per-file reuse that exists today is the direct cause of the stale-count
-  bug class.
+  Per-file objects are ordinary allocations, amortised over megabytes of
+  payload. The per-file reuse that exists today is the direct cause of the
+  stale-count bug class.
 
 ## The end state
+
+### Two surfaces
+
+rarengine exposes two deliberately separate things:
+
+- **decode** — `Reader` / `Entry`. Position is owned by the library; no caller
+  can read a header off the stream it is traversing.
+- **inspect** — `ReadBlockHeader`, the `Parse*` functions, `Verify*`. Raw,
+  read-only, and **the caller owns position**. Documented as such.
+
+`Reader` uses the inspect functions internally but never admits a caller into
+its own stream. The two do not interact, which is why exporting the second does
+not weaken the first.
 
 ### Layers
 
 ```
 volumes <-chan io.ReadCloser
-  └─ Reader          traversal: volumes, blocks, member admission
+  └─ Reader          traversal: volumes, blocks, member admission, password
        └─ volume     one volume's bytes and the position within them
        └─ Entry      one member: reader chain, byte budget, CRC, verdict
 ```
@@ -66,10 +107,11 @@ volumes <-chan io.ReadCloser
 ```go
 // volume owns one RAR volume's byte stream and the position within it.
 //
-// It is the only way to obtain a block header, and next() re-establishes the
-// block boundary itself before reading one. A header therefore cannot be
-// parsed out of a previous block's payload -- not because every caller
-// remembers to discard, but because no caller is offered the chance to skip.
+// It is the only way the traversal obtains a block header, and next()
+// re-establishes the block boundary itself before reading one. A header
+// therefore cannot be parsed out of a previous block's payload -- not because
+// every caller remembers to discard, but because no caller is offered the
+// chance to skip.
 type volume struct {
 	rc   io.ReadCloser
 	body io.LimitedReader // what remains of the current block's declared payload
@@ -89,7 +131,7 @@ func (v *volume) next() (*BlockHeader, error) {
 	if _, err := io.Copy(io.Discard, &v.body); err != nil {
 		return nil, err
 	}
-	h, err := readBlockHeader(v.rc)
+	h, err := ReadBlockHeader(v.rc)
 	if err != nil {
 		return nil, err
 	}
@@ -110,63 +152,74 @@ Three properties do the work:
 2. **The bound is the same number the file consumes.** `header.go` sets a RAR5
    file header's `PackedSize` from the block's `DataSize`. There is one count, so
    no second count can disagree with the first. (This was never true in RAR3,
-   which is what made `lhdLarge` dangerous; it leaves with RAR3.)
+   which is what made `lhdLarge` dangerous; it leaves with the RAR3 engine.)
 3. **A volume advance constructs a new `volume`.** It does not repoint an old
    one. A count outliving its volume is not a rule to follow but a lifetime that
    cannot occur, and the previous volume becomes unreachable rather than merely
    closed.
 
-`readBlockHeader` is unexported. Nothing in or outside the package can read a
-header from a raw reader.
+`volume.next()` is the **only** thing that moves the traversal's stream. `Entry`
+does no draining, because draining is also required where no `Entry` exists at
+all: service records, unknown block types, archive headers, unparsable file
+headers, refused members. One mechanism for one invariant.
 
 Archive-level header encryption lives here rather than in `Reader`, because
 "how a header is read" is the volume's business and the choice must not be
-expressible at a call site. `Reader` parses the encryption header, derives the
-key, and calls `useEncryptedHeaders`; `next()` routes through
-`headerDecrypter` from then on. As today, the key does not carry across a
-volume boundary — encrypted headers on multi-volume archives remain
+expressible at a call site. `Reader` parses the encryption header, resolves the
+password, and calls `useEncryptedHeaders`. As today, the key does not carry
+across a volume boundary — encrypted headers on multi-volume archives remain
 unsupported, and are reported rather than silently misparsed.
-
-### Version detection
-
-With one format left, `ArchiveVersion`, `Version()` and
-`ErrVolumeVersionMismatch` are deleted. `openVolume` either recognises a RAR5
-signature or returns `ErrUnsupportedFormat`, which subsumes the mismatch case:
-a later volume that is not RAR5 fails to open at all, and the engine-selection
-switch it guarded no longer exists. `SortVolumes` and `readVolumeIndex` in
-`unpack.go` go through `openVolume` for the same reason.
-
-`volume.next()` is the **only** thing that moves the stream. `Entry` does no
-draining, because draining is also required where no `Entry` exists at all:
-service records, unknown block types, archive headers, unparsable file headers,
-refused members. One mechanism for one invariant.
 
 ### `Reader`
 
 ```go
 type Reader struct {
-	volumes   <-chan io.ReadCloser
-	vol       *volume // nil = none open; every failure path leaves it nil
-	win       *Window
-	entry     *Entry
-	password  string
-	verifyCRC bool
+	volumes  <-chan io.ReadCloser
+	vol      *volume // nil = none open; every failure path leaves it nil
+	win      *Window
+	entry    *Entry
+	passwords []string
+	resolved  string // latched once a candidate verifies
+	solid     bool   // from the archive header; see Close below
 }
 
 func NewReader(volumes <-chan io.ReadCloser) *Reader
 func (r *Reader) Reset(volumes <-chan io.ReadCloser)
-func (r *Reader) SetPassword(password string)
-func (r *Reader) SetVerifyCRC(verify bool)
+func (r *Reader) SetPasswords(candidates []string)
 
 // NextEntry finishes any active entry, scans forward, and returns the next
 // member. io.EOF reports that the archive is over.
 //
 // Its errors are archive-level only: a malformed block header, no next
-// volume, end of stream. Every per-member outcome is delivered by the Entry.
+// volume, an unsupported format, end of stream. Every per-member outcome is
+// delivered by the Entry.
 func (r *Reader) NextEntry() (*Entry, error)
 ```
 
 `Reset` keeps the 32 MB window; nothing else survives it.
+
+### Passwords
+
+`SetPasswords([]string)` replaces `SetPassword(string)`. The reader resolves a
+candidate at the first encrypted thing it meets — the `CryptHeader` of a
+header-encrypted archive, or the first encrypted file header's `EncCheck` —
+using the existing check-value fold, which requires no decryption and no
+decompression. The winner is latched for the archive, so the cost is one key
+derivation per candidate per archive rather than per member.
+
+This deletes `errorReader` (four uses in `engine_rar5.go`), whose only purpose
+is smuggling a deferred password or KDF failure into the read path. With the
+password resolved at admission, those become terminal `Entry` values like every
+other refusal.
+
+`VerifyPassword` and `VerifyFilePassword` stay exported — they are part of the
+inspect surface and gonzbd's `rarheader` uses them directly.
+
+Limitation, to be documented rather than engineered around: an archive carrying
+no check value cannot have a candidate verified cheaply. The reader uses the
+first candidate and the failure surfaces as `ErrCRCMismatch`. Automatically
+re-running the archive per candidate is explicitly out of scope — it means
+re-reading every volume, and modern RAR stores a check value by default.
 
 ### `Entry`
 
@@ -178,7 +231,7 @@ type Entry struct {
 	Header *FileHeader
 
 	cur *FileHeader // header in force: LastBlock, UseMac, the whole-file CRC32
-	// src, size, remaining, crc, accumulate, done
+	// src, size, remaining, crc, done
 }
 
 func (e *Entry) Read(p []byte) (int, error)
@@ -197,35 +250,58 @@ func (e *Entry) Close() error
   for. This retires a documented wart: `FileError.Header` is currently "the LAST
   part's, not the one `Next` originally returned."
 - **A refused member is still an `Entry`**, already terminal: a rar bomb, a
-  broken solid run, an unparsable file header. `Read` and `Close` return the
-  cause. This is what makes `NextEntry`'s archive-only error set literally true
-  rather than true-with-exceptions.
+  broken solid run, an unparsable file header, an unresolvable password. `Read`
+  and `Close` return the cause. This is what makes `NextEntry`'s archive-only
+  error set literally true rather than true-with-exceptions.
+
+#### Abandoning an entry is cheap in a non-solid archive
+
+`Close` on a partly-read entry must decode the remainder only to keep the LZ77
+window valid for a *solid* successor. `ArchiveHeader.Solid` states up front
+whether the archive has any. So:
+
+- **non-solid archive** — `Close` decodes nothing. `volume.next()` skips the raw
+  packed bytes on the way to the following header.
+- **solid archive** — `Close` decodes the remainder into the window, as today.
+
+Today `endFile` always decodes-and-discards, which is why gonzbd's
+`InspectRar5` decompresses an entire archive to list its filenames while
+`InspectRar3` deliberately does not. This makes the fast path the default
+without an API change.
 
 ### Exported surface
 
 ```
-Reader  NewReader Reset SetPassword SetVerifyCRC NextEntry
-Entry   Header Read Close
-FileHeader  Mode
-UnpackDir UnpackOptions UnpackResult DamagedEntry SortVolumes
+decode   Reader  NewReader Reset SetPasswords NextEntry
+         Entry   Header Read Close
+inspect  ReadBlockHeader ParseArchiveHeader ParseFileHeader ParseCryptHeader
+         ReadRAR3BlockHeader ParseRAR3FileHeader
+         VerifyPassword VerifyFilePassword
+         BlockHeader ArchiveHeader FileHeader CryptHeader ExtraRecord
+         FileHeader.Mode, the HeaderType* and flag constants
 ```
 
 Sentinels kept: `ErrNoNextVolume`, `ErrNoActiveFile`, `ErrRarBombDetected`,
 `ErrCRCMismatch`, `ErrWrongPassword`, `ErrPasswordRequired`, `ErrTruncatedFile`,
-`ErrChecksumUnsupported`, `ErrSolidStreamBroken`, `ErrUnusableName`.
+`ErrChecksumUnsupported`, `ErrSolidStreamBroken`, `ErrBadHeaderCRC`,
+`ErrBadBlockHeader`, `ErrCorruptBlockHeader`.
 
 Deleted: `StreamDecompressor`, `FileError`, `ArchiveVersion`, `Version`,
-`ReadRAR3BlockHeader`, `ParseRAR3FileHeader`, `ErrVolumeVersionMismatch`,
+`SetPassword`, `SetVerifyCRC`, `UnpackDir`, `UnpackOptions`, `UnpackResult`,
+`DamagedEntry`, `SortVolumes`, `ErrUnusableName`, `ErrVolumeVersionMismatch`,
 `ErrRAR3EncryptionUnsupported`, `ErrRAR3UnmeasurablePayload`,
 `ErrUnexpectedVolumeBlock` — the last of which is declared in
-`decompressor.go:17` and referenced nowhere, so it is already dead exported
-API.
+`decompressor.go:17` and referenced nowhere, so it is already dead exported API.
 
-Unexported: `ReadBlockHeader`, `ParseArchiveHeader`, `ParseFileHeader`,
-`BlockHeader`, `ArchiveHeader`, `ExtraRecord`. None has a caller outside the
-package, and `readBlockHeader` in particular must not have one — see `volume`.
+Added: `ErrUnsupportedFormat`, `SetPasswords`.
 
-Added: `ErrUnsupportedFormat`.
+### Version detection
+
+With one decodable format left, `ArchiveVersion`, `Version()` and
+`ErrVolumeVersionMismatch` are deleted. `openVolume` either recognises a RAR5
+signature or returns `ErrUnsupportedFormat`, which subsumes the mismatch case:
+a later volume that is not RAR5 fails to open at all, and the engine-selection
+switch it guarded no longer exists.
 
 ### `Window` owns damage
 
@@ -243,16 +319,6 @@ func (w *Window) MarkIncomplete()
 answer the same question — becomes state on the thing it describes. One owner,
 one entrance, and the `error` return makes handling the refusal compulsory
 rather than customary.
-
-### `UnpackDir`
-
-The filesystem half is good and is kept: `os.Root` sandboxing, `sanitizePath`,
-temp-name-then-rename, `uniquePath`, volume discovery and sorting,
-`UnpackResult` / `DamagedEntry`.
-
-The traversal loop is rewritten against `NextEntry`. The `recorded` flag
-(`unpack.go:525`) is deleted: it exists only to deduplicate a verdict that
-currently arrives at two sites.
 
 ## Defect to fix as part of this work
 
@@ -287,7 +353,7 @@ skeleton of the replacement `CLAUDE.md`.
 
 | Constraint | Enforced by |
 |---|---|
-| Never let a block header be parsed out of a previous file's payload | `volume.next()` skips before reading. There is no path that reads a header any other way. |
+| Never let a block header be parsed out of a previous file's payload | `volume.next()` skips before reading. The traversal has no other way to read a header. |
 | No block's declared payload survives into the next header read; accounting by default rather than by obligation | Same. The default/obligation inversion, the `cause` accumulator and the three documented return reasons all disappear with the per-case discard. |
 | Refusing a file means dropping its payload, whatever the reason for the refusal | Same. The skip is unconditional and knows nothing about why a block was not claimed. |
 | The packed remainder is tracked per volume, never captured once, never read from a closed volume | `volume.body` is a field of the volume; an advance constructs a new one. A stale count is unrepresentable. |
@@ -297,15 +363,15 @@ skeleton of the replacement `CLAUDE.md`.
 
 | Constraint | Notes |
 |---|---|
-| `sanitizePath` is mandatory for all archive-internal filenames | Unchanged, in `UnpackDir`. |
 | The rar-bomb guard (`UnpackedSize > 1000 * PackedSize` for files > 1 MB) | Now expressed as a terminal `Entry` rather than a `refuse` call. |
 | The window history bound in `CopyBytes` (`distance > w.historyLen()`) | Untouched. Still what makes the skipped memclr a performance choice rather than an information leak. |
 | AES key material must never appear in error messages or log output | Discipline, not structure. Carried as prose, scoped to `crypto.go`. |
 | A file must never terminate cleanly without meeting `UnpackedSize` or reporting why; `ErrTruncatedFile` must not satisfy `errors.Is(err, io.EOF)` | Now decided in `Entry`. The sentinel rule is unchanged and load-bearing. |
-| A header flag must never switch verification off; gate on the produced size, not on what the archive says about itself; `UseMac` fails with `ErrChecksumUnsupported` | Unchanged. Only `SetVerifyCRC(false)` may disable verification. |
-| Sizes are validated where they are decoded; negative sizes rejected; `remaining <= 0` as the backstop | The RAR5 half survives: a size vint carries 70 bits and can set the sign bit of an `int64`. The RAR3 two-halves half is dropped with RAR3. |
+| A header flag must never switch verification off; gate on the produced size, not on what the archive says about itself; `UseMac` fails with `ErrChecksumUnsupported` | Strengthened: with `SetVerifyCRC` deleted, nothing can turn verification off at all. |
+| Sizes are validated where they are decoded; negative sizes rejected; `remaining <= 0` as the backstop | Both halves survive. RAR5: a size vint carries 70 bits and can set the sign bit of an `int64`. RAR3: `ParseRAR3FileHeader` is kept and still composes a size from two attacker-chosen halves, and gonzbd's `InspectRar3` relies on the rejection. |
 | Damage is recorded from what happened to the file, never from the error the caller receives | Survives as a rule, but with one writer: `Entry.Close` calls `Window.MarkIncomplete` from the outcome it observed. |
 | A per-file header flag must be re-checked on every volume advance | **Newly applies to RAR5** — see the defect above. The `refuseFile`-versus-`refuse` distinction this constraint documents disappears with both functions. |
+| A flag's name is not evidence of its value (`LHD_SALT` vs `LHD_PASSWORD`) | Retained. `header_rar3.go` survives, so the named constants and the two-bit encryption test survive with it. |
 
 ### No longer applicable
 
@@ -313,25 +379,24 @@ skeleton of the replacement `CLAUDE.md`.
 |---|---|
 | A `FileError` is a promise that the stream is standing on the next block header, and only a completed drain may make it | `FileError` and `markContinuable` are deleted. The verdict travels on the `Entry`, so no error needs to carry a positioning claim. |
 | The terminator exemption rests on `nextVolume` clearing `sd.currentVol` | There is no exemption: the skip is unconditional, and an advance replaces the volume rather than repointing it. |
-| A declared size of zero is not evidence that a block declares nothing | RAR3-only. A RAR5 `DataSize` measures the whole payload. |
-| A refusal that cannot discard must end traversal | RAR3-only (`ErrRAR3UnmeasurablePayload`). Every RAR5 block is measurable. |
-| A RAR3 subblock declaring `lhdLarge` is refused, not discarded by declared length | RAR3-only. |
-| A flag's name is not evidence of its value (`LHD_SALT` vs `LHD_PASSWORD`) | RAR3-only as a defect. Retained as a one-line general principle, since it is a reasoning error rather than a format detail. |
+| A declared size of zero is not evidence that a block declares nothing | RAR3 engine only. A RAR5 `DataSize` measures the whole payload. |
+| A refusal that cannot discard must end traversal | RAR3 engine only (`ErrRAR3UnmeasurablePayload`). Every RAR5 block is measurable. |
+| A RAR3 subblock declaring `lhdLarge` is refused, not discarded by declared length | RAR3 engine only. The parser never skipped payload; only the engine did. |
+| `sanitizePath` is mandatory for all archive-internal filenames | rarengine no longer writes files. Path safety moves wholly to the consumer, which already owns it: gonzbd has `internal/unpack/sanitized_path.go`. Deleting rarengine's copy removes a second implementation, not a defence. |
 
 ## Files
 
 | Disposition | Files |
 |---|---|
-| Untouched | `huffman.go` `bit_reader.go` `vint.go` `decoder50.go` `filters.go` `filter_*.{go,s}` `header_crypt.go` `verify_password.go` |
-| Amended | `window.go` (gains `BeginFile` / `MarkIncomplete`), `header.go` (loses RAR3 hooks, unexports `ReadBlockHeader`) |
-| Deleted | `decoder30.go` `engine_rar3.go` `header_rar3.go` (RAR3); `decompressor.go` `engine_rar5.go` `filereader.go` (traversal) |
+| Untouched | `huffman.go` `bit_reader.go` `vint.go` `decoder50.go` `filters.go` `filter_*.{go,s}` `header_crypt.go` `verify_password.go` `header_rar3.go` |
+| Amended | `window.go` (gains `BeginFile` / `MarkIncomplete`), `header.go` (loses the RAR3 engine hooks) |
+| Deleted | `decoder30.go` `engine_rar3.go` (RAR3 decoding); `unpack.go` (no consumer); `decompressor.go` `engine_rar5.go` `filereader.go` (traversal) |
 | Written fresh | `volume.go` `reader.go` `entry.go` `crypto.go` |
-| Rewritten | `unpack.go` (filesystem logic kept, traversal loop redone) |
 
 The traversal layer is written from scratch rather than adapted: its failure mode
-is keeping a field because something must have needed it. The decode core is left
-strictly alone in the same directory, so `git blame` survives on every line worth
-keeping and nothing is copied.
+is keeping a field because something must have needed it. The decode core and the
+header parsers are left strictly alone in the same directory, so `git blame`
+survives on every line worth keeping and nothing is copied.
 
 `crypto.go` is the one deliberate lift: `pbkdf2HmacSha256`, `verifyEncCheck` and
 `cbcDecryptReader` move verbatim out of `decompressor.go`. They are pure, correct
@@ -347,17 +412,17 @@ Kept, re-aimed at the new API:
 - `FuzzHuffman`, `decoder50_*_test.go`, `window_test.go`, `bit_reader_test.go`,
   `huffman_test.go`, `vint_test.go`, `filters_test.go` — decode core, untouched.
 - Every crafted-archive fixture from `discard_payload_test.go`,
-  `packed_drain_test.go`, `skip_damaged_test.go` and `unpack_refusal_test.go`.
-  The fixtures are the valuable part and each one encodes a real attack.
+  `packed_drain_test.go` and `skip_damaged_test.go`. The fixtures are the
+  valuable part and each one encodes a real attack.
 - `encrypted_multivolume_test.go`, `crc_verify_test.go`, `header_time_test.go`,
-  `verify_password_test.go`, `unpack_*_test.go`.
+  `verify_password_test.go`, `header_test.go`.
 
-Replaced rather than ported: the per-site assertions in those four files — of
-order 2,700 lines — which check that a particular `switch` case discarded, that a
-particular refusal drained, that a particular error proved `settled()`. They are
-per-site because the invariant was enforced per-site. Under `volume.next()` there
-is one site, and they become a small set of properties over it, driven by the
-retained fixtures through the public API:
+Replaced rather than ported: the per-site assertions in those crafted-archive
+files — of order 2,300 lines — which check that a particular `switch` case
+discarded, that a particular refusal drained, that a particular error proved
+`settled()`. They are per-site because the invariant was enforced per-site.
+Under `volume.next()` there is one site, and they become a small set of
+properties over it, driven by the retained fixtures through the public API:
 
 - after any block, whatever its type and whoever did or did not claim it, the
   next header is read at the block boundary;
@@ -365,16 +430,34 @@ retained fixtures through the public API:
 - a fabricated header planted in a block's payload is never returned by
   `NextEntry`;
 - an entry always reports a verdict, by `Read` or by `Close`;
-- a solid member after damage is refused.
+- a solid member after damage is refused;
+- a continuation whose encryption claim differs from its entry's is refused.
 
-Deleted with RAR3: `decompressor_rar3_test.go` and the RAR3 cases throughout.
+Deleted outright: `decompressor_rar3_test.go` (RAR3 engine),
+`unpack_test.go`, `unpack_damaged_test.go`, `unpack_refusal_test.go`,
+`unpack_realarchive_test.go` (`UnpackDir`) — 1,786 lines.
 
 ## Expected endpoint
 
-Non-test code from ~4,800 to ~2,600 lines. One traversal. `CLAUDE.md` from 18 KB
-to roughly 5 KB, because most of it becomes "the scanner guarantees this."
+| | Lines |
+|---|---|
+| Non-test code today | 5,670 |
+| RAR3 decoding + `unpack.go` deleted | −1,710 |
+| Traversal layer deleted | −1,609 |
+| `volume.go` + `reader.go` + `entry.go` + `crypto.go` written | +~650 |
+| **Endpoint** | **~3,000** |
+
+One traversal, one format decoded, no filesystem. `CLAUDE.md` from 18 KB to
+roughly 5 KB, because most of it becomes "the scanner guarantees this."
+
+## Follow-on work in gonzbd, out of scope here
+
+- Reimplement the decode integration against `Reader`/`Entry`.
+- Replace the per-password re-run of the whole archive with `SetPasswords`.
+- Point `InspectRar5` at the inspect surface, or rely on the cheap-abandon
+  behaviour above, so listing filenames stops decompressing the archive.
 
 ## Open questions
 
-None. Scope, alloc budget, facade removal and test disposition are all settled
-above.
+None. Scope, alloc budget, facade removal, password handling, `UnpackDir`,
+verification and test disposition are all settled above.
