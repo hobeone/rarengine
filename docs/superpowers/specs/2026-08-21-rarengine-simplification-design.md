@@ -59,10 +59,16 @@ Both usages shape the scope below.
   engine only implements the store method. Every RAR3 security constraint being
   retired is engine-side, not parser-side.
 - **`UnpackDir` is deleted**, with `UnpackOptions`, `UnpackResult`,
-  `DamagedEntry`, `SortVolumes`, `ErrUnusableName`, `uniquePath`, the `os.Root`
-  sandbox and `sanitizePath`. It has no caller and duplicates logic gonzbd
-  already owns. rarengine becomes a decode-and-inspect library that never
-  touches the filesystem.
+  `DamagedEntry`, `SortVolumes`, `ErrUnusableName`, `uniquePath` and the
+  `os.Root` sandbox. It has no caller and duplicates logic gonzbd already owns.
+  rarengine becomes a decode-and-inspect library that never touches the
+  filesystem.
+
+  `sanitizePath` is **not** part of this and stays. It is applied in the
+  parsers (`header.go:549`, `header_rar3.go:219`) to every `fh.Name` as the
+  header is decoded, not at a write site, so deleting `UnpackDir` strands
+  nothing and removing it would change what `FileHeader.Name` contains for
+  every consumer.
 - **Verification is unconditional.** `SetVerifyCRC` is deleted along with the
   `accumulate` branch.
 - **Passwords are a list**, resolved inside the reader. See below.
@@ -363,6 +369,7 @@ skeleton of the replacement `CLAUDE.md`.
 
 | Constraint | Notes |
 |---|---|
+| `sanitizePath` is mandatory for all archive-internal filenames | Unchanged, and applied in the parsers rather than at a write site, so every `FileHeader.Name` rarengine emits is already safe. Deliberate defence in depth: it protects a consumer that writes `fh.Name` directly, at the cost of destroying the evidence that an archive attempted traversal. The consumer that calls `Create` still owns the authoritative check — a library that writes no files cannot commit a traversal — and gonzbd has `internal/unpack/sanitized_path.go` for that. |
 | The rar-bomb guard (`UnpackedSize > 1000 * PackedSize` for files > 1 MB) | Now expressed as a terminal `Entry` rather than a `refuse` call. |
 | The window history bound in `CopyBytes` (`distance > w.historyLen()`) | Untouched. Still what makes the skipped memclr a performance choice rather than an information leak. |
 | AES key material must never appear in error messages or log output | Discipline, not structure. Carried as prose, scoped to `crypto.go`. |
@@ -382,7 +389,7 @@ skeleton of the replacement `CLAUDE.md`.
 | A declared size of zero is not evidence that a block declares nothing | RAR3 engine only. A RAR5 `DataSize` measures the whole payload. |
 | A refusal that cannot discard must end traversal | RAR3 engine only (`ErrRAR3UnmeasurablePayload`). Every RAR5 block is measurable. |
 | A RAR3 subblock declaring `lhdLarge` is refused, not discarded by declared length | RAR3 engine only. The parser never skipped payload; only the engine did. |
-| `sanitizePath` is mandatory for all archive-internal filenames | rarengine no longer writes files. Path safety moves wholly to the consumer, which already owns it: gonzbd has `internal/unpack/sanitized_path.go`. Deleting rarengine's copy removes a second implementation, not a defence. |
+| `ErrUnusableName` reports a member whose name sanitizes to nothing | Only something choosing a destination path can ask that question, and nothing in rarengine chooses one any more. Leaves with `UnpackDir`. |
 
 ## Files
 
