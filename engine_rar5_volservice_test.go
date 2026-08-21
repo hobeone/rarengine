@@ -68,15 +68,15 @@ func TestVolumePayloadSkipsServiceHeader(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r, shouldContinue, err := re.processVolumePayloadHeader(svc)
+	r, err := re.processVolumePayloadHeader(svc)
 	if err != nil {
 		t.Fatalf("processVolumePayloadHeader: %v", err)
 	}
 	if r != nil {
+		// One assertion now carries both halves: a non-nil reader would have
+		// its bytes spliced into the file as content, and it is also what
+		// stops the caller's scan, so the real payload would never be sought.
 		t.Error("service record was returned as payload; its bytes would be spliced into the file")
-	}
-	if !shouldContinue {
-		t.Error("shouldContinue = false; the caller would stop instead of seeking the real payload")
 	}
 
 	after, err := f.Seek(0, io.SeekCurrent)
