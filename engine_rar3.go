@@ -11,6 +11,17 @@ type rar3Engine struct {
 	rar3Dec  *rar3Decoder
 	mvReader multiVolumePayloadReader3
 	packed   packedCursor
+	// fatal ends traversal permanently once the stream can no longer be
+	// resynchronised. Every other refusal in this engine discards the offending
+	// block first, so the stream is left standing on the next header and the
+	// caller may keep going; the one case that cannot is a block whose length
+	// is itself unreadable. Continuing from there would read the next header
+	// out of that block's payload, which is the fabrication this whole file
+	// guards against.
+	//
+	// Not cleared here: Reset drops the engine entirely, so a reused
+	// decompressor builds a fresh one.
+	fatal error
 }
 
 func newRAR3Engine(sd *StreamDecompressor) *rar3Engine {
@@ -21,6 +32,12 @@ func newRAR3Engine(sd *StreamDecompressor) *rar3Engine {
 }
 
 func (re *rar3Engine) Next() (*FileHeader, error) {
+	// Checked before anything reads: once the stream cannot be resynchronised,
+	// every later header would come out of a block this engine could not skip.
+	if re.fatal != nil {
+		return nil, re.fatal
+	}
+
 	// Draining goes through the owner, so a file the caller skipped is
 	// verified on the same terms as one it read.
 	if err := re.sd.finishCurrentFile(&re.packed); err != nil {
@@ -233,6 +250,15 @@ func (re *rar3Engine) dropDeclaredPayload(h *BlockHeader) error {
 		// Scoped to the subblock types on purpose. lhdLarge is 0x0100, which on
 		// a main header is mhdFirstVolume and entirely legitimate, so testing
 		// the bit alone would refuse ordinary archives.
+		//
+		// Terminal, unlike every other refusal here. The others discard the
+		// block and leave the stream on the next header, so traversal resumes
+		// safely; this one cannot, because the number of bytes to skip is
+		// precisely what could not be read. The stream stays parked at the
+		// start of the block's payload, so any later header would be parsed out
+		// of attacker-chosen bytes -- refusing without ending traversal would
+		// reintroduce the fabrication this file exists to prevent.
+		re.fatal = ErrRAR3UnmeasurableSubBlock
 		return ErrRAR3UnmeasurableSubBlock
 	}
 	return re.sd.discardPayload(h.DataSize)
@@ -347,6 +373,9 @@ func (re *rar3Engine) nextVolumePayload() (io.Reader, error) {
 		return nil, err
 	}
 	for {
+		if re.fatal != nil {
+			return nil, re.fatal
+		}
 		h, err := ReadRAR3BlockHeader(re.sd.currentVol)
 		if err != nil {
 			return nil, err

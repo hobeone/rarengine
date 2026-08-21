@@ -596,15 +596,14 @@ func hexName(v int) string {
 // archive and encryption rows be called claimed, and the disjunction goes green
 // on vulnerable code.
 func classifySweep(sd *StreamDecompressor, original *bytes.Reader, claimed bool) sweepOutcome {
-	switch {
-	case claimed:
+	if claimed {
 		return outcomeClaimed
-	case sd.currentVol == nil:
+	}
+	if sd.currentVol == nil {
 		return outcomeAdvanced
-	case sd.currentVol != nil:
-		if mv, ok := sd.currentVol.(*mockReadCloser); !ok || mv.Reader != original {
-			return outcomeAdvanced
-		}
+	}
+	if mv, ok := sd.currentVol.(*mockReadCloser); !ok || mv.Reader != original {
+		return outcomeAdvanced
 	}
 	return outcomeDiscarded
 }
@@ -731,6 +730,20 @@ func TestLargeSubBlockIsRefused(t *testing.T) {
 	sd := decompressorFor(archive.Bytes())
 	if _, err := sd.Next(); !errors.Is(err, ErrRAR3UnmeasurableSubBlock) {
 		t.Fatalf("Next: got %v, want ErrRAR3UnmeasurableSubBlock", err)
+	}
+
+	// The refusal must be terminal. Nothing skipped this block -- its length is
+	// exactly what could not be determined -- so the stream is parked at the
+	// start of attacker-chosen bytes, and Next() carries no sticky error of its
+	// own. Without a terminal state here the retry that this library's own docs
+	// invite reads its next header out of that payload, which is the whole
+	// defect this change exists to remove.
+	fh, err := sd.Next()
+	if err == nil {
+		t.Fatalf("retry surfaced %q from the refused block's payload", fh.Name)
+	}
+	if !errors.Is(err, ErrRAR3UnmeasurableSubBlock) {
+		t.Fatalf("retry: got %v, want the refusal repeated", err)
 	}
 }
 
