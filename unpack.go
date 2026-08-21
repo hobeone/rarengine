@@ -189,7 +189,7 @@ func readVolumeIndex(r io.Reader) (int, error) {
 		}
 		return ah.VolumeNumber, nil
 	} else {
-		if h.Type != 0x73 {
+		if h.Type != rar3BlockMain {
 			return 0, errors.New("invalid archive header type")
 		}
 		return 0, nil

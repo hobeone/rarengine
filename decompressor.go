@@ -61,6 +61,36 @@ var (
 	// though that header parsed. A readable header is therefore not on its
 	// own a reason to expect a *FileError here.
 	ErrRAR3EncryptionUnsupported = errors.New("rarengine: RAR3 encryption is not supported")
+
+	// ErrRAR3UnmeasurablePayload reports a RAR3 block whose payload length this
+	// library cannot determine, so traversal stops rather than guessing.
+	//
+	// lhdLarge puts the high 32 bits of a packed size inside the file-header
+	// layout, and only the low half reaches h.DataSize. Two blocks can carry
+	// that flag with the high half out of reach: a subblock, whose header no
+	// dispatcher parses at all, and a file header whose parse failed -- the
+	// size is inside the very structure that proved unreadable.
+	//
+	// Either way the count needed to skip the block is unavailable, so nothing
+	// can reposition the stream: discarding the low half alone lands mid-payload
+	// and the next header comes out of attacker-chosen bytes. That is why this
+	// is terminal rather than a refusal the caller may continue past, and why it
+	// is not recovered by reading the high half out of h.Payload directly --
+	// doing so would trust field offsets in a header that just proved it cannot
+	// be trusted.
+	//
+	// unrar composes both halves, so an archive reaching this would also be one
+	// where this library and the reference implementation disagree about what it
+	// contains. Stopping is the honest answer to that.
+	ErrRAR3UnmeasurablePayload = errors.New("rarengine: RAR3 block declares a packed size this library cannot measure")
+
+	// ErrVolumeVersionMismatch reports a volume whose archive format differs
+	// from the one already being decoded.
+	//
+	// The engine is chosen once, from the first volume, and every later volume
+	// is read through it. A set that mixes RAR3 and RAR5 would otherwise have
+	// its later volumes parsed under the wrong header layout entirely.
+	ErrVolumeVersionMismatch = errors.New("rarengine: volume archive version does not match the rest of the set")
 )
 
 type ArchiveVersion int
@@ -387,9 +417,31 @@ func (sd *StreamDecompressor) Reset(volumes <-chan io.ReadCloser) {
 }
 
 // nextVolume fetches the next volume from the channel, closing the previous one if active.
+//
+// Every failure here clears sd.currentVol, and that is load-bearing rather than
+// tidiness. Next() re-enters the engine whenever currentVol is non-nil, so a
+// volume left standing after a failure is read again at whatever offset the
+// failure stopped at -- and the engine reaches this function from the
+// terminator cases, which deliberately do not discard the block's declared
+// payload because the stream is supposed to have moved on. Leaving the closed
+// volume in place made that exemption false: a terminator carrying payload
+// followed by a closed channel left the next header parsable out of those
+// bytes. Close() is no defence, because the volumes are caller-supplied and
+// io.NopCloser -- whose Close does nothing -- is a mainstream choice for a
+// channel of readers.
+//
+// Clearing it also makes ErrNoNextVolume idempotent, which matters because it
+// is the normal end-of-archive signal rather than a failure: a repeat Next()
+// takes the currentVol == nil path, receives from the still-closed channel and
+// reports the same sentinel, instead of re-reading a dead volume.
 func (sd *StreamDecompressor) nextVolume() error {
 	if sd.currentVol != nil {
 		_ = sd.currentVol.Close()
+		// Dropped even before the receive: the volume is closed from here on,
+		// and a failure below must not leave it reachable. This also keeps
+		// Reset from closing an already-closed caller ReadCloser a second time,
+		// which io.Closer does not promise is safe.
+		sd.currentVol = nil
 	}
 
 	vol, ok := <-sd.volumes
@@ -400,7 +452,29 @@ func (sd *StreamDecompressor) nextVolume() error {
 
 	version, err := detectVersion(sd.currentVol)
 	if err != nil {
+		// The volume is partially consumed and its version unknown; on the
+		// first volume sd.engine is still nil, so a caller that retries Next()
+		// would dispatch through a nil interface. Clearing sends the retry back
+		// through this function instead.
+		_ = sd.currentVol.Close()
+		sd.currentVol = nil
 		return err
+	}
+
+	// A later volume announcing a different format than the one already being
+	// decoded is refused rather than absorbed. The engine is built once, on the
+	// first volume, so overwriting sd.version here would leave the two
+	// disagreeing: a RAR3 engine reading blocks from a volume that says RAR5,
+	// parsing every subsequent header under the wrong layout. Checked before
+	// any state is mutated, so the rejection leaves nothing half-applied.
+	// sd.version is only consulted once it has actually been established: an
+	// engine can be installed directly, leaving the version Unknown, and that
+	// is not a disagreement about format.
+	if sd.engine != nil && sd.version != VersionUnknown && version != sd.version {
+		_ = sd.currentVol.Close()
+		sd.currentVol = nil
+		return fmt.Errorf("%w: volume declares %v, archive is %v",
+			ErrVolumeVersionMismatch, version, sd.version)
 	}
 
 	sd.version = version
