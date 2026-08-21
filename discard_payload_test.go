@@ -728,8 +728,8 @@ func TestLargeSubBlockIsRefused(t *testing.T) {
 	archive.Write(fabricated)
 
 	sd := decompressorFor(archive.Bytes())
-	if _, err := sd.Next(); !errors.Is(err, ErrRAR3UnmeasurableSubBlock) {
-		t.Fatalf("Next: got %v, want ErrRAR3UnmeasurableSubBlock", err)
+	if _, err := sd.Next(); !errors.Is(err, ErrRAR3UnmeasurablePayload) {
+		t.Fatalf("Next: got %v, want ErrRAR3UnmeasurablePayload", err)
 	}
 
 	// The refusal must be terminal. Nothing skipped this block -- its length is
@@ -742,8 +742,107 @@ func TestLargeSubBlockIsRefused(t *testing.T) {
 	if err == nil {
 		t.Fatalf("retry surfaced %q from the refused block's payload", fh.Name)
 	}
-	if !errors.Is(err, ErrRAR3UnmeasurableSubBlock) {
+	if !errors.Is(err, ErrRAR3UnmeasurablePayload) {
 		t.Fatalf("retry: got %v, want the refusal repeated", err)
+	}
+}
+
+// TestLargeSubBlockWithZeroLowHalfIsRefused covers the bypass that a declared
+// size of zero opens.
+//
+// h.DataSize carries only the low 32 bits of a RAR3 packed size, so a block
+// whose true size is an exact multiple of 4 GiB -- or one simply built with
+// ADD_SIZE zero and the high half elsewhere -- declares nothing at all. Gating
+// the refusal on h.DataSize > 0 therefore let precisely those blocks through to
+// discardPayload(0), which consumes nothing and leaves the entire payload for
+// the next header read.
+func TestLargeSubBlockWithZeroLowHalfIsRefused(t *testing.T) {
+	fabricated := fabricatedRAR3()
+
+	var archive bytes.Buffer
+	archive.Write(rar3ArchiveHeader())
+	archive.Write(rar3BlockDeclaring(rar3BlockNewSub, lhdLarge, 0, false))
+	archive.Write(fabricated)
+
+	sd := decompressorFor(archive.Bytes())
+	if _, err := sd.Next(); !errors.Is(err, ErrRAR3UnmeasurablePayload) {
+		t.Fatalf("Next: got %v, want ErrRAR3UnmeasurablePayload", err)
+	}
+	if fh, err := sd.Next(); err == nil {
+		t.Fatalf("retry surfaced %q from the refused block's payload", fh.Name)
+	}
+}
+
+// TestLargeFileHeaderParseFailureIsTerminal covers a file header that claims
+// lhdLarge and then fails to parse.
+//
+// The high half of its packed size lives inside the structure that just proved
+// unreadable, so refusing with h.DataSize discards the low half only and leaves
+// the stream mid-payload. Nothing can reposition it, so traversal stops.
+func TestLargeFileHeaderParseFailureIsTerminal(t *testing.T) {
+	fabricated := fabricatedRAR3()
+
+	var archive bytes.Buffer
+	archive.Write(rar3ArchiveHeader())
+	// A file block whose header payload is two zero bytes: far too short for
+	// the file-header layout, so ParseRAR3FileHeader fails, while lhdLarge
+	// says a high half exists that nothing can now read.
+	archive.Write(rar3BlockDeclaring(rar3BlockFile, lhdLarge, uint32(len(fabricated)), false))
+	archive.Write(fabricated)
+
+	sd := decompressorFor(archive.Bytes())
+	if _, err := sd.Next(); !errors.Is(err, ErrRAR3UnmeasurablePayload) {
+		t.Fatalf("Next: got %v, want ErrRAR3UnmeasurablePayload", err)
+	}
+	if fh, err := sd.Next(); err == nil {
+		t.Fatalf("retry surfaced %q after an unmeasurable file header", fh.Name)
+	}
+}
+
+// TestEncryptedMainHeaderIsTerminal pins that the RAR3 header-encryption
+// refusal stops traversal rather than only reporting.
+//
+// Its own payload is discarded, so the stream is correctly positioned -- but
+// every header after it is ciphertext, and RAR3's header checksum is a 16-bit
+// truncation of CRC32, giving roughly a 1-in-65536 chance per block that random
+// ciphertext parses. Relying on that is relying on the archive not having
+// searched for bytes that do.
+func TestEncryptedMainHeaderIsTerminal(t *testing.T) {
+	var archive bytes.Buffer
+	archive.Write(rar3BlockDeclaring(rar3BlockMain, mhdPassword, 0, true))
+	archive.Write(rar3StoreEntry("real.txt", 0, 4, crc32.ChecksumIEEE([]byte("real")), []byte("real")))
+
+	sd := decompressorFor(archive.Bytes())
+	if _, err := sd.Next(); !errors.Is(err, ErrRAR3EncryptionUnsupported) {
+		t.Fatalf("Next: got %v, want ErrRAR3EncryptionUnsupported", err)
+	}
+	if _, err := sd.Next(); !errors.Is(err, ErrRAR3EncryptionUnsupported) {
+		t.Fatal("retry resumed scanning instead of repeating the refusal")
+	}
+}
+
+// TestVolumeVersionMismatchIsRefused covers a volume set that changes format
+// partway through.
+//
+// The engine is built once from the first volume, so a later volume announcing
+// a different version would be parsed under the wrong header layout entirely.
+func TestVolumeVersionMismatchIsRefused(t *testing.T) {
+	var vol1 bytes.Buffer
+	vol1.Write(rar3ArchiveHeader())
+	vol1.Write(rar3StoreEntry("split.bin", lhdSplitAfter, 20,
+		crc32.ChecksumIEEE([]byte("0123456789abcdefghij")), []byte("0123456789")))
+
+	var vol2 bytes.Buffer
+	vol2.Write(rar5ArchiveHeader())
+	vol2.Write(rar5EndHeader())
+
+	sd := NewStreamDecompressor(volumesOf(vol1.Bytes(), vol2.Bytes()))
+	if _, err := sd.Next(); err != nil {
+		t.Fatalf("first Next: %v", err)
+	}
+	_, err := io.ReadAll(sd)
+	if !errors.Is(err, ErrVolumeVersionMismatch) {
+		t.Fatalf("reading across the boundary: got %v, want ErrVolumeVersionMismatch", err)
 	}
 }
 

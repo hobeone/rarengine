@@ -62,29 +62,35 @@ var (
 	// own a reason to expect a *FileError here.
 	ErrRAR3EncryptionUnsupported = errors.New("rarengine: RAR3 encryption is not supported")
 
-	// ErrRAR3UnmeasurableSubBlock reports a RAR3 subblock whose payload length
-	// this library cannot determine, so traversal stops rather than guessing.
+	// ErrRAR3UnmeasurablePayload reports a RAR3 block whose payload length this
+	// library cannot determine, so traversal stops rather than guessing.
 	//
-	// Subblock types carry the file-header layout, so lhdLarge may put the high
-	// 32 bits of the packed size inside a header no dispatcher parses. Only the
-	// low half reaches h.DataSize, so discarding by declared length would skip
-	// less than the block occupies and read the next header out of the
-	// remainder -- and unrar, which composes both halves, would disagree about
-	// which entries the archive even contains.
+	// lhdLarge puts the high 32 bits of a packed size inside the file-header
+	// layout, and only the low half reaches h.DataSize. Two blocks can carry
+	// that flag with the high half out of reach: a subblock, whose header no
+	// dispatcher parses at all, and a file header whose parse failed -- the
+	// size is inside the very structure that proved unreadable.
 	//
-	// Refused rather than parsed. Reading the high half means parsing subblock
-	// file-header layout for the sole purpose of measuring something this
-	// library then discards, and a subblock above 4 GiB does not occur outside a
-	// crafted archive.
+	// Either way the count needed to skip the block is unavailable, so nothing
+	// can reposition the stream: discarding the low half alone lands mid-payload
+	// and the next header comes out of attacker-chosen bytes. That is why this
+	// is terminal rather than a refusal the caller may continue past, and why it
+	// is not recovered by reading the high half out of h.Payload directly --
+	// doing so would trust field offsets in a header that just proved it cannot
+	// be trusted.
 	//
-	// Deliberately not raised for a file block whose header fails to parse.
-	// That path has the same unreadable high half and still discards the low
-	// one, because nothing in the stream says how many bytes it should have
-	// skipped -- the size is inside the header that just failed. Refusing there
-	// would end traversal on any corrupt large file rather than skipping it, so
-	// the guess is kept where a file is concerned and refused only where a
-	// whole block type is unparsed by design.
-	ErrRAR3UnmeasurableSubBlock = errors.New("rarengine: RAR3 subblock declares a packed size this library cannot measure")
+	// unrar composes both halves, so an archive reaching this would also be one
+	// where this library and the reference implementation disagree about what it
+	// contains. Stopping is the honest answer to that.
+	ErrRAR3UnmeasurablePayload = errors.New("rarengine: RAR3 block declares a packed size this library cannot measure")
+
+	// ErrVolumeVersionMismatch reports a volume whose archive format differs
+	// from the one already being decoded.
+	//
+	// The engine is chosen once, from the first volume, and every later volume
+	// is read through it. A set that mixes RAR3 and RAR5 would otherwise have
+	// its later volumes parsed under the wrong header layout entirely.
+	ErrVolumeVersionMismatch = errors.New("rarengine: volume archive version does not match the rest of the set")
 )
 
 type ArchiveVersion int
@@ -453,6 +459,22 @@ func (sd *StreamDecompressor) nextVolume() error {
 		_ = sd.currentVol.Close()
 		sd.currentVol = nil
 		return err
+	}
+
+	// A later volume announcing a different format than the one already being
+	// decoded is refused rather than absorbed. The engine is built once, on the
+	// first volume, so overwriting sd.version here would leave the two
+	// disagreeing: a RAR3 engine reading blocks from a volume that says RAR5,
+	// parsing every subsequent header under the wrong layout. Checked before
+	// any state is mutated, so the rejection leaves nothing half-applied.
+	// sd.version is only consulted once it has actually been established: an
+	// engine can be installed directly, leaving the version Unknown, and that
+	// is not a disagreement about format.
+	if sd.engine != nil && sd.version != VersionUnknown && version != sd.version {
+		_ = sd.currentVol.Close()
+		sd.currentVol = nil
+		return fmt.Errorf("%w: volume declares %v, archive is %v",
+			ErrVolumeVersionMismatch, version, sd.version)
 	}
 
 	sd.version = version

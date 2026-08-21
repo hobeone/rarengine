@@ -111,26 +111,33 @@ func (re *rar3Engine) processHeader(h *BlockHeader) (*FileHeader, error) {
 			// member to name and nothing to continue to -- this ends
 			// traversal rather than producing a FileError.
 			//
-			// Left unchecked it ends traversal anyway, but only because the
-			// encrypted bytes are unlikely to form a valid header. RAR3's
-			// header checksum is a 16-bit truncation of CRC32, so each block
-			// has roughly a 1-in-65536 chance of passing regardless, which
-			// would surface a wholly fabricated file entry.
+			// Terminal, not merely reported. This block's own payload is
+			// discarded on the way out, so the stream is positioned correctly
+			// -- but every header after it is ciphertext, and RAR3's header
+			// checksum is a 16-bit truncation of CRC32, so scanning it gives
+			// roughly a 1-in-65536 chance per block of accepting a wholly
+			// fabricated entry. Relying on ciphertext to be unparseable is
+			// relying on the archive not to have searched for bytes that parse.
+			re.fatal = ErrRAR3EncryptionUnsupported
 			cause = ErrRAR3EncryptionUnsupported
 		}
 
 	case rar3BlockFile:
 		fh, err := ParseRAR3FileHeader(h)
 		if err != nil {
-			// Refusing a file must not leave its payload in the stream, or the
-			// next header is parsed out of attacker-chosen bytes.
-			//
-			// h.DataSize is the only size available here: it comes from the
-			// block framing, which is intact, while fh -- and with it the
-			// high half of a large file's packed size -- is exactly what
-			// failed to parse. A corrupt LHD_LARGE header can therefore still
-			// leave its high bytes behind, which no amount of care here can
-			// recover, because nothing in the stream says how many there are.
+			// A file whose header failed to parse while claiming lhdLarge
+			// cannot be skipped at all: h.DataSize is only the low 32 bits, and
+			// the high half lives in the structure that just proved unreadable.
+			// Discarding the low half alone lands mid-payload, so the next
+			// header would come out of the remainder. Terminal for the same
+			// reason dropDeclaredPayload's is.
+			if h.Flags&lhdLarge > 0 {
+				re.fatal = ErrRAR3UnmeasurablePayload
+				return nil, re.fatal
+			}
+			// Otherwise h.DataSize is the whole payload and refusing is safe:
+			// it comes from the block framing, which is intact and CRC-checked,
+			// while only the file-level fields are unusable.
 			return nil, re.sd.refuse(h.DataSize, err)
 		}
 
@@ -246,20 +253,26 @@ func (re *rar3Engine) settle(h *BlockHeader, cause error) error {
 // forgotten return now over-consumes instead, eating the following block, which
 // surfaces as a header CRC failure. Loud and wrong beats silent and wrong.
 func (re *rar3Engine) dropDeclaredPayload(h *BlockHeader) error {
-	if h.DataSize > 0 && rar3UsesFileLayout(h.Type) && h.Flags&lhdLarge > 0 {
+	if rar3UsesFileLayout(h.Type) && h.Flags&lhdLarge > 0 {
 		// Scoped to the subblock types on purpose. lhdLarge is 0x0100, which on
 		// a main header is mhdFirstVolume and entirely legitimate, so testing
 		// the bit alone would refuse ordinary archives.
 		//
+		// Deliberately NOT also gated on h.DataSize > 0. h.DataSize is only the
+		// low 32 bits of the packed size, so a block whose true size is an exact
+		// multiple of 4 GiB -- or one simply built with ADD_SIZE zero and a
+		// non-zero high half -- reads as declaring nothing. Requiring it here
+		// let exactly those blocks past the guard and into discardPayload(0),
+		// which consumes nothing and leaves the whole payload in the stream.
+		// The flag is the claim that matters; the declared size is not evidence
+		// against it.
+		//
 		// Terminal, unlike every other refusal here. The others discard the
 		// block and leave the stream on the next header, so traversal resumes
 		// safely; this one cannot, because the number of bytes to skip is
-		// precisely what could not be read. The stream stays parked at the
-		// start of the block's payload, so any later header would be parsed out
-		// of attacker-chosen bytes -- refusing without ending traversal would
-		// reintroduce the fabrication this file exists to prevent.
-		re.fatal = ErrRAR3UnmeasurableSubBlock
-		return ErrRAR3UnmeasurableSubBlock
+		// precisely what could not be read.
+		re.fatal = ErrRAR3UnmeasurablePayload
+		return ErrRAR3UnmeasurablePayload
 	}
 	return re.sd.discardPayload(h.DataSize)
 }
@@ -303,11 +316,22 @@ func (re *rar3Engine) processVolumePayloadHeader(h *BlockHeader) (io.Reader, err
 			// this engine would otherwise never look at. Ends traversal
 			// rather than refusing a member -- the following headers are
 			// ciphertext, so there is no member to name.
+			//
+			// Latched for the same reason as the processHeader site: a retry
+			// would scan ciphertext through a 16-bit checksum.
+			re.fatal = ErrRAR3EncryptionUnsupported
 			cause = ErrRAR3EncryptionUnsupported
 		}
 	case rar3BlockFile:
 		fh, err := ParseRAR3FileHeader(h)
 		if err != nil {
+			// Terminal when lhdLarge is claimed, for the reason the same site
+			// in processHeader gives: the high half of the packed size is
+			// inside the header that failed, so the block cannot be skipped.
+			if h.Flags&lhdLarge > 0 {
+				re.fatal = ErrRAR3UnmeasurablePayload
+				return nil, re.fatal
+			}
 			// Returns: refuse discarded h.DataSize itself.
 			return nil, re.sd.refuse(h.DataSize, err)
 		}
