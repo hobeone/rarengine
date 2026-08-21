@@ -103,10 +103,14 @@ volumes <-chan io.ReadCloser
   └─ Reader          traversal: volumes, blocks, member admission, password
        └─ volume     one volume's bytes and the position within them
        └─ Entry      one member: reader chain, byte budget, CRC, verdict
+            └─ decoder50 / storeReader
+                 └─ cbcDecryptReader (if encrypted)
+                      └─ multiVolumePayloadReader (splices volume.payload() across volumes)
 ```
 
 `Reader` and `Entry` replace `StreamDecompressor`, `versionedEngine`,
-`rar5Engine`, `multiVolumePayloadReader` and `fileReader`.
+`rar5Engine` and `fileReader`. Multi-volume splicing is handled directly by
+`Entry` coordinating with `Reader`.
 
 ### `volume` — position becomes a value
 
@@ -275,6 +279,31 @@ Today `endFile` always decodes-and-discards, which is why gonzbd's
 `InspectRar3` deliberately does not. This makes the fast path the default
 without an API change.
 
+#### Multi-volume coordination & payload splicing
+
+When a file's payload spans multiple volumes:
+1. `Entry` reads from a `multiVolumePayloadReader` that wraps `volume.payload()`.
+2. When the inner `v.payload()` reports `io.EOF`:
+   - If `e.cur.LastBlock == true`, the member is finished; return `io.EOF`.
+   - If `e.cur.LastBlock == false`, request the next volume payload from `Reader`.
+3. `Reader.nextVolumePayload()`:
+   - Fetches the next `io.ReadCloser` from `volumes` and constructs a fresh `volume`.
+   - Loops on `v.next()` until finding `HeaderTypeFile` (skipping `HeaderTypeArchive` automatically via `v.next()`'s discard mechanism).
+   - Validates that the continuation's encryption state matches the member's initial state: `if fh.Encrypted != e.Header.Encrypted { return nil, ErrCorruptFileHeader }`.
+   - Updates `e.cur = fh` (capturing the whole-file CRC32, `LastBlock`, and `UseMac`).
+   - Returns `v.payload()`.
+
+#### Abandoned multi-volume members guard
+
+If a consumer stops reading an entry mid-file and calls `NextEntry()` while the entry still has continuation parts on subsequent volumes:
+- `v.next()` on the current volume exhausts to `io.EOF`.
+- `NextEntry()` advances volumes and encounters continuation headers (`!fh.FirstBlock`).
+- `NextEntry()` must loop and discard any header where `!fh.FirstBlock`. Because `v.next()` bounds and drains each continuation block's payload automatically, this cleanly drains all trailing parts until the next entry (`fh.FirstBlock == true`) is reached.
+
+#### Solid archive incomplete state guard
+
+In a solid archive, skipping an entry without decompressing it corrupts the LZ77 history for subsequent solid members. If `Entry.Close()` or `NextEntry()` finishes an entry that did not decode to `UnpackedSize`, it **must** invoke `Window.MarkIncomplete()`. Any subsequent solid member calling `Window.BeginFile(true)` will then fail immediately with `ErrSolidStreamBroken`.
+
 ### Exported surface
 
 ```
@@ -346,8 +375,9 @@ Severity is integrity, not disclosure: the archive already controls the bytes an
 the CRC32, so nothing is leaked that it did not have. What it buys is the ability
 to make this library report `Encrypted: false` over content it did not decrypt.
 
-The new design must check that a continuation's encryption claim matches the
-entry's, with a test.
+The new design checks this explicitly in `Reader.nextVolumePayload`:
+`if fh.Encrypted != e.Header.Encrypted { return nil, ErrCorruptFileHeader }`.
+Pinned with a unit test.
 
 ## Constraint inventory
 
@@ -363,6 +393,7 @@ skeleton of the replacement `CLAUDE.md`.
 | No block's declared payload survives into the next header read; accounting by default rather than by obligation | Same. The default/obligation inversion, the `cause` accumulator and the three documented return reasons all disappear with the per-case discard. |
 | Refusing a file means dropping its payload, whatever the reason for the refusal | Same. The skip is unconditional and knows nothing about why a block was not claimed. |
 | The packed remainder is tracked per volume, never captured once, never read from a closed volume | `volume.body` is a field of the volume; an advance constructs a new one. A stale count is unrepresentable. |
+| Trailing continuation blocks of an abandoned multi-volume file are cleanly drained | `NextEntry()` loops and discards headers where `!fh.FirstBlock`. `volume.next()` automatically drains their bodies. |
 | A file's terminal error is durable for that file | `Entry.done`, set once, returned by both `Read` and `Close`. |
 
 ### Carried forward — still a runtime guard, still needs a test
@@ -377,7 +408,7 @@ skeleton of the replacement `CLAUDE.md`.
 | A header flag must never switch verification off; gate on the produced size, not on what the archive says about itself; `UseMac` fails with `ErrChecksumUnsupported` | Strengthened: with `SetVerifyCRC` deleted, nothing can turn verification off at all. |
 | Sizes are validated where they are decoded; negative sizes rejected; `remaining <= 0` as the backstop | Both halves survive. RAR5: a size vint carries 70 bits and can set the sign bit of an `int64`. RAR3: `ParseRAR3FileHeader` is kept and still composes a size from two attacker-chosen halves, and gonzbd's `InspectRar3` relies on the rejection. |
 | Damage is recorded from what happened to the file, never from the error the caller receives | Survives as a rule, but with one writer: `Entry.Close` calls `Window.MarkIncomplete` from the outcome it observed. |
-| A per-file header flag must be re-checked on every volume advance | **Newly applies to RAR5** — see the defect above. The `refuseFile`-versus-`refuse` distinction this constraint documents disappears with both functions. |
+| A per-file header flag must be re-checked on every volume advance | **Newly applies to RAR5** — `Reader.nextVolumePayload` asserts `fh.Encrypted == e.Header.Encrypted`, returning `ErrCorruptFileHeader` on mismatch. The `refuseFile`-versus-`refuse` distinction this constraint documents disappears with both functions. |
 | A flag's name is not evidence of its value (`LHD_SALT` vs `LHD_PASSWORD`) | Retained. `header_rar3.go` survives, so the named constants and the two-bit encryption test survive with it. |
 
 ### No longer applicable
