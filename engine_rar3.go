@@ -55,17 +55,25 @@ func (re *rar3Engine) Next() (*FileHeader, error) {
 // A nil header with a nil error means the block held nothing this caller wants
 // -- an archive header, a continuation of a file already announced, a volume
 // terminator, or a record type Next() does not surface -- and scanning
-// continues. The two of those that carry file data have had it discarded by the
-// time this returns: a continuation's packed bytes and an unrecognised block's
-// h.DataSize. That discard is not tidiness. A block left in the stream is where
-// the next header would be parsed from, which for a crafted archive means an
-// entry fabricated out of attacker-chosen bytes.
+// continues. A block that declared payload must have it discarded before that
+// happens, because a block left in the stream is where the next header gets
+// parsed from -- which for a crafted archive means an entry fabricated out of
+// attacker-chosen bytes. The continuation case discards fh.PackedSize and the
+// default case h.DataSize. The archive-header case does not, and DataSize is
+// read from a header flag with no restriction on block type, so an archive
+// header can declare one: see #48. The terminator case does not discard either,
+// but advances to the next volume, so nothing is left behind to misread.
 //
 // A non-nil header is the file to hand back, and by then it has been admitted:
-// the window is reset, the packed cursor repointed, and fileReader begun. There
-// is deliberately no third outcome. Returning a header while asking the caller
-// to keep scanning would discard that header, since the caller returns it only
-// when it stops.
+// the window is reset, the packed cursor repointed, and fileReader begun.
+//
+// The value and the continue-decision are one signal, in both directions.
+// Returning a header while asking the caller to keep scanning would discard
+// that header, since the caller returns it only when it stops -- and returning
+// nil to mean "stop with nothing" is equally unavailable, because the caller
+// reads that as "keep scanning" and reads another header from a stream that may
+// have ended. A path that needs either shape must reintroduce an explicit
+// signal rather than reaching for a nil.
 func (re *rar3Engine) processHeader(h *BlockHeader) (*FileHeader, error) {
 	switch h.Type {
 	case 0x73: // Archive Header
@@ -169,13 +177,23 @@ func (re *rar3Engine) processHeader(h *BlockHeader) (*FileHeader, error) {
 // A nil reader with a nil error means this block was not that continuation --
 // the new volume's own archive header, a terminator, or an unrecognised block
 // whose own data is discarded here -- and scanning continues into the next
-// block. A
-// non-nil reader is the payload source for the file already in progress, with
-// the packed cursor repointed at this volume.
+// block. A non-nil reader is the payload source for the file already in
+// progress, with the packed cursor repointed at this volume.
 //
-// The two outcomes are distinguished by the reader alone; there is no separate
-// signal. A non-nil reader always means stop scanning, because the caller
-// splices exactly what it is handed into the decode chain.
+// The archive-header case does not discard a declared payload, which is #48 and
+// bites harder here than at the Next() site: a header parsed out of that region
+// reaches repoint below, aiming the packed cursor at attacker-chosen bytes that
+// are then spliced into the file in progress as its content.
+//
+// Those two are distinguished by the reader alone; there is no separate signal,
+// and a non-nil reader always means stop scanning, because the caller splices
+// exactly what it is handed into the decode chain.
+//
+// The error return is the third outcome and is not interchangeable with them. A
+// continuation claiming encryption is refused here through refuse rather than
+// refuseFile, because a file is still active at this point and refuseFile would
+// promise the stream is standing on the next block header when nextVolumePayload
+// has just abandoned the packed cursor. See the call site below, and CLAUDE.md.
 func (re *rar3Engine) processVolumePayloadHeader(h *BlockHeader) (io.Reader, error) {
 	switch h.Type {
 	case 0x73: // Archive Header
