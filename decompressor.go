@@ -61,6 +61,30 @@ var (
 	// though that header parsed. A readable header is therefore not on its
 	// own a reason to expect a *FileError here.
 	ErrRAR3EncryptionUnsupported = errors.New("rarengine: RAR3 encryption is not supported")
+
+	// ErrRAR3UnmeasurableSubBlock reports a RAR3 subblock whose payload length
+	// this library cannot determine, so traversal stops rather than guessing.
+	//
+	// Subblock types carry the file-header layout, so lhdLarge may put the high
+	// 32 bits of the packed size inside a header no dispatcher parses. Only the
+	// low half reaches h.DataSize, so discarding by declared length would skip
+	// less than the block occupies and read the next header out of the
+	// remainder -- and unrar, which composes both halves, would disagree about
+	// which entries the archive even contains.
+	//
+	// Refused rather than parsed. Reading the high half means parsing subblock
+	// file-header layout for the sole purpose of measuring something this
+	// library then discards, and a subblock above 4 GiB does not occur outside a
+	// crafted archive.
+	//
+	// Deliberately not raised for a file block whose header fails to parse.
+	// That path has the same unreadable high half and still discards the low
+	// one, because nothing in the stream says how many bytes it should have
+	// skipped -- the size is inside the header that just failed. Refusing there
+	// would end traversal on any corrupt large file rather than skipping it, so
+	// the guess is kept where a file is concerned and refused only where a
+	// whole block type is unparsed by design.
+	ErrRAR3UnmeasurableSubBlock = errors.New("rarengine: RAR3 subblock declares a packed size this library cannot measure")
 )
 
 type ArchiveVersion int
@@ -387,9 +411,31 @@ func (sd *StreamDecompressor) Reset(volumes <-chan io.ReadCloser) {
 }
 
 // nextVolume fetches the next volume from the channel, closing the previous one if active.
+//
+// Every failure here clears sd.currentVol, and that is load-bearing rather than
+// tidiness. Next() re-enters the engine whenever currentVol is non-nil, so a
+// volume left standing after a failure is read again at whatever offset the
+// failure stopped at -- and the engine reaches this function from the
+// terminator cases, which deliberately do not discard the block's declared
+// payload because the stream is supposed to have moved on. Leaving the closed
+// volume in place made that exemption false: a terminator carrying payload
+// followed by a closed channel left the next header parsable out of those
+// bytes. Close() is no defence, because the volumes are caller-supplied and
+// io.NopCloser -- whose Close does nothing -- is a mainstream choice for a
+// channel of readers.
+//
+// Clearing it also makes ErrNoNextVolume idempotent, which matters because it
+// is the normal end-of-archive signal rather than a failure: a repeat Next()
+// takes the currentVol == nil path, receives from the still-closed channel and
+// reports the same sentinel, instead of re-reading a dead volume.
 func (sd *StreamDecompressor) nextVolume() error {
 	if sd.currentVol != nil {
 		_ = sd.currentVol.Close()
+		// Dropped even before the receive: the volume is closed from here on,
+		// and a failure below must not leave it reachable. This also keeps
+		// Reset from closing an already-closed caller ReadCloser a second time,
+		// which io.Closer does not promise is safe.
+		sd.currentVol = nil
 	}
 
 	vol, ok := <-sd.volumes
@@ -400,6 +446,12 @@ func (sd *StreamDecompressor) nextVolume() error {
 
 	version, err := detectVersion(sd.currentVol)
 	if err != nil {
+		// The volume is partially consumed and its version unknown; on the
+		// first volume sd.engine is still nil, so a caller that retries Next()
+		// would dispatch through a nil interface. Clearing sends the retry back
+		// through this function instead.
+		_ = sd.currentVol.Close()
+		sd.currentVol = nil
 		return err
 	}
 

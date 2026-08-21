@@ -55,17 +55,23 @@ func (re *rar3Engine) Next() (*FileHeader, error) {
 // A nil header with a nil error means the block held nothing this caller wants
 // -- an archive header, a continuation of a file already announced, a volume
 // terminator, or a record type Next() does not surface -- and scanning
-// continues. A block that declared payload must have it discarded before that
-// happens, because a block left in the stream is where the next header gets
-// parsed from -- which for a crafted archive means an entry fabricated out of
-// attacker-chosen bytes. The continuation case discards fh.PackedSize and the
-// default case h.DataSize. The archive-header case does not, and DataSize is
-// read from a header flag with no restriction on block type, so an archive
-// header can declare one: see #48. The terminator case does not discard either,
-// but advances to the next volume, so nothing is left behind to misread.
+// continues. A non-nil header is the file to hand back, and by then it has been
+// admitted: the window is reset, the packed cursor repointed, and fileReader
+// begun.
 //
-// A non-nil header is the file to hand back, and by then it has been admitted:
-// the window is reset, the packed cursor repointed, and fileReader begun.
+// Every block's declared payload is accounted for before either happens,
+// because a block left in the stream is where the next header gets parsed from
+// -- which for a crafted archive means an entry fabricated out of
+// attacker-chosen bytes. DataSize is read from a header flag with no
+// restriction on block type, so any block may declare one, not only a file.
+//
+// The accounting is by default rather than by obligation: a case that does
+// nothing falls out of the switch to dropDeclaredPayload, and only a case that
+// has handled the payload itself returns early. Read the returns as the
+// exceptions they are -- each carries a comment saying which of the three
+// reasons it is (the file claims it; a refusal already discarded it; the volume
+// advanced and took it away). Errors decided inside the switch are recorded in
+// cause rather than returned, so that refusing a block still drops its payload.
 //
 // The value and the continue-decision are one signal, in both directions.
 // Returning a header while asking the caller to keep scanning would discard
@@ -75,8 +81,14 @@ func (re *rar3Engine) Next() (*FileHeader, error) {
 // have ended. A path that needs either shape must reintroduce an explicit
 // signal rather than reaching for a nil.
 func (re *rar3Engine) processHeader(h *BlockHeader) (*FileHeader, error) {
+	// Recorded rather than returned, so that a refusal decided inside the
+	// switch still reaches the discard below. Returning from a case is what
+	// says "this block's payload is already accounted for"; a refusal decided
+	// here has accounted for nothing.
+	var cause error
+
 	switch h.Type {
-	case 0x73: // Archive Header
+	case rar3BlockMain:
 		if h.Flags&mhdPassword > 0 {
 			// Every block header after this one is ciphertext, so there is no
 			// member to name and nothing to continue to -- this ends
@@ -87,11 +99,10 @@ func (re *rar3Engine) processHeader(h *BlockHeader) (*FileHeader, error) {
 			// header checksum is a 16-bit truncation of CRC32, so each block
 			// has roughly a 1-in-65536 chance of passing regardless, which
 			// would surface a wholly fabricated file entry.
-			return nil, ErrRAR3EncryptionUnsupported
+			cause = ErrRAR3EncryptionUnsupported
 		}
-		return nil, nil
 
-	case 0x74: // File Header
+	case rar3BlockFile:
 		fh, err := ParseRAR3FileHeader(h)
 		if err != nil {
 			// Refusing a file must not leave its payload in the stream, or the
@@ -106,11 +117,13 @@ func (re *rar3Engine) processHeader(h *BlockHeader) (*FileHeader, error) {
 			return nil, re.sd.refuse(h.DataSize, err)
 		}
 
+		// Returns because this path discards the payload itself -- that is the
+		// discriminator, not the size it uses. The size is why it cannot
+		// instead fall through: fh.PackedSize composes the high half that
+		// lhdLarge puts in the header, and h.DataSize is only the low 32 bits,
+		// so the shared discard would leave the rest in the stream.
 		if !fh.FirstBlock {
-			if err = re.sd.discardPayload(fh.PackedSize); err != nil {
-				return nil, err
-			}
-			return nil, nil
+			return nil, re.sd.discardPayload(fh.PackedSize)
 		}
 
 		if rar3ClaimsEncryption(fh) {
@@ -144,6 +157,13 @@ func (re *rar3Engine) processHeader(h *BlockHeader) (*FileHeader, error) {
 			return nil, re.sd.refuseFile(fh, ErrRarBombDetected)
 		}
 
+		// Returns rather than falling through, and the reason is invisible at
+		// this line: admitFile's refusal path calls refuse, which discards
+		// fh.PackedSize itself. It reads like plain error propagation, so a rule
+		// phrased over syntax -- "error returns become cause" -- would send it
+		// to the discard below and consume a second payload out of the next
+		// block. The rule is "has this path already discarded", which is
+		// answered by following the call, not by reading the line.
 		if err := re.sd.admitFile(fh); err != nil {
 			return nil, err
 		}
@@ -152,23 +172,70 @@ func (re *rar3Engine) processHeader(h *BlockHeader) (*FileHeader, error) {
 
 		re.packed.repoint(re.sd.currentVol, fh.PackedSize)
 
+		// Returns because the file claims the payload. Falling through here
+		// would discard the exact bytes the cursor was just repointed at,
+		// truncating the file mid-volume with its count still standing --
+		// the most severe way this switch can be got wrong.
 		re.sd.file.begin(fh, re.newDecompressionReader(fh, re.packed.reader()), re.sd.verifyCRC)
 		return fh, nil
 
-	case 0x7b: // Terminator block
+	case rar3BlockTerminator:
+		// Returns because the stream has moved on: nextVolume closed this
+		// volume, so its remaining bytes are unreachable and h.DataSize no
+		// longer describes anything readable. That holds only because every
+		// failure in nextVolume clears sd.currentVol -- see its doc comment.
 		if err := re.sd.nextVolume(); err != nil {
 			return nil, err
 		}
 		return nil, nil
 
 	default:
-		if h.DataSize > 0 {
-			if err := re.sd.discardPayload(h.DataSize); err != nil {
-				return nil, err
-			}
-		}
-		return nil, nil
+		// Falls through to the discard, which is the whole point of the
+		// default: an unrecognised block is exactly the case nobody thought
+		// about, and it needs no thought to be handled correctly.
 	}
+
+	return nil, re.settle(h, cause)
+}
+
+// settle is the shared exit of both dispatchers: it accounts for whatever
+// payload the block declared, then reports the refusal the switch recorded.
+//
+// One helper rather than the same tail written at each exit, for the reason the
+// inversion exists at all -- a rule copied to every site is a rule each site can
+// be edited out of. A change to this contract, such as joining the two errors
+// rather than letting the discard failure win, is then one edit.
+func (re *rar3Engine) settle(h *BlockHeader, cause error) error {
+	if err := re.dropDeclaredPayload(h); err != nil {
+		// The drain failure wins over cause, matching refuse: if the stream
+		// cannot be repositioned then nothing after this point is trustworthy,
+		// and reporting why the block was refused would imply it is.
+		return err
+	}
+	return cause
+}
+
+// dropDeclaredPayload discards the bytes a block declared and no case claimed.
+//
+// This is the single point every unclaimed path in both dispatchers reaches, so
+// that accounting for a block's payload is what happens by default and keeping
+// it is what takes a deliberate return. The inversion is deliberate: the
+// previous shape made the discard a per-case obligation, and three separate
+// changes to these switches forgot it, each time letting a crafted archive have
+// the next header parsed out of the leftover bytes.
+//
+// The failure mode is inverted along with the control flow. A forgotten discard
+// used to leak payload -- silent, and the leaked bytes are attacker-chosen. A
+// forgotten return now over-consumes instead, eating the following block, which
+// surfaces as a header CRC failure. Loud and wrong beats silent and wrong.
+func (re *rar3Engine) dropDeclaredPayload(h *BlockHeader) error {
+	if h.DataSize > 0 && rar3UsesFileLayout(h.Type) && h.Flags&lhdLarge > 0 {
+		// Scoped to the subblock types on purpose. lhdLarge is 0x0100, which on
+		// a main header is mhdFirstVolume and entirely legitimate, so testing
+		// the bit alone would refuse ordinary archives.
+		return ErrRAR3UnmeasurableSubBlock
+	}
+	return re.sd.discardPayload(h.DataSize)
 }
 
 // processVolumePayloadHeader consumes one block from a freshly opened volume
@@ -180,10 +247,12 @@ func (re *rar3Engine) processHeader(h *BlockHeader) (*FileHeader, error) {
 // block. A non-nil reader is the payload source for the file already in
 // progress, with the packed cursor repointed at this volume.
 //
-// The archive-header case does not discard a declared payload, which is #48 and
-// bites harder here than at the Next() site: a header parsed out of that region
-// reaches repoint below, aiming the packed cursor at attacker-chosen bytes that
-// are then spliced into the file in progress as its content.
+// Accounting for a declared payload matters more here than at the Next() site:
+// a header parsed out of an undiscarded region reaches repoint below, aiming
+// the packed cursor at attacker-chosen bytes that are then spliced into the
+// file in progress as its content. The same default-discard shape as
+// processHeader applies -- see its doc comment for the rule and the three
+// reasons a case may return instead.
 //
 // Those two are distinguished by the reader alone; there is no separate signal,
 // and a non-nil reader always means stop scanning, because the caller splices
@@ -195,8 +264,12 @@ func (re *rar3Engine) processHeader(h *BlockHeader) (*FileHeader, error) {
 // promise the stream is standing on the next block header when nextVolumePayload
 // has just abandoned the packed cursor. See the call site below, and CLAUDE.md.
 func (re *rar3Engine) processVolumePayloadHeader(h *BlockHeader) (io.Reader, error) {
+	// Same contract as processHeader's: recorded rather than returned so a
+	// refusal decided in the switch still reaches the discard.
+	var cause error
+
 	switch h.Type {
-	case 0x73: // Archive Header
+	case rar3BlockMain:
 		if h.Flags&mhdPassword > 0 {
 			// Checked again here for the same reason the file-header flag is:
 			// a volume carries its own main header, and one that claims
@@ -204,12 +277,12 @@ func (re *rar3Engine) processVolumePayloadHeader(h *BlockHeader) (io.Reader, err
 			// this engine would otherwise never look at. Ends traversal
 			// rather than refusing a member -- the following headers are
 			// ciphertext, so there is no member to name.
-			return nil, ErrRAR3EncryptionUnsupported
+			cause = ErrRAR3EncryptionUnsupported
 		}
-		return nil, nil
-	case 0x74: // File Header
+	case rar3BlockFile:
 		fh, err := ParseRAR3FileHeader(h)
 		if err != nil {
+			// Returns: refuse discarded h.DataSize itself.
 			return nil, re.sd.refuse(h.DataSize, err)
 		}
 		if rar3ClaimsEncryption(fh) {
@@ -245,19 +318,24 @@ func (re *rar3Engine) processVolumePayloadHeader(h *BlockHeader) (io.Reader, err
 		// describing a volume the stream has already moved past. Reusing it
 		// also drops an allocation per volume.
 		re.packed.repoint(re.sd.currentVol, fh.PackedSize)
+		// Returns because the file claims the payload -- and here the cursor
+		// has just been repointed at exactly these bytes, so falling through
+		// would hand the file a truncated volume with its count still owed.
 		return re.packed.reader(), nil
-	case 0x7b: // Terminator
+	case rar3BlockTerminator:
 		if err := re.sd.nextVolume(); err != nil {
 			return nil, err
 		}
+		// This return is load-bearing and was added with the inversion. The
+		// case previously ended here and fell out to a shared `return nil, nil`,
+		// which was correct when falling out did nothing. Falling out now
+		// discards, and the volume this block declared its payload on has
+		// already been closed.
+		return nil, nil
 	default:
-		if h.DataSize > 0 {
-			if err := re.sd.discardPayload(h.DataSize); err != nil {
-				return nil, err
-			}
-		}
 	}
-	return nil, nil
+
+	return nil, re.settle(h, cause)
 }
 
 func (re *rar3Engine) nextVolumePayload() (io.Reader, error) {
