@@ -81,25 +81,43 @@ func fabricatedRAR5() []byte {
 	return rar5FileEntry("FABRICATED.txt", 5, crc32.ChecksumIEEE([]byte("owned")), []byte("owned"))
 }
 
-// assertReachesRealEntry drives the reader past refusals and asserts the
-// member it then reaches is the archive's genuine next one.
+// assertReachesRealEntry asserts that the FIRST entry NextEntry returns is
+// the archive's genuine next one.
 //
-// Asserting only that the first call errors proves nothing -- that is equally
-// true of vulnerable code. Asserting only that a payload was "consumed" is
-// satisfied by consuming too much, which is what a double-discard does. The
-// property is positional recovery.
+// It does not loop. An earlier version called NextEntry in a loop, silently
+// closing and skipping any entry whose name did not match before checking
+// the next one -- which made it blind to the exact thing these fixtures
+// exist to catch: a traversal that hands back a fabricated entry and THEN
+// the real one still passed, because the loop skipped the fabricated entry
+// without complaint. Asserting only that the first call errors proves
+// nothing (equally true of vulnerable code), and asserting only that the
+// real entry is eventually reached is satisfied by a traversal that
+// fabricates one first -- exactly the bug this helper is supposed to catch.
+//
+// Every block dispatch() skips silently (a successful archive/service
+// header, a crypt header that fails to parse, an exhausted volume) is
+// handled INSIDE NextEntry's own loop and never returned to the caller, so
+// one call is the right shape here: all four call sites below only ever
+// need to skip blocks of that kind before reaching the real entry. A
+// fixture that needs the CALLER to walk past a refused, caller-visible
+// Entry (one NextEntry hands back terminal, e.g. a rar bomb or
+// ErrSolidStreamBroken) does not fit this helper and must not be forced
+// into it -- skip_damaged_test.go's tests use Entry.Close() verdicts
+// directly for exactly that shape instead.
 func assertReachesRealEntry(t *testing.T, r *Reader, wantName string) {
 	t.Helper()
-	for {
-		e, err := r.NextEntry()
-		if err != nil {
-			t.Fatalf("traversal ended before reaching %q: %v", wantName, err)
-		}
-		if e.Header != nil && e.Header.Name == wantName {
-			_ = e.Close()
-			return
-		}
-		_ = e.Close()
+	e, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("traversal ended before reaching %q: %v", wantName, err)
+	}
+	defer func() { _ = e.Close() }()
+	if e.Header == nil {
+		t.Fatalf("NextEntry returned an entry with no header; want %q", wantName)
+	}
+	if e.Header.Name != wantName {
+		t.Fatalf("NextEntry returned %q, want %q -- an entry other than the "+
+			"archive's genuine next one was surfaced, which is the fabrication "+
+			"these fixtures exist to detect", e.Header.Name, wantName)
 	}
 }
 
