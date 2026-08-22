@@ -464,6 +464,22 @@ func parseExtraRecords(fh *FileHeader, extra []ExtraRecord) error {
 
 // ParseFileHeader decodes the file header details from a block header.
 func ParseFileHeader(h *BlockHeader) (*FileHeader, error) {
+	fh, err := parseFileHeader(h)
+	if err != nil {
+		return nil, err
+	}
+	return fh, nil
+}
+
+// parseFileHeader is ParseFileHeader's internal form. It is the ONLY function
+// in this package permitted to return a non-nil *FileHeader alongside a
+// non-nil error: every failure up through the name field means there is no
+// identity to report, so those paths return a nil header like any other
+// parse failure. Only a failure inside parseExtraRecords, the last step,
+// returns the header it built anyway -- by that point the member's name and
+// sizes are already decoded, so the caller (Reader.dispatch) can refuse the
+// member by name instead of dropping it from the listing with no trace.
+func parseFileHeader(h *BlockHeader) (*FileHeader, error) {
 	if h.Type != HeaderTypeFile && h.Type != HeaderTypeService {
 		return nil, ErrBadBlockHeader
 	}
@@ -554,9 +570,12 @@ func ParseFileHeader(h *BlockHeader) (*FileHeader, error) {
 	}
 	fh.Name = sanitizePath(string(payload[:nameLen]))
 
-	// Parse optional extra records
+	// Parse optional extra records. Unlike every earlier failure in this
+	// function, fh is returned alongside the error here: the name and every
+	// size/CRC field are already decoded, so the caller can refuse the
+	// member by name instead of dropping it silently.
 	if err := parseExtraRecords(fh, h.Extra); err != nil {
-		return nil, err
+		return fh, err
 	}
 
 	return fh, nil

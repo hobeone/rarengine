@@ -236,11 +236,17 @@ func (r *Reader) dispatch(h *BlockHeader) (*Entry, error) {
 		return nil, nil
 
 	case HeaderTypeFile:
-		fh, err := ParseFileHeader(h)
+		fh, err := parseFileHeader(h)
 		if err != nil {
-			// Skipped rather than terminal. Under the previous design nothing
-			// could say where the stream was after a failed parse, so this
-			// ended the traversal; volume.next() answers that now.
+			// A member whose identity survived the failure is refused by NAME,
+			// so the caller learns the archive held something it could not
+			// read. One that failed before its name was decoded has nothing to
+			// report and is skipped as before. Either way volume.next() drops
+			// the block's declared payload on the way to the next header.
+			if fh != nil && fh.FirstBlock {
+				r.win.MarkIncomplete()
+				return terminalEntry(fh, err), nil
+			}
 			return nil, nil
 		}
 		// A continuation block belongs to a member already announced. Reaching
