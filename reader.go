@@ -219,10 +219,16 @@ func (r *Reader) dispatch(h *BlockHeader) (*Entry, error) {
 // without decrypting or decompressing anything. Latching means the cost is one
 // derivation per candidate per archive rather than per member.
 //
-// An archive carrying no check value cannot have a candidate verified this
-// way. The first candidate is used and a wrong one surfaces as
-// ErrCRCMismatch -- re-running the archive per candidate would mean re-reading
-// every volume, and modern RAR stores a check value by default.
+// A member carrying no check value cannot have a candidate verified this way,
+// so passwords[0] is used for that member WITHOUT setting hasResolved. That
+// distinction is deliberate: a candidate verified against a real check value
+// is knowledge -- it cannot be wrong for this archive -- and knowledge is what
+// justifies skipping the scan for every later member. An unverified first
+// guess is only a default for a member that offered nothing to check it
+// against; caching it as though it were knowledge would suppress the scan for
+// a later member that DOES carry a check value, silently losing the archive
+// to whichever candidate happens to sort first whenever the first encrypted
+// member's check value is absent.
 func (r *Reader) resolvePassword(fh *FileHeader) (string, error) {
 	if r.hasResolved {
 		return r.resolved, nil
@@ -231,8 +237,7 @@ func (r *Reader) resolvePassword(fh *FileHeader) (string, error) {
 		return "", ErrPasswordRequired
 	}
 	if fh.EncCheck == nil {
-		r.resolved, r.hasResolved = r.passwords[0], true
-		return r.resolved, nil
+		return r.passwords[0], nil
 	}
 	for _, candidate := range r.passwords {
 		ok, hasCheck, err := VerifyFilePassword(fh, candidate)
