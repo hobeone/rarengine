@@ -6,7 +6,6 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"errors"
-	"hash/crc32"
 	"io"
 	"path/filepath"
 	"testing"
@@ -275,61 +274,6 @@ func firstDifference(a, b []byte) int {
 // crafted archive does with these bits, the outcome is never a clean read and
 // never ErrChecksumUnsupported. See TestRAR3_EncryptedMemberIsRefused for the
 // positive assertion about what the refusal is.
-func TestRAR3_EncryptedFlagCannotSuppressCRCCheck(t *testing.T) {
-	payload := []byte("content that will not match its recorded checksum")
-	const wrongCRC = 0xdeadbeef
-	if crc32.ChecksumIEEE(payload) == wrongCRC {
-		t.Fatal("the recorded CRC must not match, or neither case can mismatch")
-	}
-
-	for _, tc := range []struct {
-		name  string
-		flags uint16
-	}{
-		{"plain", 0},
-		{"password flag set", lhdPassword},
-		{"salt flag set", lhdSalt},
-		{"password and salt set", lhdPassword | lhdSalt},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			var archive bytes.Buffer
-			archive.Write(rar3ArchiveHeader())
-			archive.Write(rar3StoreEntry("victim.bin", tc.flags,
-				uint32(len(payload)), wrongCRC, payload))
-
-			sd := decompressorFor(archive.Bytes())
-			fh, err := sd.Next()
-
-			if tc.flags != 0 {
-				// Refused before any content is produced. The bit never
-				// reaches verification, which is a stronger outcome than the
-				// one this test originally demanded of it.
-				if errors.Is(err, ErrChecksumUnsupported) {
-					t.Fatalf("Next() = %v; an encryption bit must never "+
-						"produce the unverifiable verdict", err)
-				}
-				if err == nil {
-					t.Fatalf("Next() admitted %q; a member this library "+
-						"cannot decrypt must never be admitted", fh.Name)
-				}
-				return
-			}
-
-			if err != nil {
-				t.Fatalf("Next: %v", err)
-			}
-			if fh.Encrypted {
-				t.Fatal("fh.Encrypted set on a member carrying neither bit")
-			}
-
-			_, err = io.ReadAll(sd)
-			if !errors.Is(err, ErrCRCMismatch) {
-				t.Fatalf("got %v; want ErrCRCMismatch", err)
-			}
-		})
-	}
-}
-
 // TestRAR3_EncryptedMemberIsRefused pins that a RAR3 member this library
 // cannot decrypt is refused at Next(), rather than having its ciphertext
 // decoded as though it were content.
@@ -344,105 +288,9 @@ func TestRAR3_EncryptedFlagCannotSuppressCRCCheck(t *testing.T) {
 // stored cases decode to a clean success with a nil error, so these subtests
 // fail against unfixed code by admitting the member rather than by reporting
 // some other error.
-func TestRAR3_EncryptedMemberIsRefused(t *testing.T) {
-	payload := []byte("ciphertext stand-in, never to be delivered")
-
-	for _, tc := range []struct {
-		name     string
-		flags    uint16
-		method   byte
-		password string
-		verify   bool
-	}{
-		{name: "password flag only", flags: lhdPassword, method: 0x30, verify: true},
-		{name: "salt flag only", flags: lhdSalt, method: 0x30, verify: true},
-		{name: "password and salt", flags: lhdPassword | lhdSalt, method: 0x30, verify: true},
-		// Proves the guard fires before the method branch: the payload is not
-		// valid compressed data and never reaches a decoder.
-		{name: "compressed", flags: lhdPassword | lhdSalt, method: 0x35, verify: true},
-		// A password cannot help -- no RAR3 key derivation exists here -- so
-		// supplying one must not change the outcome or soften the error.
-		{name: "with password supplied", flags: lhdPassword | lhdSalt, method: 0x30, password: "hunter2", verify: true},
-		// The severest form of the bug this guards: with verification off,
-		// unfixed code delivered the ciphertext with no failure signal at all.
-		{name: "verification disabled", flags: lhdPassword | lhdSalt, method: 0x30, verify: false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			var archive bytes.Buffer
-			archive.Write(rar3ArchiveHeader())
-			archive.Write(rar3MethodEntry("secret.bin", tc.flags, tc.method,
-				uint32(len(payload)), crc32.ChecksumIEEE(payload), payload))
-
-			sd := decompressorFor(archive.Bytes())
-			if tc.password != "" {
-				sd.SetPassword(tc.password)
-			}
-			sd.SetVerifyCRC(tc.verify)
-
-			_, err := sd.Next()
-			if !errors.Is(err, ErrRAR3EncryptionUnsupported) {
-				t.Fatalf("Next() = %v; want ErrRAR3EncryptionUnsupported", err)
-			}
-			if errors.Is(err, ErrPasswordRequired) {
-				t.Fatal("reported as ErrPasswordRequired; no password can " +
-					"help, and that sentinel invites a retry that cannot succeed")
-			}
-
-			// A *FileError is the promise that traversal may continue, and it
-			// has to name the member for UnpackDir to report it.
-			fe, ok := errors.AsType[*FileError](err)
-			if !ok {
-				t.Fatalf("Next() = %v (%T); want a *FileError", err, err)
-			}
-			if fe.Header == nil || fe.Header.Name != "secret.bin" {
-				t.Fatalf("FileError names %v; want secret.bin", fe.Header)
-			}
-			if !sd.damaged {
-				t.Fatal("sd.damaged not set; a refused member contributes " +
-					"nothing to the window and a solid successor must not " +
-					"decode against it")
-			}
-		})
-	}
-}
-
 // TestRAR3_EncryptedRefusalContinuesTraversal pins the other half of what the
 // *FileError promises: the stream is standing on the next block header, so the
 // members behind a refused one are still reachable.
-func TestRAR3_EncryptedRefusalContinuesTraversal(t *testing.T) {
-	secret := []byte("ciphertext stand-in")
-	plain := []byte("the member behind it, which must still be readable")
-
-	var archive bytes.Buffer
-	archive.Write(rar3ArchiveHeader())
-	archive.Write(rar3StoreEntry("secret.bin", lhdPassword|lhdSalt,
-		uint32(len(secret)), crc32.ChecksumIEEE(secret), secret))
-	archive.Write(rar3StoreEntry("plain.bin", 0,
-		uint32(len(plain)), crc32.ChecksumIEEE(plain), plain))
-
-	sd := decompressorFor(archive.Bytes())
-
-	if _, err := sd.Next(); !errors.Is(err, ErrRAR3EncryptionUnsupported) {
-		t.Fatalf("first Next() = %v; want ErrRAR3EncryptionUnsupported", err)
-	}
-
-	fh, err := sd.Next()
-	if err != nil {
-		t.Fatalf("second Next() = %v; the refused member's payload was not "+
-			"drained, so this header came out of the wrong bytes", err)
-	}
-	if fh.Name != "plain.bin" {
-		t.Fatalf("second Next() named %q; want plain.bin", fh.Name)
-	}
-	got, err := io.ReadAll(sd)
-	if err != nil {
-		t.Fatalf("reading plain.bin: %v", err)
-	}
-	if !bytes.Equal(got, plain) {
-		t.Fatalf("plain.bin = %q; want %q", got, plain)
-	}
-}
-
 // TestRAR3_EncryptedContinuationIsRefused covers the route the first-block
 // guard cannot see.
 //
@@ -458,59 +306,6 @@ func TestRAR3_EncryptedRefusalContinuesTraversal(t *testing.T) {
 // Refused with the bare sentinel rather than a *FileError: the packed cursor
 // is invalidated before the volume advance, so settled() is false by
 // construction and no honest continuation promise can be made here.
-func TestRAR3_EncryptedContinuationIsRefused(t *testing.T) {
-	first := []byte("plaintext first half---")
-	second := []byte("ciphertext second half")
-	whole := append(append([]byte(nil), first...), second...)
-	declared := crc32.ChecksumIEEE(whole)
-
-	// Volume 1: first block (0x0001 clear), continued after (0x0002 set).
-	var v1 bytes.Buffer
-	v1.Write(rar3ArchiveHeader())
-	v1.Write(rar3StoreEntry("spanning.bin", lhdSplitAfter,
-		uint32(len(whole)), declared, first))
-
-	// Volume 2: the continuation, now claiming encryption.
-	var v2 bytes.Buffer
-	v2.Write(rar3ArchiveHeader())
-	v2.Write(rar3StoreEntry("spanning.bin", lhdSplitBefore|lhdPassword|lhdSalt,
-		uint32(len(whole)), declared, second))
-
-	volumes := make(chan io.ReadCloser, 2)
-	volumes <- &mockReadCloser{bytes.NewReader(v1.Bytes())}
-	volumes <- &mockReadCloser{bytes.NewReader(v2.Bytes())}
-	close(volumes)
-
-	sd := NewStreamDecompressor(volumes)
-	if _, err := sd.Next(); err != nil {
-		t.Fatalf("Next: %v", err)
-	}
-
-	got, err := io.ReadAll(sd)
-	if !errors.Is(err, ErrRAR3EncryptionUnsupported) {
-		t.Fatalf("ReadAll = %q, %v; want ErrRAR3EncryptionUnsupported", got, err)
-	}
-	if bytes.Contains(got, second) {
-		t.Fatalf("the encrypted continuation's bytes were delivered: %q", got)
-	}
-
-	// The bare sentinel, never a *FileError, at both the point of failure and
-	// the Next() that follows it. A file is still active here, so an error
-	// built at this site is laundered through endFile's verdict and reaches
-	// the caller as a continuation promise -- one the abandoned packed cursor
-	// cannot back. Refusing through refuseFile instead would produce exactly
-	// that, and nothing else in the suite notices.
-	if _, ok := errors.AsType[*FileError](err); ok {
-		t.Fatalf("ReadAll = %v; a continuation refusal must not promise "+
-			"continuation, the packed cursor was abandoned on the advance", err)
-	}
-	if _, err := sd.Next(); err == nil {
-		t.Fatal("Next() succeeded after a continuation refusal")
-	} else if _, ok := errors.AsType[*FileError](err); ok {
-		t.Fatalf("Next() = %v; same promise, made one call later", err)
-	}
-}
-
 // TestRAR3_EncryptedArchiveHeaderIsRefused covers whole-archive header
 // encryption (MHD_PASSWORD), where every block header after the main one is
 // ciphertext.
@@ -521,60 +316,9 @@ func TestRAR3_EncryptedContinuationIsRefused(t *testing.T) {
 // happen to form a valid header -- and RAR3's header checksum is a 16-bit
 // truncation, so each block carries a roughly 1-in-65536 chance of passing
 // anyway and surfacing a fabricated entry.
-func TestRAR3_EncryptedArchiveHeaderIsRefused(t *testing.T) {
-	var archive bytes.Buffer
-	archive.Write(rar3ArchiveHeaderFlags(mhdPassword))
-	archive.Write(rar3StoreEntry("unreachable.bin", 0, 4, 0, []byte("data")))
-
-	sd := decompressorFor(archive.Bytes())
-	_, err := sd.Next()
-	if !errors.Is(err, ErrRAR3EncryptionUnsupported) {
-		t.Fatalf("Next() = %v; want ErrRAR3EncryptionUnsupported", err)
-	}
-	if _, ok := errors.AsType[*FileError](err); ok {
-		t.Fatal("reported as a *FileError; an archive-level refusal names no " +
-			"member and promises no continuation")
-	}
-}
-
 // TestRAR3_EncryptedArchiveHeaderOnLaterVolumeIsRefused covers the archive
 // flag at the other site: a volume carries its own main header, so a set of
 // volumes can claim header encryption from the second one onwards.
-func TestRAR3_EncryptedArchiveHeaderOnLaterVolumeIsRefused(t *testing.T) {
-	first := []byte("plaintext first half---")
-	second := []byte("second half")
-	whole := append(append([]byte(nil), first...), second...)
-	declared := crc32.ChecksumIEEE(whole)
-
-	var v1 bytes.Buffer
-	v1.Write(rar3ArchiveHeader())
-	v1.Write(rar3StoreEntry("spanning.bin", lhdSplitAfter,
-		uint32(len(whole)), declared, first))
-
-	var v2 bytes.Buffer
-	v2.Write(rar3ArchiveHeaderFlags(mhdPassword))
-	v2.Write(rar3StoreEntry("spanning.bin", lhdSplitBefore,
-		uint32(len(whole)), declared, second))
-
-	volumes := make(chan io.ReadCloser, 2)
-	volumes <- &mockReadCloser{bytes.NewReader(v1.Bytes())}
-	volumes <- &mockReadCloser{bytes.NewReader(v2.Bytes())}
-	close(volumes)
-
-	sd := NewStreamDecompressor(volumes)
-	if _, err := sd.Next(); err != nil {
-		t.Fatalf("Next: %v", err)
-	}
-
-	got, err := io.ReadAll(sd)
-	if !errors.Is(err, ErrRAR3EncryptionUnsupported) {
-		t.Fatalf("ReadAll = %q, %v; want ErrRAR3EncryptionUnsupported", got, err)
-	}
-	if bytes.Contains(got, second) {
-		t.Fatalf("bytes from the encrypted-header volume were delivered: %q", got)
-	}
-}
-
 // TestRAR3_EncryptedRefusalOnTruncatedPayloadIsNotContinuable pins the
 // settled() gate at the new call site.
 //
@@ -582,28 +326,6 @@ func TestRAR3_EncryptedArchiveHeaderOnLaterVolumeIsRefused(t *testing.T) {
 // read. Here the archive ends mid-payload, so the drain cannot complete and
 // the caller must get the bare sentinel -- never a *FileError, which would
 // claim the stream is standing on a block header it is not standing on.
-func TestRAR3_EncryptedRefusalOnTruncatedPayloadIsNotContinuable(t *testing.T) {
-	payload := []byte("ciphertext stand-in, never to be delivered")
-
-	var archive bytes.Buffer
-	archive.Write(rar3ArchiveHeader())
-	archive.Write(rar3StoreEntry("secret.bin", lhdPassword|lhdSalt,
-		uint32(len(payload)), crc32.ChecksumIEEE(payload), payload))
-
-	// Cut the payload short while leaving the header intact.
-	truncated := archive.Bytes()[:archive.Len()-len(payload)/2]
-
-	sd := decompressorFor(truncated)
-	_, err := sd.Next()
-	if !errors.Is(err, ErrRAR3EncryptionUnsupported) {
-		t.Fatalf("Next() = %v; want ErrRAR3EncryptionUnsupported", err)
-	}
-	if _, ok := errors.AsType[*FileError](err); ok {
-		t.Fatal("a *FileError promises the stream is on the next header, but " +
-			"the payload drain never completed")
-	}
-}
-
 // errAfterBytes hands out data, fails once with a non-EOF error, and reports
 // io.EOF from then on.
 //

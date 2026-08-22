@@ -287,7 +287,7 @@ func createTemp(root *os.Root, destRel string) (string, *os.File, error) {
 	}
 
 	var buf [8]byte
-	for attempt := 0; attempt < 8; attempt++ {
+	for range 8 {
 		if _, err := rand.Read(buf[:]); err != nil {
 			return "", nil, fmt.Errorf("rarengine: temporary name for %s: %w", destRel, err)
 		}

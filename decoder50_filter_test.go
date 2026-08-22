@@ -9,6 +9,34 @@ import (
 	"testing"
 )
 
+// bitWriter is a test utility for synthesizing RAR5 filter records.
+type bitWriter struct {
+	buf []byte
+	v   uint64
+	n   uint8
+}
+
+func (bw *bitWriter) writeBits(val uint32, bits uint8) {
+	for i := int(bits) - 1; i >= 0; i-- {
+		bit := (val >> uint(i)) & 1
+		bw.v = (bw.v << 1) | uint64(bit)
+		bw.n++
+		if bw.n == 8 {
+			bw.buf = append(bw.buf, byte(bw.v))
+			bw.v = 0
+			bw.n = 0
+		}
+	}
+}
+
+func (bw *bitWriter) flush() {
+	if bw.n > 0 {
+		bw.buf = append(bw.buf, byte(bw.v<<(8-bw.n)))
+		bw.v = 0
+		bw.n = 0
+	}
+}
+
 // writeVarBytes emits the shape readFilter5Data parses: a 2-bit count of value
 // bytes, followed by that many little-endian bytes.
 func writeVarBytes(bw *bitWriter, value int64) {

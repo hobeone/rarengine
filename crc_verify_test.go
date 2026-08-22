@@ -232,53 +232,7 @@ func buildSingleFileRAR3Archive(t *testing.T, name string, content []byte, crc32
 
 // TestCRCVerification_RAR3_DefaultDetectsMismatch is the RAR3-engine
 // counterpart to TestCRCVerification_DefaultDetectsMismatch.
-func TestCRCVerification_RAR3_DefaultDetectsMismatch(t *testing.T) {
-	content := []byte("world")
-	wrongCRC := crc32.ChecksumIEEE(content) ^ 0xFFFFFFFF
-	buf := buildSingleFileRAR3Archive(t, "hello.txt", content, wrongCRC)
-
-	sd := NewStreamDecompressor(newSingleVolumeChan(buf))
-	if _, err := sd.Next(); err != nil {
-		t.Fatalf("Next() failed: %v", err)
-	}
-
-	err := readAllAndEOFErr(sd)
-	if !errors.Is(err, ErrCRCMismatch) {
-		t.Fatalf("expected ErrCRCMismatch, got %v", err)
-	}
-}
-
 // TestCRCVerification_RAR3_DefaultHappyPath is the RAR3-engine counterpart
 // to TestCRCVerification_DefaultHappyPath.
-func TestCRCVerification_RAR3_DefaultHappyPath(t *testing.T) {
-	content := []byte("world")
-	correctCRC := crc32.ChecksumIEEE(content)
-	buf := buildSingleFileRAR3Archive(t, "hello.txt", content, correctCRC)
-
-	sd := NewStreamDecompressor(newSingleVolumeChan(buf))
-	if _, err := sd.Next(); err != nil {
-		t.Fatalf("Next() failed: %v", err)
-	}
-
-	if err := readAllAndEOFErr(sd); err != nil {
-		t.Fatalf("expected clean EOF, got error: %v", err)
-	}
-}
-
 // TestCRCVerification_RAR3_DisabledAllowsMismatch is the RAR3-engine
 // counterpart to TestCRCVerification_DisabledAllowsMismatch.
-func TestCRCVerification_RAR3_DisabledAllowsMismatch(t *testing.T) {
-	content := []byte("world")
-	wrongCRC := crc32.ChecksumIEEE(content) ^ 0xFFFFFFFF
-	buf := buildSingleFileRAR3Archive(t, "hello.txt", content, wrongCRC)
-
-	sd := NewStreamDecompressor(newSingleVolumeChan(buf))
-	sd.SetVerifyCRC(false)
-	if _, err := sd.Next(); err != nil {
-		t.Fatalf("Next() failed: %v", err)
-	}
-
-	if err := readAllAndEOFErr(sd); err != nil {
-		t.Fatalf("expected clean EOF with verification disabled, got error: %v", err)
-	}
-}

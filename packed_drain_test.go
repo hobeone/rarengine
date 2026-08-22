@@ -235,36 +235,6 @@ func TestPackedRemainder_RAR5FabricatedHeaderIsRefused(t *testing.T) {
 // TestPackedRemainder_RAR3FabricatedHeaderIsRefused is the same reproduction
 // against the RAR3 engine, which has the identical block-walking structure
 // and so had the identical hole.
-func TestPackedRemainder_RAR3FabricatedHeaderIsRefused(t *testing.T) {
-	evil := rar3FileEntry("EVIL.txt", 5, crc32.ChecksumIEEE([]byte("PWNED")), []byte("PWNED"))
-
-	content := []byte("0123456789")
-	payload := append(append([]byte{}, content...), evil...)
-
-	var arc bytes.Buffer
-	arc.Write(rar3ArchiveHeader())
-	arc.Write(rar3FileEntry("benign.txt", uint32(len(content)),
-		crc32.ChecksumIEEE(content), payload))
-
-	sd := decompressorFor(arc.Bytes())
-
-	fh1, err := sd.Next()
-	if err != nil {
-		t.Fatalf("Next#1: %v", err)
-	}
-	if fh1.Name != "benign.txt" {
-		t.Fatalf("Next#1 = %q, want benign.txt", fh1.Name)
-	}
-	if got, err := io.ReadAll(sd); err != nil || !bytes.Equal(got, content) {
-		t.Fatalf("reading benign.txt = %q, %v; want %q, nil", got, err, content)
-	}
-
-	fh2, err2 := sd.Next()
-	if err2 == nil {
-		t.Fatalf("Next#2 surfaced fabricated entry %q; want an error", fh2.Name)
-	}
-}
-
 // TestPackedRemainder_ConsumedOnCompletion pins the mechanism rather than the
 // symptom: after a file ends, none of its packed block may still be owed.
 // Asserting the byte count separately from the fabrication tests above means
@@ -457,26 +427,6 @@ func TestRefusedFile_CorruptHeaderPayloadIsDropped(t *testing.T) {
 
 // TestRefusedFile_RarBombPayloadIsDroppedRAR3 is the RAR3 counterpart of the
 // RAR5 rar-bomb test. The guard exists in both engines and so did the leak.
-func TestRefusedFile_RarBombPayloadIsDroppedRAR3(t *testing.T) {
-	evil := rar3FileEntry("EVIL.txt", 5, crc32.ChecksumIEEE([]byte("PWNED")), []byte("PWNED"))
-
-	var arc bytes.Buffer
-	arc.Write(rar3ArchiveHeader())
-	// Over the 1 MiB floor and more than 1000x the packed size.
-	arc.Write(rar3FileEntry("bomb.txt", 2_000_000, 0, evil))
-
-	sd := decompressorFor(arc.Bytes())
-
-	if _, err := sd.Next(); !errors.Is(err, ErrRarBombDetected) {
-		t.Fatalf("Next#1 = %v; want ErrRarBombDetected", err)
-	}
-	fh, err := sd.Next()
-	if err == nil {
-		t.Fatalf("Next#2 surfaced %q out of the refused file's payload; "+
-			"want an error", fh.Name)
-	}
-}
-
 // TestRefusedFile_RarBombDiscardsFullRAR3PackedSize covers the half of a RAR3
 // packed size that the block framing does not carry.
 //
@@ -493,31 +443,6 @@ func TestRefusedFile_RarBombPayloadIsDroppedRAR3(t *testing.T) {
 // library parses next. Trusting the low half instead leaves the stream
 // positioned exactly on the entry after it, which is what this asserts
 // against.
-func TestRefusedFile_RarBombDiscardsFullRAR3PackedSize(t *testing.T) {
-	filler := bytes.Repeat([]byte{0xAA}, 16)
-	second := []byte("SECOND-FILE-INTACT")
-
-	var arc bytes.Buffer
-	arc.Write(rar3ArchiveHeader())
-	// PackedSize = 16 | (1 << 32); UnpackedSize = 1001 << 32, which clears
-	// both the 1 MiB floor and the 1000x ratio the guard rejects.
-	arc.Write(rar3LargeFileEntry("big.bin", 0, 1, 1001, 0, filler))
-	arc.Write(rar3FileEntry("second.txt", uint32(len(second)),
-		crc32.ChecksumIEEE(second), second))
-
-	sd := decompressorFor(arc.Bytes())
-
-	if _, err := sd.Next(); !errors.Is(err, ErrRarBombDetected) {
-		t.Fatalf("Next#1 = %v; want ErrRarBombDetected", err)
-	}
-	fh, err := sd.Next()
-	if err == nil {
-		t.Fatalf("Next#2 returned %q; the refusal discarded only the low half "+
-			"of the declared packed size, leaving the stream positioned on "+
-			"whatever followed", fh.Name)
-	}
-}
-
 // TestPackedRemainder_TracksCurrentVolume pins the invariant that makes the
 // drain safe on multi-volume files: while any packed bytes are still owed,
 // the limiter holding that count must describe the volume actually being

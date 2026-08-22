@@ -91,6 +91,12 @@ var (
 	// is read through it. A set that mixes RAR3 and RAR5 would otherwise have
 	// its later volumes parsed under the wrong header layout entirely.
 	ErrVolumeVersionMismatch = errors.New("rarengine: volume archive version does not match the rest of the set")
+
+	// ErrUnsupportedFormat reports an archive this library cannot decode.
+	// RAR3 archives reach this: their headers remain parseable through
+	// ReadRAR3BlockHeader and ParseRAR3FileHeader for callers that inspect
+	// archives, but no RAR3 decoder is provided.
+	ErrUnsupportedFormat = errors.New("rarengine: unsupported archive format")
 )
 
 type ArchiveVersion int
@@ -479,12 +485,12 @@ func (sd *StreamDecompressor) nextVolume() error {
 
 	sd.version = version
 	if sd.engine == nil {
-		switch version {
-		case VersionRAR5:
-			sd.engine = newRAR5Engine(sd)
-		case VersionRAR3:
-			sd.engine = newRAR3Engine(sd)
+		if version != VersionRAR5 {
+			_ = sd.currentVol.Close()
+			sd.currentVol = nil
+			return fmt.Errorf("%w: %v", ErrUnsupportedFormat, version)
 		}
+		sd.engine = newRAR5Engine(sd)
 	}
 
 	return nil
