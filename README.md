@@ -8,7 +8,7 @@ Designed specifically for high-throughput Usenet downloaders (like `gonzbd`), `r
 
 ## Key Features
 
-- **Zero-Allocation Pipeline**: Reuses single `StreamDecompressor` instances and pre-allocated 32MB sliding windows across streams, slashing memory allocations to **under 2 KB per run**.
+- **Zero-Allocation Pipeline**: Reuses a single `Reader` instance and its pre-allocated 32MB sliding window across streams via `Reset`, keeping steady-state allocations minimal.
 - **Process In-Process**: Runs entirely within Go—no slow C++ `unrar` binary subprocess forks or shell pipeline parsing.
 - **Spec Conformance**: Fully audited and tested for strict conformance to the official RAR 5.0 technote specifications.
 - **Differential Oracle Tested**: Verified byte-for-byte against the system-installed canonical `unrar` binary for standard, compressed, solid, and password-encrypted RAR5 archives.
@@ -32,85 +32,64 @@ go get github.com/hobeone/rarengine
 ### Sequential Streaming Decompression (Tar-like Reader)
 
 ```go
-package main
+r := rarengine.NewReader(volumes)
+r.SetPasswords([]string{"first-guess", "second-guess"})
 
-import (
-	"errors"
-	"fmt"
-	"io"
-	"os"
-
-	"github.com/hobeone/rarengine"
-)
-
-func main() {
-	// 1. Open your RAR file (or multi-volume channel)
-	f, err := os.Open("archive.rar")
+for {
+	e, err := r.NextEntry()
 	if err != nil {
-		panic(err)
+		if errors.Is(err, io.EOF) || errors.Is(err, rarengine.ErrNoNextVolume) {
+			break
+		}
+		return err // the archive stopped being parseable
 	}
-	defer f.Close()
-
-	volumes := make(chan io.ReadCloser, 1)
-	volumes <- f
-	close(volumes)
-
-	// 2. Initialize the decompressor
-	sd := rarengine.NewStreamDecompressor(volumes)
-	sd.SetPassword("my-safe-password") // Configure if archive is encrypted (RAR5 only)
-
-	// 3. Process files sequentially
-	for {
-		fh, err := sd.Next()
-		if err != nil {
-			if errors.Is(err, io.EOF) || errors.Is(err, rarengine.ErrNoNextVolume) {
-				break
-			}
-			// One member failing does not mean the archive is over. A
-			// *FileError names the member and leaves the stream on the next
-			// block header, so the files behind it are still reachable.
-			var damaged *rarengine.FileError
-			if errors.As(err, &damaged) {
-				fmt.Printf("Skipping %s: %v\n", damaged.Header.Name, damaged.Err)
-				continue
-			}
-			panic(err)
-		}
-
-		if fh.IsDir {
-			fmt.Printf("Directory: %s\n", fh.Name)
-			continue
-		}
-
-		fmt.Printf("Extracting: %s (%d bytes)\n", fh.Name, fh.UnpackedSize)
-
-		// 4. Stream payload directly
-		data := make([]byte, fh.UnpackedSize)
-		_, err = io.ReadFull(sd, data)
-		if err != nil {
-			panic(err)
-		}
-
-		fmt.Printf("File Content: %q\n", string(data))
+	if e.Header.IsDir {
+		_ = e.Close()
+		continue
+	}
+	if _, err := io.Copy(dst, e); err != nil {
+		log.Printf("skipping %s: %v", e.Header.Name, err)
+	}
+	// Close reports the member's verdict. A member that failed does not end
+	// the archive: call NextEntry again.
+	if err := e.Close(); err != nil {
+		log.Printf("%s: %v", e.Header.Name, err)
 	}
 }
 ```
 
+`NextEntry`'s errors are archive-level only — the volumes channel closed, a
+block header would not parse, the format is unsupported. A per-member verdict
+(a short read, a CRC mismatch, a rar-bomb refusal) never comes back from
+`NextEntry`; it comes from the `Entry` itself, via `Read` or `Close`. One
+member failing does not end the archive: `NextEntry` is still safe to call
+again to reach the members behind it.
+
 ### High-Throughput Reuse (Zero-Allocation Reset)
 
 ```go
-// Reset the stream decompressor to process a new set of volumes
-// reusing the existing 32MB sliding window memory:
-sd.Reset(newVolumesChan)
+// Reset the reader to process a new set of volumes, reusing the existing
+// 32MB sliding window memory:
+r.Reset(newVolumesChan)
 ```
 
 ### Encryption
 
-Encryption is supported for RAR5 only. Two cases end the traversal rather than
-costing a single member: an archive whose block headers are themselves
-encrypted, since the headers that would name the remaining members cannot be
-read, and a member whose *continuation* claims encryption when its first block
-did not, since the stream is no longer known to be standing on a block header.
+Encryption is supported for RAR5 only. The two failures it can produce differ
+in blast radius. An archive whose block headers are themselves encrypted, and
+whose password cannot be resolved, ends the traversal: the headers that would
+name the remaining members are ciphertext, so there is nothing to continue to.
+A member whose *continuation* block claims encryption its first block did not
+costs only that member (`ErrCorruptFileHeader`) — the stream is still standing
+on a real block boundary, so the archive stays readable past it.
+
+### RAR3 archives
+
+`rarengine` decodes RAR5 only. `NewReader` refuses a RAR3 signature with
+`ErrUnsupportedFormat` before any per-member parsing runs. `ReadRAR3BlockHeader`
+and `ParseRAR3FileHeader` remain exported for a caller that only needs to
+inspect a RAR3 archive's headers — names, sizes, encryption flags — without
+decoding content.
 
 ---
 
@@ -124,12 +103,14 @@ go test -bench=. -benchmem
 On an **AMD Ryzen 9 9950X3D** CPU, the decompressor achieves the following performance metrics:
 
 ```
-BenchmarkDecompress_Store-32       2751678     425.5 ns/op   35.25 MB/s      848 B/op   22 allocs/op
-BenchmarkDecompress_Compress-32    1547181     782.9 ns/op   48.54 MB/s     1440 B/op   37 allocs/op
-BenchmarkDecompress_Solid-32        274993    4230.0 ns/op    8.98 MB/s     1704 B/op   48 allocs/op
+BenchmarkFilterExecution-32          1397302      866.8 ns/op                    0 B/op    0 allocs/op
+BenchmarkDecompress_Store-32         2262195      525.2 ns/op   28.56 MB/s    1000 B/op   22 allocs/op
+BenchmarkDecompress_Compress-32      1259260      956.2 ns/op   39.74 MB/s    1696 B/op   37 allocs/op
+BenchmarkDecompress_Solid-32              100  11412298 ns/op  459.41 MB/s    3454 B/op  141 allocs/op
+BenchmarkReaderResetReusesWindow-32  1777514      680.2 ns/op                1096 B/op   26 allocs/op
 ```
 
-*(By reusing the sliding window and `StreamDecompressor` instance via `Reset`, allocations during processing dropped from **33.5 MB** to **under 2 KB** per session, unleashing extreme execution throughput).*
+*(`BenchmarkReaderResetReusesWindow` reuses a single `Reader` and its 32MB sliding window across archives via `Reset`, instead of allocating a fresh window per archive.)*
 
 ---
 

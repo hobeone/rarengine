@@ -112,7 +112,7 @@ All five must pass. Do not commit with failing tests, vet errors, or lint warnin
 rarengine is a zero-allocation streaming library. The hot path processes compressed bytes at memory-bandwidth speeds. These rules are non-negotiable:
 
 - **Profile before optimizing.** Use `go test -bench -cpuprofile / -memprofile` and `go tool pprof`. Never guess.
-- **Preserve zero-allocation invariants.** The `StreamDecompressor` and sliding `window` are designed for reuse via `Reset()`. Do not introduce heap allocations inside `Next()` or `Read()` without a benchmark justifying it.
+- **Preserve zero-allocation invariants.** The `Reader` and sliding `window` are designed for reuse via `Reset()`. Do not introduce heap allocations inside `NextEntry()` or `Entry.Read()` without a benchmark justifying it.
 - **Do not zero large buffers unnecessarily.** The window's `Reset(false)` path exists precisely to avoid `memclrNoHeapPointers` on the 32 MB buffer. Never reintroduce a zeroing loop on the history buffer.
 - **Huffman decode uses a 10-bit direct-lookup table.** Do not replace it with a generic tree walk — the LUT was profiled to be significantly faster and must remain.
 - **Bit reader fetches up to 56 bits per call.** The MSB-first invariant is load-bearing; do not change the bit-order contract without updating all callers.
@@ -158,15 +158,17 @@ This repository is fully indexed by **Repowise** and supports MCP (Model Context
 
 | Layer | Description | Key Files |
 | :--- | :--- | :--- |
-| **Stream Decompression** | Public API, multi-volume sequential stitching, AES-256-CBC decryption, and reader orchestration. | [decompressor.go](file:///home/hobe/software/rarengine/decompressor.go) |
+| **Traversal** | Public API, volume/block traversal, member admission, password resolution. | [reader.go](file:///home/hobe/software/rarengine/reader.go), [volume.go](file:///home/hobe/software/rarengine/volume.go), [entry.go](file:///home/hobe/software/rarengine/entry.go), [splice.go](file:///home/hobe/software/rarengine/splice.go) |
+| **Encryption** | AES-256-CBC decryption and PBKDF2-HMAC-SHA256 key derivation. | [crypto.go](file:///home/hobe/software/rarengine/crypto.go) |
 | **Decoding & Decompression** | LZ77 sliding window history, 10-bit direct-lookup Huffman tables, MSB bit reader, and V5 dynamic state-machine. | [decoder50.go](file:///home/hobe/software/rarengine/decoder50.go), [huffman.go](file:///home/hobe/software/rarengine/huffman.go), [bit_reader.go](file:///home/hobe/software/rarengine/bit_reader.go), [window.go](file:///home/hobe/software/rarengine/window.go) |
 | **Post-Processing Filters** | SIMD/Assembly x86 relative E8 branch relocation, ARM relocations, and byte-striping delta filters. | [filters.go](file:///home/hobe/software/rarengine/filters.go), `filter_arm_amd64.s`, `filter_e8_amd64.s` |
-| **Header Parsing & Traversal Safe** | RAR5 block, file, and archive header parsers. OS-independent traversal sanitization. | [header.go](file:///home/hobe/software/rarengine/header.go), [vint.go](file:///home/hobe/software/rarengine/vint.go) |
+| **Header Parsing & Traversal Safe** | RAR5 block, file, and archive header parsers. RAR3 header parsing only (no RAR3 decoding). OS-independent traversal sanitization. | [header.go](file:///home/hobe/software/rarengine/header.go), [header_rar3.go](file:///home/hobe/software/rarengine/header_rar3.go), [vint.go](file:///home/hobe/software/rarengine/vint.go) |
 
 ### Churn Hotspots & Biomarkers
 
-- **`decompressor.go`**: Sequential volume orchestrator (High Churn).
+- **`reader.go`**: Traversal orchestrator (High Churn).
 - **`decoder50.go`**: Core decompression hot-path loop. Most complex engine logic.
+- **`entry.go`**: Per-member byte budget, running CRC, terminal verdict.
 - **`header.go`**: Complex block and file header parsing (`ParseFileHeader`, `ReadBlockHeader`).
 
 ### Repowise MCP Server Usage

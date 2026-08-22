@@ -113,8 +113,12 @@ type FileHeader struct {
 	// -- so a RAR3-flavoured Encrypted value is observed only by a caller
 	// that calls ParseRAR3FileHeader directly for inspection. RAR5 members
 	// are decrypted normally by NextEntry and returned with this set.
-	Encrypted        bool
-	KdfCount         int
+	Encrypted bool
+	KdfCount  int
+	// Salt is the PBKDF2 salt for an encrypted member. For RAR3, LHD_SALT and
+	// LHD_PASSWORD are each independently a claim of encryption (see
+	// Encrypted's comment); a caller that wants full encryption-claim
+	// detection across both bits should check Encrypted || len(Salt) > 0.
 	Salt             []byte
 	IV               []byte
 	UseMac           bool
