@@ -165,16 +165,85 @@ func TestVolumeUseEncryptedHeadersDecryptsAndDoesNotCarryAcrossVolumes(t *testin
 		t.Fatalf("block type = %d, want HeaderTypeEnd", h.Type)
 	}
 
+	// A second, independently-opened volume has hd == nil by construction --
+	// there is no mechanism that could carry v's key into it, so asserting
+	// that directly would pass against any implementation and prove nothing.
+	// What can actually fail is this: if a key somehow did carry across, the
+	// plaintext header below would be run through the decrypting path and
+	// misread as ciphertext, and its CRC32 would not validate. Asserting that
+	// next() succeeds AND returns the correct block type is a check the
+	// no-carry-over guarantee can fail.
 	other, err := openVolume(&mockReadCloser{bytes.NewReader(append([]byte{
 		0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x01, 0x00,
 	}, rar5EndHeader()...))})
 	if err != nil {
 		t.Fatalf("openVolume: %v", err)
 	}
-	if other.hd != nil {
-		t.Fatalf("new volume has a non-nil hd; the key must not carry across volumes")
-	}
-	if _, err := other.next(); err != nil {
+	h, err = other.next()
+	if err != nil {
 		t.Fatalf("next() on the new plaintext volume: %v", err)
+	}
+	if h.Type != HeaderTypeEnd {
+		t.Fatalf("new volume block type = %d, want HeaderTypeEnd", h.Type)
+	}
+}
+
+// A header read that fails partway leaves v.rc at an offset next() cannot
+// vouch for -- the size vint's continuation bytes are consumed before the
+// truncation is discovered. A retry must not treat whatever bytes sit there
+// next as a fresh block boundary: that is exactly how a crafted archive gets
+// a fabricated entry back from a caller that retries after a transient-looking
+// error.
+//
+// The archive shape: a valid RAR5 signature, then a 4-byte CRC followed by
+// three size-vint bytes that all set the continuation bit (0x80) and never
+// terminate, so DecodeVint fails having consumed exactly the 7 bytes
+// ReadBlockHeader read up front. A complete, CRC-valid file block sits right
+// after -- the bytes a broken retry would reparse as the next header.
+func TestVolumeDoesNotResumeAfterFailedHeaderRead(t *testing.T) {
+	planted := rar5BlockDeclaring(HeaderTypeFile, 5, nil, false)
+
+	stream := append([]byte{}, rar5Signature...)
+	stream = append(stream, 0x00, 0x00, 0x00, 0x00, 0x80, 0x80, 0x80)
+	stream = append(stream, planted...)
+
+	v, err := openVolume(&mockReadCloser{bytes.NewReader(stream)})
+	if err != nil {
+		t.Fatalf("openVolume: %v", err)
+	}
+
+	_, firstErr := v.next()
+	if firstErr == nil {
+		t.Fatalf("first next(): want an error (truncated vint), got nil")
+	}
+
+	h, err := v.next()
+	if err == nil {
+		t.Fatalf("second next() succeeded with header %+v; want the sticky "+
+			"error from the first failed read, not a header fabricated from "+
+			"the planted block's bytes", h)
+	}
+	if !errors.Is(err, firstErr) {
+		t.Fatalf("second next() error = %v, want the same sticky error as "+
+			"the first failed read (%v)", err, firstErr)
+	}
+}
+
+// next() after Close() must not dereference the now-nil io.ReadCloser: a
+// caller mistake must produce an error, not a crashed process.
+func TestVolumeNextAfterCloseReturnsError(t *testing.T) {
+	blk := rar5BlockDeclaring(HeaderTypeFile, 4, nil, true)
+	stream := append(append([]byte{}, blk...), []byte("DATA")...)
+
+	v, err := openVolume(&mockReadCloser{bytes.NewReader(stream)})
+	if err != nil {
+		t.Fatalf("openVolume: %v", err)
+	}
+	if err := v.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if _, err := v.next(); err == nil {
+		t.Fatalf("next() after Close(): want an error, got nil")
 	}
 }

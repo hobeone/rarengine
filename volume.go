@@ -36,6 +36,20 @@ type volume struct {
 	// hd decrypts subsequent block headers once an encryption header has
 	// yielded a key. nil means headers are plaintext.
 	hd *headerDecrypter
+
+	// err is sticky once set: any failure inside next() -- the payload skip or
+	// the header read itself, plaintext or encrypted -- leaves v.rc at an
+	// offset next() cannot vouch for. A header read that fails partway through
+	// (a truncated size vint, an IV read that succeeds but the ciphertext that
+	// follows doesn't) has already consumed some number of bytes from v.rc,
+	// and neither the caller nor this type knows how many. That unknown
+	// position is exactly what lets a crafted archive choose where the next
+	// header gets parsed from: retrying the read treats whatever bytes sit
+	// there next as a fresh block boundary, when they are actually the
+	// interior of whatever failed to parse. Recording err here and returning
+	// it on every subsequent call, without touching v.rc again, is what keeps
+	// a failed read from being retried into a fabricated header.
+	err error
 }
 
 var rar5Signature = []byte{0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x01, 0x00}
@@ -76,9 +90,21 @@ func openVolume(rc io.ReadCloser) (*volume, error) {
 // bytes are simply absent, io.Copy stops at the underlying EOF, and the header
 // read below then fails -- which is the same signal as a volume that simply
 // ended, and is handled in one place by the caller.
+//
+// Once next() has failed, it keeps failing with the same error and never
+// touches v.rc again -- see the err field's comment for why a failed read
+// cannot safely be retried.
 func (v *volume) next() (*BlockHeader, error) {
+	if v.err != nil {
+		return nil, v.err
+	}
 	if _, err := io.Copy(io.Discard, &v.body); err != nil {
+		v.err = err
 		return nil, err
+	}
+	if v.rc == nil {
+		v.err = fmt.Errorf("rarengine: next called on a closed volume")
+		return nil, v.err
 	}
 	var (
 		h   *BlockHeader
@@ -90,6 +116,7 @@ func (v *volume) next() (*BlockHeader, error) {
 		h, err = ReadBlockHeader(v.rc)
 	}
 	if err != nil {
+		v.err = err
 		return nil, err
 	}
 	v.body = io.LimitedReader{R: v.rc, N: h.DataSize}
@@ -98,6 +125,12 @@ func (v *volume) next() (*BlockHeader, error) {
 
 // payload is the current block's declared bytes, bounded by DataSize. A
 // decoder handed this cannot read into the following header.
+//
+// The returned reader aliases v.body, which the next next() call re-points to
+// describe a different block. It is only valid until that call: hold it
+// across a next() and it silently starts producing the following block's
+// payload instead of erroring, because the alias keeps working -- it just
+// stops meaning what the caller thinks it means.
 func (v *volume) payload() io.Reader { return &v.body }
 
 // useEncryptedHeaders switches next() to the decrypting header path, once an
