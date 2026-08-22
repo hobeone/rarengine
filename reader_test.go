@@ -96,15 +96,18 @@ func TestSolidMemberAfterDamageIsRefused(t *testing.T) {
 func TestRefusedMemberWithTruncatedPayloadDoesNotFabricateNextEntry(t *testing.T) {
 	planted := fabricatedRAR5()
 
-	// The block declares far more packed bytes than actually follow it in the
-	// volume: 1 real content byte plus the whole of the planted block, plus a
-	// margin, so skipping the declared amount runs the volume dry before a
-	// header can ever be read from the planted bytes.
-	declaredPacked := int64(1 + len(planted) + 1000)
+	// The block carries NO real content: the planted block sits at byte zero
+	// of what the header calls "payload". If next() ever failed to perform
+	// the skip, a header read from that position would land exactly on the
+	// planted block's CRC-valid file header. The declared packed size is the
+	// planted block's length plus a margin, so the declared-vs-actual
+	// mismatch is what makes this a truncated payload: skipping the declared
+	// amount runs the volume dry before any header could be read from it.
+	declaredPacked := int64(len(planted) + 1000)
 
 	bomb := rar5Member(t, memberSpec{
 		name:       "bomb.bin",
-		content:    "x",
+		content:    "",
 		unpackedSz: 2 << 30, // 2 GiB declared, so the bomb guard fires
 		packedSz:   declaredPacked,
 	})
