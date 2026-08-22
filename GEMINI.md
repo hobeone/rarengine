@@ -162,13 +162,11 @@ This repository is fully indexed by **Repowise** and supports MCP (Model Context
 | **Decoding & Decompression** | LZ77 sliding window history, 10-bit direct-lookup Huffman tables, MSB bit reader, and V5 dynamic state-machine. | [decoder50.go](file:///home/hobe/software/rarengine/decoder50.go), [huffman.go](file:///home/hobe/software/rarengine/huffman.go), [bit_reader.go](file:///home/hobe/software/rarengine/bit_reader.go), [window.go](file:///home/hobe/software/rarengine/window.go) |
 | **Post-Processing Filters** | SIMD/Assembly x86 relative E8 branch relocation, ARM relocations, and byte-striping delta filters. | [filters.go](file:///home/hobe/software/rarengine/filters.go), `filter_arm_amd64.s`, `filter_e8_amd64.s` |
 | **Header Parsing & Traversal Safe** | RAR5 block, file, and archive header parsers. OS-independent traversal sanitization. | [header.go](file:///home/hobe/software/rarengine/header.go), [vint.go](file:///home/hobe/software/rarengine/vint.go) |
-| **High-Level Unpack Utility** | Sandboxed directory extraction using Go 1.24+ `os.OpenRoot` safe directory jails. | [unpack.go](file:///home/hobe/software/rarengine/unpack.go) |
 
 ### Churn Hotspots & Biomarkers
 
 - **`decompressor.go`**: Sequential volume orchestrator (High Churn).
 - **`decoder50.go`**: Core decompression hot-path loop. Most complex engine logic.
-- **`unpack.go`**: High-level sandboxed directory unpacking (`UnpackDir`).
 - **`header.go`**: Complex block and file header parsing (`ParseFileHeader`, `ReadBlockHeader`).
 
 ### Repowise MCP Server Usage

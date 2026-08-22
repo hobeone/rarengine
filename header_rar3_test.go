@@ -3,7 +3,6 @@ package rarengine
 import (
 	"bytes"
 	"io"
-	"os"
 	"testing"
 )
 
@@ -14,17 +13,11 @@ import (
 // be decompressed by this library, so the test is header-only: it parses the
 // structure and validates parsed values without attempting decompression.
 func TestRAR3_HeaderParsing(t *testing.T) {
-	data, err := os.ReadFile("testdata/rar3_testfile.rar")
-	if err != nil {
-		t.Fatalf("Failed to read fixture: %v", err)
-	}
-
-	r := bytes.NewReader(data)
+	r := bytes.NewReader(fixtureBytes(t, "rar3_testfile.rar"))
 
 	// Skip the 7-byte RAR3 signature
 	sig := make([]byte, 7)
-	_, err = io.ReadFull(r, sig)
-	if err != nil {
+	if _, err := io.ReadFull(r, sig); err != nil {
 		t.Fatalf("Failed to read signature: %v", err)
 	}
 
