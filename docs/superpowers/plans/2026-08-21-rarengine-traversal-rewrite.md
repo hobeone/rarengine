@@ -2532,14 +2532,71 @@ They fall into two groups, handled differently.
 
 **Group B — replace the assertions, keep the fixtures.** `discard_payload_test.go`, `packed_drain_test.go`, `skip_damaged_test.go`. Their **fixtures are the valuable part** and each encodes a real attack; the per-site assertions are not, because they check that a particular switch case discarded, which is no longer a thing that can vary.
 
-Keep every fixture builder. Replace the assertions with the properties from the spec, driven through `NextEntry`. The essential shape — already covered by `TestNextEntrySkipsFabricatedHeaderInPayload` in Task 8 — is that the member reached after any refusal is the archive's genuine next one, never one planted in a payload.
+Keep every fixture builder. Replace the assertions with the properties from the spec, driven through `NextEntry`. The translation follows three concrete archetypes:
+
+1. **Archetype 1: Non-File Payload Discard (`discard_payload_test.go`)**
+   * *Attack:* A non-file block (archive header, service header, crypt header, or end header) declares payload with a fake file block planted inside.
+   * *Replacement Pattern:*
+     ```go
+     r := NewReader(volumesOf(stream))
+     assertReachesRealEntry(t, r, "real.bin")
+     ```
+
+2. **Archetype 2: Packed Remainder Drain (`packed_drain_test.go`)**
+   * *Attack:* A file block declares `PackedSize > UnpackedSize` with a fake file block planted in the trailing packed bytes.
+   * *Replacement Pattern:*
+     ```go
+     r := NewReader(volumesOf(stream))
+     e1, err := r.NextEntry()
+     if err != nil {
+         t.Fatalf("first NextEntry: %v", err)
+     }
+     _, _ = io.Copy(io.Discard, e1)
+     _ = e1.Close()
+     e2, err := r.NextEntry() // Must cleanly reach the real next entry, never the planted payload
+     if err != nil || e2.Header.Name != "real_next.bin" {
+         t.Fatalf("failed to reach genuine next entry: %v", err)
+     }
+     ```
+
+3. **Archetype 3: Damaged Member & Solid Window Invalidation (`skip_damaged_test.go`)**
+   * *Attack:* Member 1 is corrupt (CRC mismatch, truncated payload, rar-bomb). Member 2 is solid (or non-solid).
+   * *Replacement Pattern:*
+     ```go
+     r := NewReader(volumesOf(stream))
+     e1, _ := r.NextEntry()
+     _, _ = io.Copy(io.Discard, e1)
+     err := e1.Close()
+     if !errors.Is(err, expectedDamageError) { // e.g. ErrCRCMismatch, ErrTruncatedFile, ErrRarBombDetected
+         t.Fatalf("first member verdict = %v, want %v", err, expectedDamageError)
+     }
+     e2, err := r.NextEntry()
+     if isSolid {
+         // Solid successor must be refused with ErrSolidStreamBroken (either terminal entry or on Close)
+         if err != nil && !errors.Is(err, ErrSolidStreamBroken) {
+             t.Fatalf("solid successor NextEntry error = %v, want ErrSolidStreamBroken", err)
+         }
+         if err == nil {
+             if closeErr := e2.Close(); !errors.Is(closeErr, ErrSolidStreamBroken) {
+                 t.Fatalf("solid successor Close = %v, want ErrSolidStreamBroken", closeErr)
+             }
+         }
+     } else {
+         if err != nil {
+             t.Fatalf("non-solid successor NextEntry error = %v", err)
+         }
+         if closeErr := e2.Close(); closeErr != nil {
+             t.Fatalf("non-solid successor Close error = %v", closeErr)
+         }
+     }
+     ```
 
 A test in Group B that cannot be expressed as a property of `NextEntry` is a signal, not a nuisance: it means the fixture exercises something the new design does not cover. Stop and report it rather than deleting it.
 
 Delete `assertReachesRealEntry` and rewrite as:
 
 ```go
-// assertReachesRealEntry drives the reader past skipErrors refusals and
+// assertReachesRealEntry drives the reader past refusals and
 // asserts the member it then reaches is the archive's genuine next one.
 //
 // Asserting only that the first call errors proves nothing -- that is equally
@@ -2560,6 +2617,11 @@ func assertReachesRealEntry(t *testing.T, r *Reader, wantName string) {
 		_ = e.Close()
 	}
 }
+```
+
+Run test count verification to guarantee no RAR5 test cases were dropped:
+```bash
+grep -c "^func Test" discard_payload_test.go packed_drain_test.go skip_damaged_test.go
 ```
 
 - [ ] **Step 4: Rename volumeSplicer to match the spec**
