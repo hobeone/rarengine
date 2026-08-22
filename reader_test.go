@@ -13,7 +13,11 @@ import (
 // planted in an unclaimed block's payload must never be returned as a member.
 func TestNextEntrySkipsFabricatedHeaderInPayload(t *testing.T) {
 	planted := fabricatedRAR5()
-	archive := rar5BlockDeclaring(HeaderTypeArchive, len(planted), nil, true)
+	// extra carries the archive header's own body (its flags vint) so
+	// ParseArchiveHeader succeeds and the block is legitimately skipped --
+	// this test is about payload discarding, not archive-header parsing,
+	// which is pinned separately by TestMalformedArchiveHeaderEndsTraversal.
+	archive := rar5BlockDeclaring(HeaderTypeArchive, len(planted), EncodeVint(0), true)
 	stream := append(append([]byte{}, archive...), planted...)
 
 	r := NewReader(volumesOf(stream))
@@ -289,6 +293,46 @@ func truncatedThenSolidArchive(t testing.TB) []byte {
 		rar5Member(t, memberSpec{name: "short.bin", content: "short", unpackedSz: 100}),
 		rar5Member(t, memberSpec{name: "solid.bin", content: "after", solid: true, withCRC: true}),
 	)
+}
+
+// A malformed archive header ends traversal instead of being skipped: the
+// archive header defines archive-wide semantics (including whether the
+// archive is solid), so a header this library cannot parse is an
+// archive-level problem, not a block to scan past.
+func TestMalformedArchiveHeaderEndsTraversal(t *testing.T) {
+	// The block header itself is CRC-valid (rar5Block computes that), but the
+	// archive header BODY does not parse: it declares ArcFlagVolNum without
+	// the volume-number vint that flag promises follows.
+	var p bytes.Buffer
+	p.Write(EncodeVint(HeaderTypeArchive))
+	p.Write(EncodeVint(0))
+	p.Write(EncodeVint(ArcFlagVolNum))
+
+	var archive bytes.Buffer
+	archive.Write([]byte{0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x01, 0x00})
+	archive.Write(rar5Block(p.Bytes()))
+
+	good := rar5Member(t, memberSpec{name: "good.bin", content: "payload", withCRC: true})
+	stream := append(archive.Bytes(), good...)
+
+	r := NewReader(volumesOf(stream))
+	e, err := r.NextEntry()
+	if err == nil {
+		if e != nil {
+			_ = e.Close()
+		}
+		t.Fatalf("NextEntry succeeded past a malformed archive header, "+
+			"returning %v; want a non-nil error", e)
+	}
+	if errors.Is(err, io.EOF) {
+		t.Fatalf("NextEntry returned io.EOF, want the archive header parse error")
+	}
+	if e != nil {
+		t.Fatalf("NextEntry returned a non-nil Entry alongside an error")
+	}
+	if e != nil && e.Header != nil && e.Header.Name == "good.bin" {
+		t.Fatalf("the good member behind the malformed archive header was returned")
+	}
 }
 
 func TestFixtureBuildersRoundTrip(t *testing.T) {

@@ -143,7 +143,13 @@ func (r *Reader) dispatch(h *BlockHeader) (*Entry, error) {
 	case HeaderTypeArchive:
 		ah, err := ParseArchiveHeader(h)
 		if err != nil {
-			return nil, nil // the block is skipped; the archive may still parse
+			// Fatal, not skipped. The archive header occurs once per volume
+			// and defines archive-wide semantics, including whether the
+			// archive is solid. NextEntry's error set is explicitly
+			// archive-level, and a header this library cannot parse is
+			// precisely an archive-level problem: continuing past it means
+			// proceeding with unknown archive-wide semantics.
+			return nil, err
 		}
 		r.solid = r.solid || ah.Solid
 		return nil, nil
