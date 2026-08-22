@@ -134,6 +134,17 @@ func (e *Entry) Read(p []byte) (int, error) {
 // the success verdict -- recorded internally as io.EOF so Read has exactly
 // one thing to return -- is reported as nil here, matching io.Closer's
 // convention that Close returns nil on success.
+//
+// The success check is an identity comparison (e.done == io.EOF), not
+// errors.Is. finish assigns the bare io.EOF sentinel itself on success, so
+// identity is exact; errors.Is would also report success for any future
+// verdict that merely WRAPS io.EOF, silently turning that failure into a
+// clean Close -- a member reporting done while the caller believes it
+// received everything. This makes ErrTruncatedFile not satisfying
+// errors.Is(err, io.EOF) load-bearing for a second, independent reason
+// beyond the one at its declaration (callers loop Read until io.EOF): if
+// truncation ever satisfied that check, Close would report a truncated
+// member as successful too.
 func (e *Entry) Close() error {
 	if e.done == nil {
 		if e.src != nil {
@@ -143,7 +154,7 @@ func (e *Entry) Close() error {
 			_ = e.finish(nil)
 		}
 	}
-	if errors.Is(e.done, io.EOF) {
+	if e.done == io.EOF {
 		return nil
 	}
 	return e.done

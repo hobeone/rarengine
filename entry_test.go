@@ -2,6 +2,7 @@ package rarengine
 
 import (
 	"errors"
+	"fmt"
 	"hash/crc32"
 	"io"
 	"strings"
@@ -189,5 +190,21 @@ func TestEntryShortAfterTruncation(t *testing.T) {
 	_, _ = io.Copy(io.Discard, e)
 	if !e.short() {
 		t.Fatal("short() = false after a truncated read left bytes owed")
+	}
+}
+
+// Close must compare the recorded verdict to io.EOF by identity, not with
+// errors.Is. finish only ever assigns the bare io.EOF sentinel on success, so
+// no production path can currently reach this state -- this is a white-box
+// guard against a future refactor (e.g. a decoder wrapping io.EOF for
+// context before handing it to finish) that would otherwise make Close
+// silently report a failed member as successful.
+func TestEntryCloseDoesNotTranslateWrappedEOF(t *testing.T) {
+	e := entryOver("hello world", headerFor("hello world", true))
+	wrapped := fmt.Errorf("decoder: %w", io.EOF)
+	e.done = wrapped // unreachable via the public API today; set directly
+
+	if got := e.Close(); got != wrapped {
+		t.Fatalf("Close() = %v, want the wrapped verdict %v unchanged", got, wrapped)
 	}
 }
