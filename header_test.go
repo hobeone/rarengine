@@ -291,12 +291,43 @@ func TestParseHashRecord(t *testing.T) {
 // the declared size meaningless. Detecting truncation depends on that size,
 // so a header declining to state it is refused rather than decoded against a
 // value that means nothing.
+//
+// The rejection now fires from a validation block placed after fh.Name is
+// decoded (identity-first validation), not immediately after the flags vint,
+// so the fixture must be a complete, well-formed header through the name --
+// differing from a valid header ONLY in carrying the flag -- or it fails on
+// an earlier bounds/vint error instead of genuinely reaching the check.
 func TestParseFileHeader_RejectsUnknownUnpackedSize(t *testing.T) {
+	var payload bytes.Buffer
+	payload.Write(EncodeVint(FileFlagUnpSizeUnknown))
+	payload.Write(EncodeVint(0)) // UnpackedSize -- meaningless per the flag, but still decoded
+	payload.Write(EncodeVint(0)) // attributes
+	payload.Write(EncodeVint(0)) // comp flags: store
+	payload.Write(EncodeVint(0)) // host OS
+	name := "unknown-size.bin"
+	payload.Write(EncodeVint(uint64(len(name))))
+	payload.WriteString(name)
+
 	h := &BlockHeader{
 		Type:    HeaderTypeFile,
-		Payload: EncodeVint(FileFlagUnpSizeUnknown),
+		Payload: payload.Bytes(),
 	}
-	if _, err := ParseFileHeader(h); !errors.Is(err, ErrUnpSizeUnknown) {
+	fh, err := ParseFileHeader(h)
+	if !errors.Is(err, ErrUnpSizeUnknown) {
 		t.Fatalf("ParseFileHeader returned %v; want ErrUnpSizeUnknown", err)
+	}
+	// Negative assertion: without it, a regression that made this fixture
+	// fail EARLIER (e.g. the check moving back to right after the flags
+	// vint, or an unrelated bounds error) would still satisfy a bare
+	// errors.Is(err, ErrUnpSizeUnknown)-only check if that regression
+	// happened to preserve the sentinel, but a regression that instead
+	// misrouted this fixture into ErrCorruptFileHeader would slip past a
+	// test that never checked for it. Pin that this fixture reaches
+	// EXACTLY the UnpSizeUnknown check, not the corrupt-header path.
+	if errors.Is(err, ErrCorruptFileHeader) {
+		t.Fatalf("ParseFileHeader error %v also satisfies ErrCorruptFileHeader; want ONLY ErrUnpSizeUnknown", err)
+	}
+	if fh != nil {
+		t.Fatalf("ParseFileHeader returned a non-nil header %+v; the exported wrapper must discard it on error", fh)
 	}
 }

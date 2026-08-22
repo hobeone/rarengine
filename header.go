@@ -491,12 +491,10 @@ func parseFileHeader(h *BlockHeader) (*FileHeader, error) {
 	}
 	payload = payload[nFlags:]
 
-	// Refused at parse time rather than later: the flag says UnpackedSize is
-	// not a trustworthy value, which is a structural fact about the header
-	// rather than a policy judgment about the file.
-	if flags&FileFlagUnpSizeUnknown > 0 {
-		return nil, ErrUnpSizeUnknown
-	}
+	// Captured here, at the point the flag is decoded, but not acted on until
+	// the validation block below: the flag itself is decoded identity, not a
+	// failure to decode, and the name has not been read yet.
+	unpSizeUnknown := flags&FileFlagUnpSizeUnknown > 0
 
 	fh := &FileHeader{
 		IsDir:      flags&FileFlagIsDir > 0,
@@ -511,12 +509,11 @@ func parseFileHeader(h *BlockHeader) (*FileHeader, error) {
 	}
 	// The vint carries up to 70 bits, so an attacker can set the sign bit of
 	// the int64. A negative size would sail past every "have we produced
-	// enough yet" comparison downstream, so it is rejected where it enters
-	// rather than defended against at each use.
+	// enough yet" comparison downstream, so decoding it here always happens,
+	// but rejecting it is deferred to the validation block below -- see that
+	// block for why, and for the guarantee that no return path between here
+	// and there can hand back an unvalidated size.
 	fh.UnpackedSize = int64(unpackedSize)
-	if fh.UnpackedSize < 0 {
-		return nil, ErrCorruptFileHeader
-	}
 	payload = payload[nUnp:]
 
 	attrs, nAttrs, err := DecodeVint(payload) // Attributes
@@ -569,6 +566,35 @@ func parseFileHeader(h *BlockHeader) (*FileHeader, error) {
 		return nil, ErrCorruptFileHeader
 	}
 	fh.Name = sanitizePath(string(payload[:nameLen]))
+
+	// Identity-first validation: both checks below are policy judgments about
+	// already-decoded values, not failures to decode, and neither needs to
+	// fire before fh.Name exists. Placed here, immediately before
+	// parseExtraRecords, every return from this point on carries fh alongside
+	// its error so the caller (Reader.dispatch) can refuse the member by name
+	// instead of dropping it from the listing with no trace -- the same
+	// contract parseExtraRecords already relies on below.
+	//
+	// No return path between the flags/size decode above and here can hand
+	// back a header with an unvalidated size: every intermediate field
+	// (mtime, CRC32, comp flags, host OS, name) fails with a bare
+	// (nil, err) on a short or malformed payload, never exposing fh. So a
+	// negative UnpackedSize is always rejected before ever escaping this
+	// function, satisfying "sizes are validated where they are decoded" even
+	// though the reject site has moved.
+	//
+	// The header's own untrustworthy value -- a meaningless UnpSizeUnknown
+	// placeholder, or a negative size -- is deliberately left exactly as
+	// decoded on fh, not clamped or zeroed. terminalEntry's cause is itself
+	// the statement that nothing in the header is to be trusted; clamping
+	// would destroy that evidence. See terminalEntry's doc comment and
+	// ErrRarBombDetected's existing precedent for the same choice.
+	if unpSizeUnknown {
+		return fh, ErrUnpSizeUnknown
+	}
+	if fh.UnpackedSize < 0 {
+		return fh, ErrCorruptFileHeader
+	}
 
 	// Parse optional extra records. Unlike every earlier failure in this
 	// function, fh is returned alongside the error here: the name and every

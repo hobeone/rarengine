@@ -209,17 +209,23 @@ func rar5FileEntryUnknownSize(name string, content []byte, crc32Value uint32) []
 	return out.Bytes()
 }
 
-// TestUnknownUnpackedSizeIsSkippable checks that refusing a file whose
-// unpacked size is unknown does not leave its payload in the stream for the
-// next header read to land in -- and, stronger than that, that the archive's
-// genuine next member is what NextEntry actually reaches. ParseFileHeader
-// failing is not surfaced to the caller as a distinguishable error: dispatch
-// treats it the same as any other unclaimed block and keeps scanning (see
-// reader.go's HeaderTypeFile case), so the only observable property is
-// positional recovery, which TestParseFileHeader_RejectsUnknownUnpackedSize
-// in header_test.go pairs with to pin that ErrUnpSizeUnknown specifically
-// is what ParseFileHeader itself returns.
-func TestUnknownUnpackedSizeIsSkippable(t *testing.T) {
+// TestUnknownUnpackedSizeIsRefusedByName checks that a member carrying
+// FileFlagUnpSizeUnknown is refused BY NAME (identity-first validation) --
+// the FIRST NextEntry call returns a non-nil Entry whose Header.Name is the
+// flagged member's name, reporting ErrUnpSizeUnknown from both Read and
+// Close -- and, separately, that the refused member's declared payload does
+// not leak into the next header read: the archive's genuine next member is
+// still reachable by name afterward. Asserting the FIRST entry, never
+// looping to find a name, is deliberate: a loop would pass even if a
+// fabricated entry preceded it.
+//
+// This used to assert the opposite -- that the flagged member vanished
+// invisibly and NextEntry's first call landed directly on "real.txt" --
+// before dispatch had a header identity to refuse by. That assertion
+// pinned the OLD (pre identity-first-validation) contract for this specific
+// flag and had to change with it; see TestParseFileHeader_RejectsUnknownUnpackedSize
+// in header_test.go for the sentinel pin at the parseFileHeader level.
+func TestUnknownUnpackedSizeIsRefusedByName(t *testing.T) {
 	// Distinctive so its presence in the unread remainder would be unambiguous.
 	content := []byte("PAYLOAD-MUST-BE-DISCARDED")
 	unknownSize := rar5FileEntryUnknownSize("streamed.txt", content, crc32.ChecksumIEEE(content))
@@ -231,15 +237,34 @@ func TestUnknownUnpackedSizeIsSkippable(t *testing.T) {
 	archive.Write(rar5EndHeader())
 
 	r := NewReader(volumesOf(archive.Bytes()))
-	e, err := r.NextEntry()
+
+	first, err := r.NextEntry()
 	if err != nil {
-		t.Fatalf("NextEntry: %v", err)
+		t.Fatalf("first NextEntry: %v", err)
 	}
-	if e.Header == nil || e.Header.Name != "real.txt" {
-		t.Fatalf("NextEntry returned %v, want real.txt -- the refused member's "+
-			"payload must not survive into the next header read", e.Header)
+	if first == nil || first.Header == nil || first.Header.Name != "streamed.txt" {
+		t.Fatalf("first NextEntry returned %+v, want the refused member reported by name (streamed.txt)", first)
 	}
-	if got, err := io.ReadAll(e); err != nil || string(got) != "real" {
+	buf := make([]byte, 16)
+	if _, readErr := first.Read(buf); !errors.Is(readErr, ErrUnpSizeUnknown) {
+		t.Fatalf("first member Read error = %v, want ErrUnpSizeUnknown", readErr)
+	}
+	if closeErr := first.Close(); !errors.Is(closeErr, ErrUnpSizeUnknown) {
+		t.Fatalf("first member Close = %v, want ErrUnpSizeUnknown", closeErr)
+	}
+
+	second, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("second NextEntry: %v", err)
+	}
+	if second.Header == nil || second.Header.Name != "real.txt" {
+		t.Fatalf("second NextEntry returned %v, want real.txt -- the refused member's "+
+			"payload must not survive into the next header read", second.Header)
+	}
+	if got, err := io.ReadAll(second); err != nil || string(got) != "real" {
 		t.Fatalf("reading real.txt = %q, %v; want \"real\", nil", got, err)
+	}
+	if closeErr := second.Close(); closeErr != nil {
+		t.Fatalf("real.txt Close = %v, want nil", closeErr)
 	}
 }

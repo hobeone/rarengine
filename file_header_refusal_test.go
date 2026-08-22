@@ -216,3 +216,309 @@ func TestSolidMemberAfterRefusedExtraRecordMemberIsRefused(t *testing.T) {
 		t.Fatalf("solid successor verdict = %v, want ErrSolidStreamBroken", err)
 	}
 }
+
+// Tests below cover the SAME invariant -- a member whose identity survives a
+// late refusal is reported by name, not dropped -- for the two refusals that
+// moved from early-in-parseFileHeader positions (right after the flags vint,
+// and right after the size vint) into the identity-first validation block
+// placed immediately before parseExtraRecords: FileFlagUnpSizeUnknown and a
+// negative decoded UnpackedSize. Unlike memberWithEncVersion's trigger (a
+// parseExtraRecords failure), these two fire from ordinary field values with
+// no extra records at all, so the builders below carry no extra area.
+
+// memberWithUnpSizeUnknown builds a stored member carrying
+// FileFlagUnpSizeUnknown: a complete, well-formed header through the name
+// field, differing from a valid header ONLY in this flag. notFirst clears
+// FirstBlock, producing a continuation block belonging to a member already
+// announced elsewhere.
+func memberWithUnpSizeUnknown(t testing.TB, name, content string, notFirst bool) []byte {
+	t.Helper()
+	c := []byte(content)
+
+	var f bytes.Buffer
+	f.Write(EncodeVint(FileFlagHasCRC32 | FileFlagUnpSizeUnknown))
+	f.Write(EncodeVint(uint64(len(c)))) // UnpackedSize -- meaningless per the flag, but still decoded
+	f.Write(EncodeVint(0))              // attributes
+	var crcBuf [4]byte
+	binary.LittleEndian.PutUint32(crcBuf[:], crc32.ChecksumIEEE(c))
+	f.Write(crcBuf[:])
+	f.Write(EncodeVint(0)) // comp flags: store
+	f.Write(EncodeVint(0)) // host OS
+	f.Write(EncodeVint(uint64(len(name))))
+	f.Write([]byte(name))
+
+	blockFlags := uint64(HeaderFlagHasData)
+	if notFirst {
+		blockFlags |= HeaderFlagDataNotFirst
+	}
+
+	var p bytes.Buffer
+	p.Write(EncodeVint(HeaderTypeFile))
+	p.Write(EncodeVint(blockFlags))
+	p.Write(EncodeVint(uint64(len(c))))
+	p.Write(f.Bytes())
+
+	var out bytes.Buffer
+	out.Write(rar5Block(p.Bytes()))
+	out.Write(c)
+	return out.Bytes()
+}
+
+// memberWithNegativeSize builds a stored member whose UnpackedSize vint sets
+// the int64 sign bit -- otherwise a complete, well-formed header through the
+// name field. notFirst clears FirstBlock the same way memberWithUnpSizeUnknown
+// does.
+func memberWithNegativeSize(t testing.TB, name, content string, notFirst bool) []byte {
+	t.Helper()
+	c := []byte(content)
+
+	var f bytes.Buffer
+	f.Write(EncodeVint(FileFlagHasCRC32))
+	f.Write(EncodeVint(uint64(1) << 63)) // sets the int64 sign bit
+	f.Write(EncodeVint(0))               // attributes
+	var crcBuf [4]byte
+	binary.LittleEndian.PutUint32(crcBuf[:], crc32.ChecksumIEEE(c))
+	f.Write(crcBuf[:])
+	f.Write(EncodeVint(0)) // comp flags: store
+	f.Write(EncodeVint(0)) // host OS
+	f.Write(EncodeVint(uint64(len(name))))
+	f.Write([]byte(name))
+
+	blockFlags := uint64(HeaderFlagHasData)
+	if notFirst {
+		blockFlags |= HeaderFlagDataNotFirst
+	}
+
+	var p bytes.Buffer
+	p.Write(EncodeVint(HeaderTypeFile))
+	p.Write(EncodeVint(blockFlags))
+	p.Write(EncodeVint(uint64(len(c))))
+	p.Write(f.Bytes())
+
+	var out bytes.Buffer
+	out.Write(rar5Block(p.Bytes()))
+	out.Write(c)
+	return out.Bytes()
+}
+
+// (a) An UnpSizeUnknown member is refused BY NAME: the FIRST NextEntry call
+// returns a non-nil Entry whose Header.Name is the flagged member's name,
+// reporting ErrUnpSizeUnknown from both Read and Close. Asserting the FIRST
+// entry, never looping to find the name, is deliberate -- a loop would pass
+// even if a fabricated entry preceded it.
+func TestUnpSizeUnknownMemberRefusedByName(t *testing.T) {
+	stream := rar5Archive(t, false,
+		memberWithUnpSizeUnknown(t, "unknown.bin", "secret", false),
+	)
+
+	r := NewReader(volumesOf(stream))
+	e, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("NextEntry error = %v, want a terminal Entry instead", err)
+	}
+	if e == nil || e.Header == nil || e.Header.Name != "unknown.bin" {
+		t.Fatalf("NextEntry returned %+v, want Header.Name = unknown.bin", e)
+	}
+
+	buf := make([]byte, 16)
+	_, readErr := e.Read(buf)
+	if !errors.Is(readErr, ErrUnpSizeUnknown) {
+		t.Fatalf("Read error = %v, want ErrUnpSizeUnknown", readErr)
+	}
+	if closeErr := e.Close(); !errors.Is(closeErr, ErrUnpSizeUnknown) {
+		t.Fatalf("Close error = %v, want ErrUnpSizeUnknown", closeErr)
+	}
+}
+
+// (b) A negative-UnpackedSize member is refused BY NAME the same way,
+// reporting ErrCorruptFileHeader.
+func TestNegativeUnpackedSizeMemberRefusedByName(t *testing.T) {
+	stream := rar5Archive(t, false,
+		memberWithNegativeSize(t, "negative.bin", "secret", false),
+	)
+
+	r := NewReader(volumesOf(stream))
+	e, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("NextEntry error = %v, want a terminal Entry instead", err)
+	}
+	if e == nil || e.Header == nil || e.Header.Name != "negative.bin" {
+		t.Fatalf("NextEntry returned %+v, want Header.Name = negative.bin", e)
+	}
+
+	buf := make([]byte, 16)
+	_, readErr := e.Read(buf)
+	if !errors.Is(readErr, ErrCorruptFileHeader) {
+		t.Fatalf("Read error = %v, want ErrCorruptFileHeader", readErr)
+	}
+	if closeErr := e.Close(); !errors.Is(closeErr, ErrCorruptFileHeader) {
+		t.Fatalf("Close error = %v, want ErrCorruptFileHeader", closeErr)
+	}
+}
+
+// (c) Traversal continues after an UnpSizeUnknown refusal: the member after
+// it is reachable by name with intact content and a clean Close, proving the
+// refused member's declared payload was dropped rather than leaking into the
+// next header read.
+func TestTraversalContinuesAfterRefusedUnpSizeUnknownMember(t *testing.T) {
+	stream := rar5Archive(t, false,
+		memberWithUnpSizeUnknown(t, "unknown.bin", "secret", false),
+		rar5Member(t, memberSpec{name: "after.bin", content: "visible", withCRC: true}),
+	)
+
+	r := NewReader(volumesOf(stream))
+
+	first, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("first NextEntry: %v", err)
+	}
+	if err := first.Close(); !errors.Is(err, ErrUnpSizeUnknown) {
+		t.Fatalf("first member verdict = %v, want ErrUnpSizeUnknown", err)
+	}
+
+	second, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("second NextEntry: %v", err)
+	}
+	if second.Header == nil || second.Header.Name != "after.bin" {
+		t.Fatalf("second NextEntry returned %+v, want after.bin", second.Header)
+	}
+	content, err := io.ReadAll(second)
+	if err != nil {
+		t.Fatalf("reading after.bin: %v", err)
+	}
+	if string(content) != "visible" {
+		t.Fatalf("after.bin content = %q, want %q", content, "visible")
+	}
+	if err := second.Close(); err != nil {
+		t.Fatalf("after.bin Close = %v, want nil", err)
+	}
+}
+
+// (c) Same as above, for the negative-size refusal.
+func TestTraversalContinuesAfterRefusedNegativeSizeMember(t *testing.T) {
+	stream := rar5Archive(t, false,
+		memberWithNegativeSize(t, "negative.bin", "secret", false),
+		rar5Member(t, memberSpec{name: "after.bin", content: "visible", withCRC: true}),
+	)
+
+	r := NewReader(volumesOf(stream))
+
+	first, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("first NextEntry: %v", err)
+	}
+	if err := first.Close(); !errors.Is(err, ErrCorruptFileHeader) {
+		t.Fatalf("first member verdict = %v, want ErrCorruptFileHeader", err)
+	}
+
+	second, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("second NextEntry: %v", err)
+	}
+	if second.Header == nil || second.Header.Name != "after.bin" {
+		t.Fatalf("second NextEntry returned %+v, want after.bin", second.Header)
+	}
+	content, err := io.ReadAll(second)
+	if err != nil {
+		t.Fatalf("reading after.bin: %v", err)
+	}
+	if string(content) != "visible" {
+		t.Fatalf("after.bin content = %q, want %q", content, "visible")
+	}
+	if err := second.Close(); err != nil {
+		t.Fatalf("after.bin Close = %v, want nil", err)
+	}
+}
+
+// (d) Window damage is recorded for the UnpSizeUnknown refusal: a solid
+// member following it must itself be refused, rather than decoded against a
+// window missing the refused file's bytes.
+func TestSolidMemberAfterRefusedUnpSizeUnknownMemberIsRefused(t *testing.T) {
+	stream := rar5Archive(t, true,
+		memberWithUnpSizeUnknown(t, "unknown.bin", "secret", false),
+		rar5Member(t, memberSpec{name: "solid.bin", content: "after", solid: true, withCRC: true}),
+	)
+
+	r := NewReader(volumesOf(stream))
+
+	first, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("first NextEntry: %v", err)
+	}
+	if err := first.Close(); !errors.Is(err, ErrUnpSizeUnknown) {
+		t.Fatalf("first member verdict = %v, want ErrUnpSizeUnknown", err)
+	}
+
+	second, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("second NextEntry: %v", err)
+	}
+	if err := second.Close(); !errors.Is(err, ErrSolidStreamBroken) {
+		t.Fatalf("solid successor verdict = %v, want ErrSolidStreamBroken", err)
+	}
+}
+
+// (d) Same as above, for the negative-size refusal.
+func TestSolidMemberAfterRefusedNegativeSizeMemberIsRefused(t *testing.T) {
+	stream := rar5Archive(t, true,
+		memberWithNegativeSize(t, "negative.bin", "secret", false),
+		rar5Member(t, memberSpec{name: "solid.bin", content: "after", solid: true, withCRC: true}),
+	)
+
+	r := NewReader(volumesOf(stream))
+
+	first, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("first NextEntry: %v", err)
+	}
+	if err := first.Close(); !errors.Is(err, ErrCorruptFileHeader) {
+		t.Fatalf("first member verdict = %v, want ErrCorruptFileHeader", err)
+	}
+
+	second, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("second NextEntry: %v", err)
+	}
+	if err := second.Close(); !errors.Is(err, ErrSolidStreamBroken) {
+		t.Fatalf("solid successor verdict = %v, want ErrSolidStreamBroken", err)
+	}
+}
+
+// (e) A continuation block (HeaderFlagDataNotFirst set) carrying
+// FileFlagUnpSizeUnknown must still skip silently -- it belongs to a member
+// already abandoned and has no identity of its own to report.
+func TestUnpSizeUnknownContinuationBlockSkipsSilently(t *testing.T) {
+	stream := rar5Archive(t, false,
+		memberWithUnpSizeUnknown(t, "cont.bin", "secret", true),
+		rar5Member(t, memberSpec{name: "after.bin", content: "visible", withCRC: true}),
+	)
+
+	r := NewReader(volumesOf(stream))
+	e, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("NextEntry error = %v, want the continuation block skipped silently", err)
+	}
+	if e == nil || e.Header == nil || e.Header.Name != "after.bin" {
+		t.Fatalf("NextEntry returned %+v, want after.bin (continuation block must not surface)", e)
+	}
+	_ = e.Close()
+}
+
+// (e) Same as above, for a continuation block with a negative declared size.
+func TestNegativeSizeContinuationBlockSkipsSilently(t *testing.T) {
+	stream := rar5Archive(t, false,
+		memberWithNegativeSize(t, "cont.bin", "secret", true),
+		rar5Member(t, memberSpec{name: "after.bin", content: "visible", withCRC: true}),
+	)
+
+	r := NewReader(volumesOf(stream))
+	e, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("NextEntry error = %v, want the continuation block skipped silently", err)
+	}
+	if e == nil || e.Header == nil || e.Header.Name != "after.bin" {
+		t.Fatalf("NextEntry returned %+v, want after.bin (continuation block must not surface)", e)
+	}
+	_ = e.Close()
+}

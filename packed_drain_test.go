@@ -298,6 +298,12 @@ func TestRefusedFile_RarBombPayloadIsDropped(t *testing.T) {
 // than the one that already dropped its payload. Which field an archive
 // corrupts is the archive's choice, so keying the discard on a single named
 // error left the same fabrication reachable through every other one.
+//
+// A negative UnpackedSize is decoded well after the name, so it is now
+// refused BY NAME as a terminal Entry (identity-first validation) rather
+// than as a bare NextEntry error -- the fixture below already carries a
+// complete header through the name field, so the refusal happens at the
+// validation block in parseFileHeader rather than at the earlier decode.
 func TestRefusedFile_CorruptHeaderPayloadIsDropped(t *testing.T) {
 	evil := rar5FileEntry("EVIL.txt", 5, crc32.ChecksumIEEE([]byte("PWNED")), []byte("PWNED"))
 
@@ -327,13 +333,24 @@ func TestRefusedFile_CorruptHeaderPayloadIsDropped(t *testing.T) {
 
 	r := readerFor(arc.Bytes())
 
-	if _, err := r.NextEntry(); err == nil {
-		t.Fatal("NextEntry#1 accepted a header with a negative unpacked size")
+	e1, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("NextEntry#1: %v", err)
 	}
+	if e1 == nil || e1.Header == nil || e1.Header.Name != "neg.txt" {
+		t.Fatalf("NextEntry#1 returned %+v, want the refused member reported by name (neg.txt)", e1)
+	}
+	if closeErr := e1.Close(); !errors.Is(closeErr, ErrCorruptFileHeader) {
+		t.Fatalf("Close#1 = %v; want ErrCorruptFileHeader", closeErr)
+	}
+
 	e2, err := r.NextEntry()
-	if err == nil {
+	if e2 != nil {
 		t.Fatalf("NextEntry#2 surfaced %q out of the refused file's payload; "+
-			"want an error", e2.Header.Name)
+			"want end of archive", e2.Header.Name)
+	}
+	if !errors.Is(err, io.EOF) && !errors.Is(err, ErrNoNextVolume) {
+		t.Fatalf("NextEntry#2 error = %v, want io.EOF or ErrNoNextVolume", err)
 	}
 }
 
