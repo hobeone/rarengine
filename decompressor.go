@@ -8,29 +8,7 @@ import (
 )
 
 var (
-	ErrNoNextVolume          = errors.New("rarengine: expected next volume stream from channel, but channel was closed")
 	ErrUnexpectedVolumeBlock = errors.New("rarengine: unexpected block type in volume split transition")
-	ErrNoActiveFile          = errors.New("rarengine: no active file stream to read from")
-	ErrRarBombDetected       = errors.New("rarengine: possible RAR-bomb detected")
-
-	// ErrCRCMismatch is returned by Read once a file's fully decompressed
-	// content has been read, if its CRC32 doesn't match the value recorded
-	// in the RAR file header. Only checked when the header carries a CRC32
-	// (FileFlagHasCRC32) and VerifyCRC is enabled (the default). See
-	// SetVerifyCRC.
-	ErrCRCMismatch = errors.New("rarengine: decompressed content CRC32 does not match file header")
-
-	// ErrWrongPassword is returned when an encrypted file's password check
-	// value (PSWCHECK) doesn't match the supplied password. Wrap-checked
-	// via errors.Is so callers can distinguish a bad password from other
-	// decompression failures without parsing error text.
-	ErrWrongPassword = errors.New("rarengine: wrong password or corrupt encryption data")
-
-	// ErrPasswordRequired is returned when a file's header is encrypted but
-	// no password was supplied. Callers that want to treat "no password
-	// given" the same as "wrong password" (e.g. to prompt for one) can
-	// check for either with errors.Is.
-	ErrPasswordRequired = errors.New("rarengine: password required for encrypted file")
 
 	// ErrVolumeVersionMismatch reports a volume whose archive format differs
 	// from the one already being decoded.
@@ -39,12 +17,6 @@ var (
 	// is read through it. A set that mixes RAR3 and RAR5 would otherwise have
 	// its later volumes parsed under the wrong header layout entirely.
 	ErrVolumeVersionMismatch = errors.New("rarengine: volume archive version does not match the rest of the set")
-
-	// ErrUnsupportedFormat reports an archive this library cannot decode.
-	// RAR3 archives reach this: their headers remain parseable through
-	// ReadRAR3BlockHeader and ParseRAR3FileHeader for callers that inspect
-	// archives, but no RAR3 decoder is provided.
-	ErrUnsupportedFormat = errors.New("rarengine: unsupported archive format")
 )
 
 type ArchiveVersion int
@@ -517,26 +489,4 @@ func (sd *StreamDecompressor) Next() (*FileHeader, error) {
 // io.Copy, to observe the file's verdict.
 func (sd *StreamDecompressor) Read(p []byte) (int, error) {
 	return sd.file.Read(p)
-}
-
-type lz50Reader struct {
-	dec *decoder50
-	win *Window
-}
-
-func (l *lz50Reader) Read(p []byte) (int, error) {
-	return l.dec.Read(l.win, p)
-}
-
-type storeReader struct {
-	r   io.Reader
-	win *Window
-}
-
-func (s *storeReader) Read(p []byte) (int, error) {
-	n, err := s.r.Read(p)
-	if n > 0 {
-		s.win.writeBytes(p[:n])
-	}
-	return n, err
 }

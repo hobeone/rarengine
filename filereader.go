@@ -7,42 +7,6 @@ import (
 	"io"
 )
 
-// ErrTruncatedFile is returned when the archive stream ends before a file's
-// declared UnpackedSize has been produced. It deliberately does not satisfy
-// errors.Is(err, io.EOF): reporting truncation as a clean end of stream is
-// exactly the defect it exists to prevent, and callers loop until io.EOF.
-var ErrTruncatedFile = errors.New("rarengine: archive ended before the file's declared size was produced")
-
-// ErrChecksumUnsupported is returned once a file has been fully decoded when
-// its header records a digest this library cannot check -- the key-derived
-// MAC selected by UseMac, rather than a CRC32 of the plaintext. RAR sets that
-// flag on the header carrying the digest, which for a multi-volume file is
-// the last part's.
-//
-// Completing such a file without an error would report unverified content as
-// extracted successfully, and a RAR archive's per-file digest is the only
-// signal that the decoded bytes are the intended ones. Callers that want the
-// content regardless can disable verification; see SetVerifyCRC.
-var ErrChecksumUnsupported = errors.New("rarengine: file records a checksum this library cannot verify")
-
-// ErrSolidStreamBroken is returned when a solid file cannot be decoded
-// because an earlier file in the same solid run was damaged.
-//
-// Solid files share one LZ77 history: a file's back-references reach into the
-// bytes its predecessors wrote. A predecessor that ended short never wrote
-// some of them; one that failed its CRC32 wrote the wrong ones; one that was
-// refused before it decoded -- a rar bomb, an unparsable header -- wrote none
-// at all. In every case the successor decodes against history the archive did
-// not assume, producing plausible-looking output with nothing in the format to
-// mark it, so all three count as damage. Refusing is the only answer that cannot silently hand over
-// fabricated content. A non-solid file resets the window and clears the
-// condition, so a solid run beginning after the damage is unaffected.
-//
-// A predecessor whose content was wrong in a way this library cannot detect --
-// verification disabled via SetVerifyCRC, or a digest it cannot check -- is not
-// covered, because nothing observed the damage.
-var ErrSolidStreamBroken = errors.New("rarengine: solid file depends on history a damaged file did not write")
-
 // FileError reports that one file could not be delivered while the archive
 // itself is still readable, and is what makes skipping a damaged file
 // possible without guessing.

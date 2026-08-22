@@ -322,6 +322,28 @@ func (r *Reader) buildChain(fh *FileHeader, src io.Reader) (io.Reader, error) {
 	return &lz50Reader{dec: r.dec50, win: r.win}, nil
 }
 
+type lz50Reader struct {
+	dec *decoder50
+	win *Window
+}
+
+func (l *lz50Reader) Read(p []byte) (int, error) {
+	return l.dec.Read(l.win, p)
+}
+
+type storeReader struct {
+	r   io.Reader
+	win *Window
+}
+
+func (s *storeReader) Read(p []byte) (int, error) {
+	n, err := s.r.Read(p)
+	if n > 0 {
+		s.win.writeBytes(p[:n])
+	}
+	return n, err
+}
+
 // nextVolume closes the current volume and opens the next.
 //
 // Every failure leaves r.vol nil, which is a lifetime rather than a rule: the
