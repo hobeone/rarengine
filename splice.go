@@ -56,7 +56,7 @@ func (s *multiVolumePayloadReader) Read(p []byte) (int, error) {
 // on the way to the following header. Nothing here has to discard.
 func (r *Reader) nextVolumePayload(e *Entry) (io.Reader, error) {
 	if err := r.nextVolume(); err != nil {
-		return nil, err
+		return nil, r.latchArchive(err)
 	}
 	for {
 		h, err := r.vol.next()
@@ -88,23 +88,34 @@ func (r *Reader) nextVolumePayload(e *Entry) (io.Reader, error) {
 					// clean end of stream here would be exactly the
 					// truncation-as-success decay that sentinel exists to
 					// prevent.
-					return nil, verr
+					return nil, r.latchArchive(verr)
 				}
 				continue
 			}
-			return nil, err
+			return nil, r.latchArchive(err)
 		}
 		if h.Type != HeaderTypeFile {
 			if h.Type == HeaderTypeArchive {
-				if ah, aerr := ParseArchiveHeader(h); aerr == nil {
-					r.solid = r.solid || ah.Solid
+				ah, aerr := ParseArchiveHeader(h)
+				if aerr != nil {
+					// Consistent with the identical failure reached
+					// through NextEntry's own dispatch (reader.go): a
+					// corrupt archive header is archive-level, not a
+					// per-member outcome, and must end traversal the
+					// same way whichever path finds it. Left lenient
+					// here, an attacker could choose which path parses a
+					// truncated archive header by putting it in a volume
+					// a member continues into, rather than one NextEntry
+					// scans directly.
+					return nil, r.latchArchive(fmt.Errorf("%w: %w", ErrCorruptArchiveHeader, aerr))
 				}
+				r.solid = r.solid || ah.Solid
 			}
 			continue
 		}
 		fh, err := ParseFileHeader(h)
 		if err != nil {
-			return nil, err
+			return nil, r.latchArchive(err)
 		}
 		if fh.FirstBlock {
 			// A new member where a continuation was expected: the member in

@@ -20,8 +20,8 @@ var (
 	// ErrCRCMismatch is returned by Read once a file's fully decompressed
 	// content has been read, if its CRC32 doesn't match the value recorded
 	// in the RAR file header. Only checked when the header carries a CRC32
-	// (FileFlagHasCRC32) and VerifyCRC is enabled (the default). See
-	// SetVerifyCRC.
+	// (FileFlagHasCRC32); verification is unconditional -- there is no
+	// method to disable it.
 	ErrCRCMismatch = errors.New("rarengine: decompressed content CRC32 does not match file header")
 
 	// ErrWrongPassword is returned when an encrypted file's password check
@@ -56,8 +56,8 @@ var (
 	//
 	// Completing such a file without an error would report unverified content as
 	// extracted successfully, and a RAR archive's per-file digest is the only
-	// signal that the decoded bytes are the intended ones. Callers that want the
-	// content regardless can disable verification; see SetVerifyCRC.
+	// signal that the decoded bytes are the intended ones. There is no method
+	// to disable verification and get the content regardless.
 	ErrChecksumUnsupported = errors.New("rarengine: file records a checksum this library cannot verify")
 
 	// ErrCorruptArchiveHeader reports that the archive-level header (the
@@ -85,7 +85,7 @@ var (
 	// condition, so a solid run beginning after the damage is unaffected.
 	//
 	// A predecessor whose content was wrong in a way this library cannot detect --
-	// verification disabled via SetVerifyCRC, or a digest it cannot check -- is not
-	// covered, because nothing observed the damage.
+	// a digest it cannot check -- is not covered, because nothing observed the
+	// damage.
 	ErrSolidStreamBroken = errors.New("rarengine: solid file depends on history a damaged file did not write")
 )

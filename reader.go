@@ -103,14 +103,34 @@ func (r *Reader) NextEntry() (*Entry, error) {
 		return nil, r.fatal
 	}
 	e, err := r.nextEntry()
-	// Latch every error except the ordinary end-of-archive signals. Both
-	// leave r.vol nil already (see nextVolume and the fatal field's
-	// comment), so retrying them resumes cleanly rather than resuming past
-	// an unresolved failure -- there is nothing here for the latch to guard.
+	return e, r.latchArchive(err)
+}
+
+// latchArchive records err on r.fatal, unless it is one of the ordinary
+// end-of-archive signals (io.EOF, ErrNoNextVolume), and returns err
+// unchanged so a call site can wrap a return in one expression.
+//
+// This is the one place that decides which errors are archive-level enough
+// to end traversal for the rest of this Reader's life -- NextEntry uses it
+// for its own scan loop, and nextVolumePayload (splice.go) uses it for the
+// same failures reached while splicing a member across a volume boundary.
+// Both leave r.vol nil already on every failure path (see nextVolume and the
+// fatal field's comment), so retrying an unlatched error resumes cleanly
+// rather than resuming past an unresolved failure -- there is nothing here
+// for the latch to guard on io.EOF or ErrNoNextVolume.
+//
+// ErrNoNextVolume is deliberately never latched: reached while a read is
+// already in progress it means only that THIS member is unfinished (the
+// channel closed before its continuation arrived), not that the archive
+// itself is corrupt. Latching it would stop TestReader_RealArchive_
+// MissingFinalVolume's traversal from ending cleanly afterwards -- the next
+// NextEntry call is expected to find the channel closed on its own and
+// report end of archive, not replay a stale fatal error.
+func (r *Reader) latchArchive(err error) error {
 	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, ErrNoNextVolume) {
 		r.fatal = err
 	}
-	return e, err
+	return err
 }
 
 // nextEntry is NextEntry's scan loop, unlatched: every error it returns is
