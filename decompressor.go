@@ -169,11 +169,6 @@ func (c *packedCursor) reader() io.Reader {
 	return &c.lr
 }
 
-// owed reports how many packed bytes remain unread.
-func (c *packedCursor) owed() int64 {
-	return c.lr.N
-}
-
 // settled reports that every byte this cursor promised was actually read, and
 // so that the stream is standing on the next block header.
 //

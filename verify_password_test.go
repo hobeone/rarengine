@@ -66,12 +66,12 @@ func fileHeaderFromFixture(t *testing.T, name string) *FileHeader {
 	volumes <- f
 	close(volumes)
 
-	sd := NewStreamDecompressor(volumes)
-	fh, err := sd.Next()
+	r := NewReader(volumes)
+	e, err := r.NextEntry()
 	if err != nil {
-		t.Fatalf("Next: %v", err)
+		t.Fatalf("NextEntry: %v", err)
 	}
-	return fh
+	return e.Header
 }
 
 func TestVerifyPassword_HeaderEncrypted(t *testing.T) {

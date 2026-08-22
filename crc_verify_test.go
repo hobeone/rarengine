@@ -103,12 +103,12 @@ func newSingleVolumeChan(buf *bytes.Buffer) <-chan io.ReadCloser {
 	return volumes
 }
 
-// readAllAndEOFErr reads sd to completion, returning the first non-io.EOF
+// readAllAndEOFErr reads e to completion, returning the first non-io.EOF
 // error encountered (nil if the stream ended cleanly).
-func readAllAndEOFErr(sd *StreamDecompressor) error {
+func readAllAndEOFErr(e *Entry) error {
 	buf := make([]byte, 4096)
 	for {
-		_, err := sd.Read(buf)
+		_, err := e.Read(buf)
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				return nil
@@ -130,13 +130,13 @@ func TestCRCVerification_DefaultDetectsMismatch(t *testing.T) {
 	wrongCRC := crc32.ChecksumIEEE(content) ^ 0xFFFFFFFF // deliberately wrong
 	buf := buildSingleFileRAR5Archive(t, "hello.txt", content, wrongCRC)
 
-	sd := NewStreamDecompressor(newSingleVolumeChan(buf))
-	if _, err := sd.Next(); err != nil {
-		t.Fatalf("Next() failed: %v", err)
+	r := NewReader(newSingleVolumeChan(buf))
+	e, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("NextEntry() failed: %v", err)
 	}
 
-	err := readAllAndEOFErr(sd)
-	if !errors.Is(err, ErrCRCMismatch) {
+	if err := readAllAndEOFErr(e); !errors.Is(err, ErrCRCMismatch) {
 		t.Fatalf("expected ErrCRCMismatch, got %v", err)
 	}
 }
@@ -149,32 +149,34 @@ func TestCRCVerification_DefaultHappyPath(t *testing.T) {
 	correctCRC := crc32.ChecksumIEEE(content)
 	buf := buildSingleFileRAR5Archive(t, "hello.txt", content, correctCRC)
 
-	sd := NewStreamDecompressor(newSingleVolumeChan(buf))
-	if _, err := sd.Next(); err != nil {
-		t.Fatalf("Next() failed: %v", err)
+	r := NewReader(newSingleVolumeChan(buf))
+	e, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("NextEntry() failed: %v", err)
 	}
 
-	if err := readAllAndEOFErr(sd); err != nil {
+	if err := readAllAndEOFErr(e); err != nil {
 		t.Fatalf("expected clean EOF, got error: %v", err)
 	}
 }
 
-// TestCRCVerification_DisabledAllowsMismatch confirms SetVerifyCRC(false)
-// restores best-effort extraction: a caller that explicitly wants to extract
-// whatever it can from a corrupt archive must not be blocked by a CRC
-// mismatch.
-func TestCRCVerification_DisabledAllowsMismatch(t *testing.T) {
+// TestCRCVerification_UnconditionalOnMismatch confirms verification can no
+// longer be switched off by the caller: SetVerifyCRC does not exist on
+// Reader, so a mismatched CRC32 must surface ErrCRCMismatch even from a
+// caller that -- under the old API -- would have disabled the check.
+func TestCRCVerification_UnconditionalOnMismatch(t *testing.T) {
 	content := []byte("world")
 	wrongCRC := crc32.ChecksumIEEE(content) ^ 0xFFFFFFFF
 	buf := buildSingleFileRAR5Archive(t, "hello.txt", content, wrongCRC)
 
-	sd := NewStreamDecompressor(newSingleVolumeChan(buf))
-	sd.SetVerifyCRC(false)
-	if _, err := sd.Next(); err != nil {
-		t.Fatalf("Next() failed: %v", err)
+	r := NewReader(newSingleVolumeChan(buf))
+	e, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("NextEntry() failed: %v", err)
 	}
 
-	if err := readAllAndEOFErr(sd); err != nil {
-		t.Fatalf("expected clean EOF with verification disabled, got error: %v", err)
+	_, _ = io.Copy(io.Discard, e)
+	if closeErr := e.Close(); !errors.Is(closeErr, ErrCRCMismatch) {
+		t.Fatalf("Close() = %v, want ErrCRCMismatch", closeErr)
 	}
 }

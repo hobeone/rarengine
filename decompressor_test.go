@@ -9,12 +9,6 @@ import (
 	"testing"
 )
 
-type mockReadCloser struct {
-	io.Reader
-}
-
-func (m *mockReadCloser) Close() error { return nil }
-
 func TestStreamDecompressor_TarStyle(t *testing.T) {
 	// 1. Archive Header
 	arcFlagsV := EncodeVint(ArcFlagMultiVol)

@@ -4,10 +4,66 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"hash/crc32"
 	"io"
+	"os"
+	"path/filepath"
 	"testing"
 )
+
+type mockReadCloser struct {
+	io.Reader
+}
+
+func (m *mockReadCloser) Close() error { return nil }
+
+// fixtureBytes loads an on-disk archive. These are unrar-produced, so a
+// truncation test against them exercises real header layouts rather than the
+// hand-built ones the in-memory builders produce.
+func fixtureBytes(t *testing.T, name string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("testdata", name))
+	if err != nil {
+		t.Fatalf("reading fixture: %v", err)
+	}
+	return b
+}
+
+// multiVolumeChan feeds the ten rar5_multi parts in order. trimFirst, when
+// non-negative, cuts that many bytes off the end of part01 so the file's
+// payload runs short there and the reader has to advance mid-file.
+func multiVolumeChan(t *testing.T, trimFirst int) <-chan io.ReadCloser {
+	t.Helper()
+
+	names := make([]string, 0, 10)
+	for i := 1; i <= 9; i++ {
+		names = append(names, fmt.Sprintf("rar5_multi.part0%d.rar", i))
+	}
+	names = append(names, "rar5_multi.part10.rar")
+
+	volumes := make(chan io.ReadCloser, len(names))
+	for i, name := range names {
+		b := fixtureBytes(t, name)
+		if i == 0 && trimFirst >= 0 {
+			if trimFirst >= len(b) {
+				t.Fatalf("trim %d exceeds part01 length %d", trimFirst, len(b))
+			}
+			b = b[:len(b)-trimFirst]
+		}
+		volumes <- &mockReadCloser{bytes.NewReader(b)}
+	}
+	close(volumes)
+	return volumes
+}
+
+// readerFor builds a Reader over a single in-memory volume.
+func readerFor(data []byte) *Reader {
+	volumes := make(chan io.ReadCloser, 1)
+	volumes <- &mockReadCloser{bytes.NewReader(data)}
+	close(volumes)
+	return NewReader(volumes)
+}
 
 // The whole point of the rewrite, asserted end to end: a fabricated file entry
 // planted in an unclaimed block's payload must never be returned as a member.
