@@ -275,7 +275,24 @@ func (r *Reader) dispatch(h *BlockHeader) (*Entry, error) {
 	case HeaderTypeEncryption:
 		ch, err := ParseCryptHeader(h)
 		if err != nil {
-			return nil, nil
+			// Fatal, not skipped -- unlike a damaged later-volume archive
+			// header, where solidity and volume numbering are already known
+			// from the first volume, an unparsed HEAD_CRYPT leaves EVERY
+			// subsequent header unreadable ciphertext. There is no
+			// degraded-but-useful mode to fall back to, so this is
+			// archive-level exactly like the HeaderTypeArchive parse
+			// failure above. Classified so a caller can tell "this archive
+			// uses an encryption version this library does not implement"
+			// (ErrUnsupportedEncryptionVersion -- the archive need not be
+			// damaged) apart from "this header is corrupt"
+			// (ErrCorruptArchiveHeader), while errors.Is still reaches the
+			// underlying parse failure through either wrap. NextEntry
+			// latches this (see Reader.fatal) so a second call cannot
+			// resume past it.
+			if errors.Is(err, ErrUnknownEncryptMethod) {
+				return nil, fmt.Errorf("%w: %w", ErrUnsupportedEncryptionVersion, err)
+			}
+			return nil, fmt.Errorf("%w: %w", ErrCorruptArchiveHeader, err)
 		}
 		password, err := r.resolveHeaderPassword(ch)
 		if err != nil {

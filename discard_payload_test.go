@@ -173,33 +173,23 @@ func TestServiceHeaderPayloadIsDiscarded_RAR5(t *testing.T) {
 // TestMalformedArchiveHeaderEndsTraversal in reader_test.go, which pins
 // exactly this property with its own fixture).
 //
-// TestCryptHeaderParseErrorDiscardsPayload_RAR5 below is the sibling case
-// that DID carry over: a crypt header parse failure is skipped rather than
-// fatal, because every header after a real crypt header is ciphertext this
-// library cannot read anyway, while a header that merely fails to PARSE as
-// one has not proven the rest of the stream is unreadable.
-
-// TestCryptHeaderParseErrorDiscardsPayload_RAR5 covers the encryption
-// header's error route. The success route is reachable only by an attacker
-// who already knows the password -- every header after it is read through
-// the decrypter -- and such an attacker authors the whole post-crypt stream
-// anyway, so the error route is the one that carries the security weight.
-func TestCryptHeaderParseErrorDiscardsPayload_RAR5(t *testing.T) {
-	fabricated := fabricatedRAR5()
-
-	var archive bytes.Buffer
-	archive.Write(rar5ArchiveHeader())
-	// Version and flags only; ParseCryptHeader fails for want of a salt.
-	archive.Write(rar5BlockDeclaring(HeaderTypeEncryption, len(fabricated),
-		append(EncodeVint(0), EncodeVint(0)...), false))
-	archive.Write(fabricated)
-	archive.Write(rar5FileEntry("real.txt", 4, crc32.ChecksumIEEE([]byte("real")), []byte("real")))
-	archive.Write(rar5EndHeader())
-
-	r := NewReader(volumesOf(archive.Bytes()))
-	r.SetPasswords([]string{"hunter2"})
-	assertReachesRealEntry(t, r, "real.txt")
-}
+// TestCryptHeaderParseErrorDiscardsPayload_RAR5 is deleted, not translated.
+//
+// Its premise was that a crypt header parse failure is a refusal the caller
+// may retry past, landing on the real next entry -- the same "skip rather
+// than fatal" treatment ParseFileHeader gets. That premise was wrong: unlike
+// a file header, where a bad member is just one entry among many, an
+// unparsed HEAD_CRYPT means every header AFTER it in the archive is
+// ciphertext this library cannot decrypt. There is no degraded-but-useful
+// mode to skip forward into, so dispatch's HeaderTypeEncryption case now
+// treats a parse failure as archive-level fatal, exactly like the
+// HeaderTypeArchive parse failure covered by
+// TestArchiveHeaderParseErrorDiscardsPayload_RAR5's deletion note above and
+// pinned by TestMalformedArchiveHeaderEndsTraversal.
+//
+// The fatal behaviour, including that a real member planted after the
+// malformed crypt header is never reached and that the error latches across
+// a second NextEntry call, is covered in crypt_header_error_test.go.
 
 // --- Volume-payload routes -------------------------------------------------
 
@@ -385,6 +375,19 @@ func TestEveryBlockTypeAccountsForItsPayload_RAR5(t *testing.T) {
 				// in reader_test.go. There is no sentinel to reach.
 				if err == nil {
 					t.Fatalf("a second, unparsable archive header succeeded, "+
+						"returning %q; want the archive-level parse error", e.Header.Name)
+				}
+				return
+			case HeaderTypeEncryption:
+				// Also not swept: a crypt header whose payload cannot parse
+				// (the stub 0xAA bytes here decode to neither a valid
+				// version nor a valid flags vint) is archive-level fatal by
+				// design -- see reader.go's HeaderTypeEncryption case and
+				// crypt_header_error_test.go. Every header after a real
+				// HEAD_CRYPT is ciphertext, so there is no sentinel to
+				// reach past an unparsable one.
+				if err == nil {
+					t.Fatalf("an unparsable crypt header succeeded, "+
 						"returning %q; want the archive-level parse error", e.Header.Name)
 				}
 				return

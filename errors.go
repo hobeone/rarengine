@@ -71,6 +71,27 @@ var (
 	// -- is still reachable through errors.Is via the wrap.
 	ErrCorruptArchiveHeader = errors.New("rarengine: archive header is corrupt, traversal ended")
 
+	// ErrUnsupportedEncryptionVersion is returned when the archive's
+	// encryption header (HEAD_CRYPT) declares an encryption version this
+	// library does not implement -- the RAR 5.0 spec fixes the version vint
+	// at 0 (AES-256); any other value names a scheme introduced by a newer
+	// RAR version.
+	//
+	// The archive is not necessarily damaged: a future RAR wrote a header
+	// this library is simply too old to read. That is a different condition
+	// from corruption, and callers that want to tell an operator "upgrade
+	// this tool" apart from "the download is bad, re-fetch or repair" need
+	// to be able to distinguish the two -- see ErrCorruptArchiveHeader for
+	// the corruption case. errors.Is(err, ErrUnknownEncryptMethod) still
+	// reaches the underlying detail through the wrap.
+	//
+	// Traversal has ended regardless of which condition applies: once a
+	// HEAD_CRYPT block is present, every header after it is ciphertext this
+	// library cannot decrypt, so there is no degraded-but-useful mode to
+	// fall back to. Reader latches this error and every subsequent
+	// NextEntry call returns it again without reading further.
+	ErrUnsupportedEncryptionVersion = errors.New("rarengine: archive declares an unsupported encryption version")
+
 	// ErrSolidStreamBroken is returned when a solid file cannot be decoded
 	// because an earlier file in the same solid run was damaged.
 	//
