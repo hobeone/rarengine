@@ -84,11 +84,18 @@ func TestRAR3_HeaderParsing(t *testing.T) {
 			fileBlockFound = true
 		}
 
-		// Skip the block's payload by its declared size
+		// Skip the block's payload by its declared size. io.CopyN reports
+		// io.EOF exactly when it copied FEWER than the requested bytes, so
+		// tolerating it here would accept a block whose declared payload runs
+		// past the end of the fixture: the header read at the top of the loop
+		// would then hit a clean io.EOF, break, and let this test pass on a
+		// truncated archive with fileBlockFound already set. An exact-length
+		// final block returns nil rather than io.EOF, so there is no
+		// legitimate short copy to tolerate.
 		if h.DataSize > 0 {
-			_, err := io.CopyN(io.Discard, r, int64(h.DataSize))
-			if err != nil && err != io.EOF {
-				t.Fatalf("Failed to skip payload: %v", err)
+			if _, err := io.CopyN(io.Discard, r, int64(h.DataSize)); err != nil {
+				t.Fatalf("Failed to skip the declared %d-byte payload of block "+
+					"type 0x%02x: %v", h.DataSize, h.Type, err)
 			}
 		}
 	}
