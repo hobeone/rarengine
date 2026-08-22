@@ -2,7 +2,6 @@ package rarengine
 
 import (
 	"bytes"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"hash/crc32"
@@ -26,37 +25,6 @@ import (
 // errors proves nothing, because it is equally true of the vulnerable code --
 // and asserting only that the payload was "consumed" is satisfied by consuming
 // too much, which is what a double-discard does.
-
-// rar3BlockDeclaring builds a RAR3 block of the given type whose header sets
-// longBlock and declares addSize bytes of payload following it.
-//
-// withSig prefixes the RAR3 signature, for use as the first block of an
-// archive.
-func rar3BlockDeclaring(blockType byte, flags uint16, addSize uint32, withSig bool) []byte {
-	const hSize = 13 // 7 base + 4 ADD_SIZE + 2 header payload
-	base := make([]byte, 7)
-	base[2] = blockType
-	binary.LittleEndian.PutUint16(base[3:5], flags|longBlock)
-	binary.LittleEndian.PutUint16(base[5:7], hSize)
-
-	var addBuf [4]byte
-	binary.LittleEndian.PutUint32(addBuf[:], addSize)
-	headerPayload := []byte{0x00, 0x00}
-
-	crcBuf := append([]byte{}, base[2:]...)
-	crcBuf = append(crcBuf, addBuf[:]...)
-	crcBuf = append(crcBuf, headerPayload...)
-	binary.LittleEndian.PutUint16(base[0:2], uint16(crc32.ChecksumIEEE(crcBuf)))
-
-	var out bytes.Buffer
-	if withSig {
-		out.Write([]byte{0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x00})
-	}
-	out.Write(base)
-	out.Write(addBuf[:])
-	out.Write(headerPayload)
-	return out.Bytes()
-}
 
 // rar5BlockDeclaring builds a RAR5 block of the given type declaring dataSize
 // bytes of payload, with extra appended to the header's own fields.
@@ -96,10 +64,6 @@ func volumesOf(parts ...[]byte) <-chan io.ReadCloser {
 // broken code, which is how the exemption came to be believed.
 func keepReadableVolumes(parts ...[]byte) <-chan io.ReadCloser {
 	return volumesOf(parts...)
-}
-
-func fabricatedRAR3() []byte {
-	return rar3StoreEntry("FABRICATED.txt", 0, 5, crc32.ChecksumIEEE([]byte("owned")), []byte("owned"))
 }
 
 func fabricatedRAR5() []byte {
@@ -185,12 +149,6 @@ func TestArchiveHeaderParseErrorDiscardsPayload_RAR5(t *testing.T) {
 	assertReachesRealEntry(t, decompressorFor(archive.Bytes()), 1, "real.txt")
 }
 
-// TestEncryptedMainHeaderDiscardsPayload_RAR3 covers the mhdPassword refusal,
-// which ends traversal by returning a sentinel and so never reached a discard.
-//
-// After the refusal the following headers are ciphertext and a retry is
-// expected to fail; what must not happen is a retry succeeding with an entry
-// taken from the refused block's own payload.
 // TestCryptHeaderParseErrorDiscardsPayload_RAR5 covers the encryption header's
 // error route. The success route is reachable only by an attacker who already
 // knows the password -- every header after it is read through the decrypter --
@@ -423,7 +381,7 @@ func TestEveryBlockTypeAccountsForItsPayload_RAR5(t *testing.T) {
 
 			fh, err := re.processHeader(h)
 			outcome := classifySweep(sd, r, fh != nil)
-			assertSweepOutcome(t, sd, outcome, err, r, "RAR5")
+			assertSweepOutcome(t, sd, outcome, err, r)
 		})
 	}
 }
@@ -456,36 +414,24 @@ func classifySweep(sd *StreamDecompressor, original *bytes.Reader, claimed bool)
 // nextVolume consumed only the signature, so the next thing in it is its
 // archive header. If the dispatcher wrongly discarded a declared payload after
 // advancing, that discard came out of this reader and the header is gone.
-func assertFollowerIntact(sd *StreamDecompressor, engine string) error {
+func assertFollowerIntact(sd *StreamDecompressor) error {
 	if sd.currentVol == nil {
 		// The advance failed rather than succeeded -- nothing was opened, so
 		// nothing could have been eaten.
 		return nil
 	}
-	var (
-		h   *BlockHeader
-		err error
-	)
-	if engine == "RAR3" {
-		h, err = ReadRAR3BlockHeader(sd.currentVol)
-	} else {
-		h, err = ReadBlockHeader(sd.currentVol)
-	}
+	h, err := ReadBlockHeader(sd.currentVol)
 	if err != nil {
 		return err
 	}
-	want := uint64(HeaderTypeArchive)
-	if engine == "RAR3" {
-		want = rar3BlockMain
-	}
-	if h.Type != want {
+	if h.Type != uint64(HeaderTypeArchive) {
 		return errors.New("next volume does not begin with its archive header")
 	}
 	return nil
 }
 
 // assertSweepOutcome checks the stream is where the outcome says it should be.
-func assertSweepOutcome(t *testing.T, sd *StreamDecompressor, outcome sweepOutcome, procErr error, r *bytes.Reader, engine string) {
+func assertSweepOutcome(t *testing.T, sd *StreamDecompressor, outcome sweepOutcome, procErr error, r *bytes.Reader) {
 	t.Helper()
 
 	if outcome == outcomeAdvanced {
@@ -496,7 +442,7 @@ func assertSweepOutcome(t *testing.T, sd *StreamDecompressor, outcome sweepOutco
 		//
 		// Checked rather than exempted. An exemption would make these rows
 		// prove nothing, and they are the only rows that reach this branch.
-		if err := assertFollowerIntact(sd, engine); err != nil {
+		if err := assertFollowerIntact(sd); err != nil {
 			t.Fatalf("outcome=%s procErr=%v: the volume opened after the advance "+
 				"had bytes taken out of it: %v", outcome, procErr, err)
 		}
@@ -515,113 +461,27 @@ func assertSweepOutcome(t *testing.T, sd *StreamDecompressor, outcome sweepOutco
 		return
 	}
 
-	h, err := readSentinelHeader(r, engine)
+	h, err := ReadBlockHeader(r)
 	if err != nil {
 		t.Fatalf("outcome=%s procErr=%v: the stream does not stand on the sentinel "+
 			"after the declared payload (%v) -- it consumed too few or too many bytes",
 			outcome, procErr, err)
 	}
-	name := sentinelName(h, engine)
+	name := sentinelName(h)
 	if name != "SENTINEL.txt" {
 		t.Fatalf("outcome=%s procErr=%v: next header is %q, want the sentinel",
 			outcome, procErr, name)
 	}
 }
 
-func readSentinelHeader(r *bytes.Reader, engine string) (*BlockHeader, error) {
-	if engine == "RAR3" {
-		return ReadRAR3BlockHeader(r)
-	}
-	return ReadBlockHeader(r)
-}
-
-func sentinelName(h *BlockHeader, engine string) string {
-	var (
-		fh  *FileHeader
-		err error
-	)
-	if engine == "RAR3" {
-		fh, err = ParseRAR3FileHeader(h)
-	} else {
-		fh, err = ParseFileHeader(h)
-	}
+func sentinelName(h *BlockHeader) string {
+	fh, err := ParseFileHeader(h)
 	if err != nil {
 		return "<unparseable: " + err.Error() + ">"
 	}
 	return fh.Name
 }
 
-// --- RAR3 subblocks whose payload cannot be measured -----------------------
-
-// TestLargeSubBlockIsRefused covers a block whose declared length is not its
-// real length.
-//
-// Subblock types carry the file-header layout, so lhdLarge puts the high 32
-// bits of the packed size in a header no dispatcher parses; only the low half
-// reaches h.DataSize. Discarding the declared length would skip less than the
-// block occupies and read the next header out of the remainder -- and unrar,
-// which composes both halves, would disagree about what the archive contains.
-// TestLargeSubBlockWithZeroLowHalfIsRefused covers the bypass that a declared
-// size of zero opens.
-//
-// h.DataSize carries only the low 32 bits of a RAR3 packed size, so a block
-// whose true size is an exact multiple of 4 GiB -- or one simply built with
-// ADD_SIZE zero and the high half elsewhere -- declares nothing at all. Gating
-// the refusal on h.DataSize > 0 therefore let precisely those blocks through to
-// discardPayload(0), which consumes nothing and leaves the entire payload for
-// the next header read.
-// TestLargeFileHeaderParseFailureIsTerminal covers a file header that claims
-// lhdLarge and then fails to parse.
-//
-// The high half of its packed size lives inside the structure that just proved
-// unreadable, so refusing with h.DataSize discards the low half only and leaves
-// the stream mid-payload. Nothing can reposition it, so traversal stops.
-// TestEncryptedMainHeaderIsTerminal pins that the RAR3 header-encryption
-// refusal stops traversal rather than only reporting.
-//
-// Its own payload is discarded, so the stream is correctly positioned -- but
-// every header after it is ciphertext, and RAR3's header checksum is a 16-bit
-// truncation of CRC32, giving roughly a 1-in-65536 chance per block that random
-// ciphertext parses. Relying on that is relying on the archive not having
-// searched for bytes that do.
-// TestVolumeVersionMismatchIsRefused covers a volume set that changes format
-// partway through.
-//
-// The engine is built once from the first volume, so a later volume announcing
-// a different version would be parsed under the wrong header layout entirely.
-// TestSolidRefusalDiscardsOnce_RAR3 pins the admitFile trap in the engine that
-// did not already have it covered.
-//
-// admitFile refuses a solid file after damage by calling refuse, which discards
-// fh.PackedSize itself -- but at the call site it reads as plain error
-// propagation. Converting it to the cause-and-fall-through shape used by the
-// genuine error paths would discard a second time, eating the next block. The
-// assertion is positional: traversal must land on the archive's real next
-// entry, which it cannot do if a block was consumed.
-// assertFirstSuccessIs walks past up to maxRefusals failing Next() calls and
-// requires the first one that succeeds to be wantName.
-//
-// Bounded rather than counted exactly: how many refusals a damaged archive
-// produces is a property of the damage, while what matters here is that
-// traversal arrives at the right block rather than one eaten by an extra
-// discard.
-func assertFirstSuccessIs(t *testing.T, sd *StreamDecompressor, maxRefusals int, wantName string) {
-	t.Helper()
-	for range maxRefusals {
-		fh, err := sd.Next()
-		if err == nil {
-			if fh.Name != wantName {
-				t.Fatalf("landed on %q, want %q -- a second discard ate a block", fh.Name, wantName)
-			}
-			return
-		}
-	}
-	t.Fatalf("traversal never reached %q within %d refusals", wantName, maxRefusals)
-}
-
-// TestRarBombRefusalDiscardsOnce_RAR3 is the same property for the rar-bomb
-// refusal, which also discards through refuseFile and also must not be
-// converted to fall through.
 // TestEndHeaderPayloadDoesNotEatNextVolume_RAR5 covers the end-of-archive case
 // in processHeader, as distinct from the volume-payload dispatcher.
 //

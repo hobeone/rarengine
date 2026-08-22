@@ -509,9 +509,6 @@ func TestSkipDamagedFile_SolidRefusalDropsPayload(t *testing.T) {
 	}
 }
 
-// TestRAR3_SolidRefusalAfterDamage covers admitFile in the RAR3 engine, which
-// had no coverage at all -- the guard was added to both engines but only
-// exercised in one, and this codebase's two engines have repeatedly diverged.
 // badCRCEntry carries its full declared length but records a checksum the
 // content does not match: damage by wrong bytes rather than missing ones.
 func badCRCEntry(name string, content []byte) []byte {
