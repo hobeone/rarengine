@@ -88,13 +88,6 @@ func TestFileReader_TruncationIsReported(t *testing.T) {
 			archive: func(t *testing.T) []byte { return fixtureBytes(t, "rar5_compress.rar") },
 			trim:    79,
 		},
-		{
-			name: "rar3 store",
-			archive: func(t *testing.T) []byte {
-				return makeRAR3StoreArchive("hello.txt", []byte("hello rar3 world"))
-			},
-			trim: 5,
-		},
 	}
 
 	for _, tc := range cases {
@@ -689,34 +682,6 @@ func TestUnknownUnpackedSizeIsSkippable(t *testing.T) {
 	if bytes.Contains(buf.Bytes(), content) {
 		t.Fatalf("the refused file's payload is still unread in the stream; the next "+
 			"header would be parsed out of it. Remaining: %q", buf.Bytes())
-	}
-}
-
-func TestRAR3_RealArchive_Header(t *testing.T) {
-	sd := decompressorFor(fixtureBytes(t, "rar3_testfile.rar"))
-
-	fh, err := sd.Next()
-	if err != nil {
-		t.Fatalf("Next() on a real RAR3 archive failed: %v", err)
-	}
-	if fh.Name != "testfile.txt" {
-		t.Errorf("parsed name %q, want testfile.txt", fh.Name)
-	}
-	if fh.UnpackedSize != 12 {
-		t.Errorf("parsed unpacked size %d, want 12", fh.UnpackedSize)
-	}
-	if sd.Version() != VersionRAR3 {
-		t.Errorf("detected version %v, want RAR3", sd.Version())
-	}
-
-	_, err = io.ReadAll(sd)
-	if !errors.Is(err, ErrPPMUnsupported) {
-		t.Fatalf("reading a PPMd file returned %v; want ErrPPMUnsupported, "+
-			"not a truncation or checksum verdict", err)
-	}
-	// The decode error must not decay on a further read.
-	if _, err := sd.Read(make([]byte, 8)); !errors.Is(err, ErrPPMUnsupported) {
-		t.Fatalf("reading again returned %v; want the decode error to persist", err)
 	}
 }
 

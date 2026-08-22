@@ -322,3 +322,16 @@ func TestMultiVolumePayloadReader_Direct(t *testing.T) {
 		t.Errorf("expected 4 bytes 'next' from next volume, got %d %q %v", n, buf, err)
 	}
 }
+
+func TestRAR3ArchiveIsRefusedAsUnsupported(t *testing.T) {
+	// A bare RAR3 signature followed by a main header. Decoding RAR3 is no
+	// longer supported; header parsing for it remains exported for callers
+	// that inspect archives without decompressing them.
+	sig := []byte{0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x00}
+
+	sd := NewStreamDecompressor(volumesOf(sig))
+	_, err := sd.Next()
+	if !errors.Is(err, ErrUnsupportedFormat) {
+		t.Fatalf("Next() error = %v, want ErrUnsupportedFormat", err)
+	}
+}

@@ -37,53 +37,6 @@ var (
 	// check for either with errors.Is.
 	ErrPasswordRequired = errors.New("rarengine: password required for encrypted file")
 
-	// ErrRAR3EncryptionUnsupported reports a RAR3 member, or a whole RAR3
-	// archive, that is encrypted. This library implements no RAR3 key
-	// derivation -- RAR3 uses a SHA-1 based scheme unrelated to RAR5's
-	// PBKDF2-HMAC-SHA256 -- so the content cannot be produced at all.
-	//
-	// Distinct from ErrPasswordRequired, and deliberately not that sentinel:
-	// SetPassword configures RAR5 decryption only, so no password can turn
-	// this into a readable member and reporting "password required" would
-	// invite a retry that cannot succeed. It is likewise not ErrCRCMismatch,
-	// which is what an unfixed engine reported once it had already handed the
-	// caller the undecrypted bytes.
-	//
-	// Reported as a *FileError when a member is refused at admission, naming
-	// it so traversal continues and the rest of the archive stays reachable.
-	//
-	// Returned bare in the other two cases, both of which end traversal.
-	// Archive-level header encryption ends it because the headers that would
-	// name the remaining members are themselves ciphertext. A member whose
-	// continuation claims encryption -- its first block did not -- ends it
-	// because the packed cursor is invalidated on the volume advance before
-	// this is detected, so no continuation promise can honestly be made even
-	// though that header parsed. A readable header is therefore not on its
-	// own a reason to expect a *FileError here.
-	ErrRAR3EncryptionUnsupported = errors.New("rarengine: RAR3 encryption is not supported")
-
-	// ErrRAR3UnmeasurablePayload reports a RAR3 block whose payload length this
-	// library cannot determine, so traversal stops rather than guessing.
-	//
-	// lhdLarge puts the high 32 bits of a packed size inside the file-header
-	// layout, and only the low half reaches h.DataSize. Two blocks can carry
-	// that flag with the high half out of reach: a subblock, whose header no
-	// dispatcher parses at all, and a file header whose parse failed -- the
-	// size is inside the very structure that proved unreadable.
-	//
-	// Either way the count needed to skip the block is unavailable, so nothing
-	// can reposition the stream: discarding the low half alone lands mid-payload
-	// and the next header comes out of attacker-chosen bytes. That is why this
-	// is terminal rather than a refusal the caller may continue past, and why it
-	// is not recovered by reading the high half out of h.Payload directly --
-	// doing so would trust field offsets in a header that just proved it cannot
-	// be trusted.
-	//
-	// unrar composes both halves, so an archive reaching this would also be one
-	// where this library and the reference implementation disagree about what it
-	// contains. Stopping is the honest answer to that.
-	ErrRAR3UnmeasurablePayload = errors.New("rarengine: RAR3 block declares a packed size this library cannot measure")
-
 	// ErrVolumeVersionMismatch reports a volume whose archive format differs
 	// from the one already being decoded.
 	//
@@ -91,6 +44,12 @@ var (
 	// is read through it. A set that mixes RAR3 and RAR5 would otherwise have
 	// its later volumes parsed under the wrong header layout entirely.
 	ErrVolumeVersionMismatch = errors.New("rarengine: volume archive version does not match the rest of the set")
+
+	// ErrUnsupportedFormat reports an archive this library cannot decode.
+	// RAR3 archives reach this: their headers remain parseable through
+	// ReadRAR3BlockHeader and ParseRAR3FileHeader for callers that inspect
+	// archives, but no RAR3 decoder is provided.
+	ErrUnsupportedFormat = errors.New("rarengine: unsupported archive format")
 )
 
 type ArchiveVersion int
@@ -114,8 +73,9 @@ func (v ArchiveVersion) String() string {
 
 // versionedEngine is the per-format half of decoding: walking block headers
 // and installing each file. Reading a file's bytes is deliberately not part
-// of it -- both engines had byte-identical Read and checksum implementations,
-// and fileReader now owns that for both.
+// of it -- that belongs to fileReader. Only the RAR5 engine implements this
+// now; the interface remains because the format check that selects it is
+// what refuses a RAR3 volume.
 type versionedEngine interface {
 	Next() (*FileHeader, error)
 }
@@ -355,9 +315,8 @@ func (sd *StreamDecompressor) refuse(n int64, cause error) error {
 
 // SetPassword configures the decryption password for encrypted RAR5 archives.
 //
-// RAR5 only. This library implements no RAR3 key derivation, so an encrypted
-// RAR3 member is refused with ErrRAR3EncryptionUnsupported whether or not a
-// password was set here.
+// RAR5 only. A RAR3 volume is refused with ErrUnsupportedFormat before any
+// member is reached, so a password set here never applies to one.
 func (sd *StreamDecompressor) SetPassword(password string) {
 	sd.password = password
 }
@@ -479,12 +438,12 @@ func (sd *StreamDecompressor) nextVolume() error {
 
 	sd.version = version
 	if sd.engine == nil {
-		switch version {
-		case VersionRAR5:
-			sd.engine = newRAR5Engine(sd)
-		case VersionRAR3:
-			sd.engine = newRAR3Engine(sd)
+		if version != VersionRAR5 {
+			_ = sd.currentVol.Close()
+			sd.currentVol = nil
+			return fmt.Errorf("%w: %v", ErrUnsupportedFormat, version)
 		}
+		sd.engine = newRAR5Engine(sd)
 	}
 
 	return nil

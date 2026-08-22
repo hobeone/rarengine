@@ -245,8 +245,7 @@ func TestIntegration_Oracle(t *testing.T) {
 		}},
 		// rar3_testfile.rar is deliberately absent: it is PPMd-compressed,
 		// which this library does not implement, so it cannot round-trip
-		// against unrar. It is exercised by TestRAR3_RealArchive_Header
-		// instead.
+		// against unrar. Its headers are tested in header_rar3_test.go.
 		// Encrypted AND split. A file's ciphertext is one continuous CBC
 		// stream that volume boundaries cut mid-block, so these are the only
 		// fixtures where the decryption has to survive a volume advance.

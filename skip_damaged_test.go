@@ -509,43 +509,6 @@ func TestSkipDamagedFile_SolidRefusalDropsPayload(t *testing.T) {
 	}
 }
 
-// TestRAR3_SolidRefusalAfterDamage covers admitFile in the RAR3 engine, which
-// had no coverage at all -- the guard was added to both engines but only
-// exercised in one, and this codebase's two engines have repeatedly diverged.
-func TestRAR3_SolidRefusalAfterDamage(t *testing.T) {
-	const solidFlag = 0x0010 // LHD_SOLID
-
-	var archive bytes.Buffer
-	archive.Write(rar3ArchiveHeader())
-	// Declares 100 unpacked bytes but carries 10: ends short.
-	archive.Write(rar3StoreEntry("truncated.bin", 0, 100, 0xdeadbeef,
-		[]byte("only ten!!")))
-	archive.Write(rar3StoreEntry("solid.bin", solidFlag, 20, 0x1234,
-		[]byte("twenty bytes exactly")))
-
-	sd := decompressorFor(archive.Bytes())
-	fh, err := sd.Next()
-	if err != nil {
-		t.Fatalf("Next #1: %v", err)
-	}
-	if fh.Name != "truncated.bin" {
-		t.Fatalf("first entry is %q; fixture is not the shape this tests", fh.Name)
-	}
-	if _, err := io.Copy(io.Discard, sd); !errors.Is(err, ErrTruncatedFile) {
-		t.Fatalf("reading the damaged file returned %v; want ErrTruncatedFile", err)
-	}
-	if _, err := sd.Next(); err == nil {
-		t.Fatal("the damaged file was not reported")
-	}
-
-	_, err = sd.Next()
-	if !errors.Is(err, ErrSolidStreamBroken) {
-		t.Fatalf("a RAR3 solid file after a damaged one returned %v; want "+
-			"ErrSolidStreamBroken. The guard exists in both engines and must "+
-			"fire in both", err)
-	}
-}
-
 // badCRCEntry carries its full declared length but records a checksum the
 // content does not match: damage by wrong bytes rather than missing ones.
 func badCRCEntry(name string, content []byte) []byte {

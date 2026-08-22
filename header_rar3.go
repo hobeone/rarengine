@@ -25,64 +25,11 @@ const (
 	lhdSalt        = 0x0400
 )
 
-// mhdPassword marks a RAR3 archive whose block headers are themselves
-// encrypted, in the main (0x73) header's flags.
-const mhdPassword = 0x0080
-
 // longBlock says a four-byte ADD_SIZE follows the base header, giving the block
 // a payload in the stream after its header. It is read for every block type
 // with no restriction on which, which is why the dispatchers must account for a
 // declared payload on every block rather than only on file headers.
 const longBlock = 0x8000
-
-// RAR3 block types. Named because the dispatchers switch on them and a sweep
-// test enumerates them: a type space written as bare hex in a switch cannot be
-// iterated, so nothing can assert that every type accounts for its payload.
-//
-// mhdFirstVolume shares the 0x0100 bit with lhdLarge and means something
-// entirely different -- it is why a "does this block declare a large payload"
-// test must be scoped to the block types that actually carry file-header
-// layout, rather than applied to any block whose flags happen to set that bit.
-const (
-	rar3BlockMark       = 0x72
-	rar3BlockMain       = 0x73
-	rar3BlockFile       = 0x74
-	rar3BlockComment    = 0x75
-	rar3BlockAV         = 0x76
-	rar3BlockOldSub     = 0x77
-	rar3BlockProtect    = 0x78
-	rar3BlockSign       = 0x79
-	rar3BlockNewSub     = 0x7a
-	rar3BlockTerminator = 0x7b
-
-	mhdFirstVolume = 0x0100
-)
-
-// rar3UsesFileLayout reports whether a block type carries the file-header
-// layout, and therefore may carry lhdLarge and a high half to its packed size.
-//
-// The file type itself is excluded: its dispatcher case parses the header and
-// gets the composed size from ParseRAR3FileHeader. What this names is the
-// subblock types, which no dispatcher parses -- their payload is discarded by
-// declared length alone, and that length is only the low 32 bits.
-func rar3UsesFileLayout(blockType uint64) bool {
-	return blockType == rar3BlockOldSub || blockType == rar3BlockNewSub
-}
-
-// rar3ClaimsEncryption reports whether a RAR3 file header claims encryption by
-// either of the two bits that can say so.
-//
-// Either alone is a claim: lhdPassword says the member is encrypted, lhdSalt
-// says a salt accompanies it, and a salt is meaningless on anything else. Real
-// RAR 3.x sets both; a crafted archive need not, so both are tested.
-//
-// One predicate rather than the condition written twice, because it is checked
-// at two sites -- file admission and every volume advance -- whose responses
-// differ but whose question does not. Narrowing what counts as a claim should
-// take one edit, not two kept in step by hand.
-func rar3ClaimsEncryption(fh *FileHeader) bool {
-	return fh.Encrypted || len(fh.Salt) > 0
-}
 
 // ReadRAR3BlockHeader reads and validates a RAR3 block header.
 func ReadRAR3BlockHeader(r io.Reader) (*BlockHeader, error) {
