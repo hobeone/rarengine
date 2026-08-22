@@ -39,10 +39,10 @@ func countedVolumesOf(parts ...[]byte) (<-chan io.ReadCloser, []*countingReadClo
 
 func bytesReaderFor(p []byte) io.Reader { return strings.NewReader(string(p)) }
 
-// Listing an archive's members must not decompress them. Under the previous
-// design advancing past a member decoded and discarded its content
-// unconditionally, which is why gonzbd's InspectRar5 decompressed an entire
-// archive just to read filenames.
+// Listing an archive's members reads a bounded number of bytes from the
+// volume stream. Under the previous design advancing past a member decoded
+// and discarded its content unconditionally, which is why gonzbd's
+// InspectRar5 decompressed an entire archive just to read filenames.
 //
 // The byte-count assertion below is a coarse sanity bound: it catches a
 // traversal that re-reads a volume, or reads past its declared payload, but
@@ -52,10 +52,12 @@ func bytesReaderFor(p []byte) io.Reader { return strings.NewReader(string(p)) }
 // its comment that the skip amount and a file's PackedSize are "the same
 // number by construction"). Decoding a member costs CPU (Huffman/LZ77 work
 // and window writes over the member's UNPACKED size), not extra bytes pulled
-// from the archive's own stream, so it cannot show up here. The behaviour
-// this test's mutation must actually break is pinned directly, by inspecting
-// window state, in TestNonSolidAbandonSkipsDecode below.
-func TestListingNonSolidArchiveDoesNotDecompress(t *testing.T) {
+// from the archive's own stream, so it cannot show up here -- this test
+// passes whether or not listing actually decompresses. The name used to
+// promise "DoesNotDecompress", a guarantee this assertion cannot enforce;
+// that guarantee is pinned directly, by inspecting window state, in
+// TestNonSolidAbandonSkipsDecode below.
+func TestListingNonSolidArchiveReadsBoundedBytes(t *testing.T) {
 	stream := nonSolidArchiveWithCompressedMembers(t)
 
 	ch, counters := countedVolumesOf(stream)
