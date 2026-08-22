@@ -6,8 +6,8 @@ import (
 	"io"
 )
 
-// volumeSplicer presents a member's payload as one continuous stream across
-// the volumes it spans.
+// multiVolumePayloadReader presents a member's payload as one continuous
+// stream across the volumes it spans.
 //
 // It sits BELOW decryption in the chain, not above it. A member's ciphertext
 // is one continuous CBC stream that volume boundaries cut at arbitrary
@@ -15,13 +15,13 @@ import (
 // first part's salt and IV unchanged. Splicing above the decryption fed each
 // new volume's raw bytes straight to the decoder, so the first part decoded
 // and every part after it was ciphertext.
-type volumeSplicer struct {
+type multiVolumePayloadReader struct {
 	r   *Reader
 	e   *Entry
 	src io.Reader
 }
 
-func (s *volumeSplicer) Read(p []byte) (int, error) {
+func (s *multiVolumePayloadReader) Read(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}

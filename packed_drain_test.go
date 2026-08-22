@@ -352,11 +352,11 @@ func TestRefusedFile_CorruptHeaderPayloadIsDropped(t *testing.T) {
 // it explicitly as deleted).
 //
 // The invariant it guarded is now structurally rather than procedurally
-// true: volumeSplicer.Read reassigns its src directly to r.vol.payload() on
-// every volume boundary (splice.go, nextVolumePayload), and volume.body
-// lives inside the volume itself rather than in a separate object that can
-// be constructed and then forgotten. There is no second reference for a
-// drain to read through by mistake, so the bug class this test caught
-// cannot occur by construction. Reading a real file across a volume
-// boundary is exercised end to end by TestIntegration_MultiVolume and by
-// TestPackedRemainder_NoReadAfterVolumeClose above.
+// true: multiVolumePayloadReader.Read reassigns its src directly to
+// r.vol.payload() on every volume boundary (splice.go, nextVolumePayload),
+// and volume.body lives inside the volume itself rather than in a separate
+// object that can be constructed and then forgotten. There is no second
+// reference for a drain to read through by mistake, so the bug class this
+// test caught cannot occur by construction. Reading a real file across a
+// volume boundary is exercised end to end by TestIntegration_MultiVolume and
+// by TestPackedRemainder_NoReadAfterVolumeClose above.

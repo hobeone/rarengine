@@ -181,7 +181,7 @@ func (r *Reader) dispatch(h *BlockHeader) (*Entry, error) {
 		// reading -- both must exist before the chain's first Read. e.src is
 		// filled in only once the chain is known to build successfully.
 		e := newEntry(fh, nil)
-		splicer := &volumeSplicer{r: r, e: e, src: r.vol.payload()}
+		splicer := &multiVolumePayloadReader{r: r, e: e, src: r.vol.payload()}
 		src, err := r.buildChain(fh, splicer)
 		if err != nil {
 			r.win.MarkIncomplete()
@@ -289,10 +289,11 @@ func (r *Reader) resolveHeaderPassword(ch *CryptHeader) (string, error) {
 //
 //	decoder50 / storeReader
 //	  └─ cbcDecryptReader (if encrypted)
-//	       └─ volumeSplicer
+//	       └─ multiVolumePayloadReader
 //
 // Decryption sits BELOW the splice so one CBC reader carries its chaining
-// state across a volume boundary; see volumeSplicer for why that matters.
+// state across a volume boundary; see multiVolumePayloadReader for why that
+// matters.
 func (r *Reader) buildChain(fh *FileHeader, src io.Reader) (io.Reader, error) {
 	if fh.Encrypted {
 		password, err := r.resolvePassword(fh)
