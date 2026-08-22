@@ -185,6 +185,24 @@ func (r *Reader) dispatch(h *BlockHeader) (*Entry, error) {
 		r.entry = e
 		return e, nil
 
+	case HeaderTypeEncryption:
+		ch, err := ParseCryptHeader(h)
+		if err != nil {
+			return nil, nil
+		}
+		password, err := r.resolveHeaderPassword(ch)
+		if err != nil {
+			// Every header after this one is ciphertext, so there is no member
+			// to name and nothing to continue to. Archive-level.
+			return nil, err
+		}
+		key, err := headerKeyFromPassword(ch, password)
+		if err != nil {
+			return nil, err
+		}
+		r.vol.useEncryptedHeaders(key)
+		return nil, nil
+
 	default:
 		// Everything the caller never sees, including service records -- quick
 		// open, comment, recovery, ACL, stream. Those reuse the file-header
@@ -194,9 +212,98 @@ func (r *Reader) dispatch(h *BlockHeader) (*Entry, error) {
 	}
 }
 
-// buildChain assembles the decode chain for a member. Extended in Task 10 to
-// insert decryption below the multi-volume splice.
+// resolvePassword picks the candidate that matches the member's password check
+// value, latching it for the rest of the archive.
+//
+// The check value is a fold of the PBKDF2 chain, so a candidate is tested
+// without decrypting or decompressing anything. Latching means the cost is one
+// derivation per candidate per archive rather than per member.
+//
+// An archive carrying no check value cannot have a candidate verified this
+// way. The first candidate is used and a wrong one surfaces as
+// ErrCRCMismatch -- re-running the archive per candidate would mean re-reading
+// every volume, and modern RAR stores a check value by default.
+func (r *Reader) resolvePassword(fh *FileHeader) (string, error) {
+	if r.hasResolved {
+		return r.resolved, nil
+	}
+	if len(r.passwords) == 0 {
+		return "", ErrPasswordRequired
+	}
+	if fh.EncCheck == nil {
+		r.resolved, r.hasResolved = r.passwords[0], true
+		return r.resolved, nil
+	}
+	for _, candidate := range r.passwords {
+		ok, hasCheck, err := VerifyFilePassword(fh, candidate)
+		if err != nil {
+			return "", err
+		}
+		if !hasCheck {
+			r.resolved, r.hasResolved = candidate, true
+			return r.resolved, nil
+		}
+		if ok {
+			r.resolved, r.hasResolved = candidate, true
+			return r.resolved, nil
+		}
+	}
+	return "", ErrWrongPassword
+}
+
+// resolveHeaderPassword is resolvePassword for archive-level header
+// encryption, whose check value lives on the CryptHeader rather than on a file
+// header.
+func (r *Reader) resolveHeaderPassword(ch *CryptHeader) (string, error) {
+	if r.hasResolved {
+		return r.resolved, nil
+	}
+	if len(r.passwords) == 0 {
+		return "", ErrPasswordRequired
+	}
+	for _, candidate := range r.passwords {
+		ok, hasCheck, err := VerifyPassword(ch, candidate)
+		if err != nil {
+			return "", err
+		}
+		if !hasCheck || ok {
+			r.resolved, r.hasResolved = candidate, true
+			return r.resolved, nil
+		}
+	}
+	return "", ErrWrongPassword
+}
+
+// buildChain assembles the decode chain for a member:
+//
+//	decoder50 / storeReader
+//	  └─ cbcDecryptReader (if encrypted)
+//	       └─ volumeSplicer
+//
+// Decryption sits BELOW the splice so one CBC reader carries its chaining
+// state across a volume boundary; see volumeSplicer for why that matters.
 func (r *Reader) buildChain(fh *FileHeader, src io.Reader) (io.Reader, error) {
+	if fh.Encrypted {
+		password, err := r.resolvePassword(fh)
+		if err != nil {
+			return nil, err
+		}
+		const maxKdfCount = 24
+		if fh.KdfCount > maxKdfCount {
+			return nil, errKdfCountExceeded(fh.KdfCount, maxKdfCount)
+		}
+		key, pswCheckVal := pbkdf2HmacSha256([]byte(password), fh.Salt, 1<<fh.KdfCount)
+		if fh.EncCheck != nil {
+			if err := verifyEncCheck(pswCheckVal, fh.EncCheck); err != nil {
+				return nil, err
+			}
+		}
+		decSrc, err := newCBCDecryptReader(src, key, fh.IV)
+		if err != nil {
+			return nil, err
+		}
+		src = decSrc
+	}
 	if fh.Method == 0 {
 		return &storeReader{r: src, win: r.win}, nil
 	}
