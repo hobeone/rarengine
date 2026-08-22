@@ -170,12 +170,18 @@ func (r *Reader) dispatch(h *BlockHeader) (*Entry, error) {
 			r.win.MarkIncomplete()
 			return terminalEntry(fh, err), nil
 		}
-		src, err := r.buildChain(fh, r.vol.payload())
+		// e is built before the splicer, and the splicer before the decode
+		// chain, because the splicer consults e through lastBlock() while
+		// reading -- both must exist before the chain's first Read. e.src is
+		// filled in only once the chain is known to build successfully.
+		e := newEntry(fh, nil)
+		splicer := &volumeSplicer{r: r, e: e, src: r.vol.payload()}
+		src, err := r.buildChain(fh, splicer)
 		if err != nil {
 			r.win.MarkIncomplete()
 			return terminalEntry(fh, err), nil
 		}
-		e := newEntry(fh, src)
+		e.src = src
 		r.entry = e
 		return e, nil
 

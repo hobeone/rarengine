@@ -158,6 +158,12 @@ type memberSpec struct {
 	isDir   bool
 	withCRC bool
 
+	// crcOf overrides what withCRC checksums, defaulting to content. A
+	// multi-volume member's last part carries the WHOLE file's CRC32, not
+	// just that part's own bytes, so a split fixture must set this to the
+	// full reassembled content rather than the tail it actually carries.
+	crcOf string
+
 	notFirst bool // clears FirstBlock: this is a continuation block
 	notLast  bool // clears LastBlock: the member continues in the next volume
 
@@ -194,8 +200,12 @@ func rar5Member(t testing.TB, s memberSpec) []byte {
 	f.Write(EncodeVint(uint64(unpacked)))
 	f.Write(EncodeVint(0)) // attributes
 	if s.withCRC {
+		crcContent := content
+		if s.crcOf != "" {
+			crcContent = []byte(s.crcOf)
+		}
 		var crcBuf [4]byte
-		binary.LittleEndian.PutUint32(crcBuf[:], crc32.ChecksumIEEE(content))
+		binary.LittleEndian.PutUint32(crcBuf[:], crc32.ChecksumIEEE(crcContent))
 		f.Write(crcBuf[:])
 	}
 	// Compression flags: method lives in bits 7..9, so zero is store (method
