@@ -26,6 +26,21 @@ type Window struct {
 	// that advances w must therefore maintain it. In non-test code there are
 	// exactly three: writeByte, writeBytes, and CopyBytes.
 	wrapped bool
+
+	// incomplete records that the history holds something other than what a
+	// solid successor's back-references assume: bytes missing because a member
+	// ended short, wrong because it failed its CRC32, or absent because a
+	// member was refused and never decoded at all.
+	//
+	// It lives here rather than beside the traversal because that is the
+	// question it answers -- is this window still what a solid file may build
+	// on. Previously the same state had four writers and a comment warning
+	// that a fifth would have to answer the same question they did.
+	//
+	// The shortfall it describes sits INSIDE what CopyBytes bounds by: a
+	// successor reads an earlier member's bytes rather than reading past the
+	// written history, so the distance guard cannot catch it.
+	incomplete bool
 }
 
 // historyLen returns the number of bytes of valid LZ77 history behind the write
@@ -195,3 +210,37 @@ func (w *Window) Read(p []byte) (int, error) {
 	}
 	return copied, nil
 }
+
+// BeginFile prepares the window for a member.
+//
+// A non-solid member resets the history, so it and everything built on it are
+// unaffected by earlier damage -- which is what clears the flag. A solid
+// member after damage cannot be decoded correctly and is refused: its
+// back-references reach into bytes its predecessors did not write, producing
+// plausible-looking output with nothing in the format to mark it.
+//
+// It returns an error rather than a bool so that errcheck makes handling the
+// refusal compulsory rather than customary.
+func (w *Window) BeginFile(solid bool) error {
+	if solid {
+		if w.incomplete {
+			return ErrSolidStreamBroken
+		}
+		w.Reset(true)
+		return nil
+	}
+	w.incomplete = false
+	w.Reset(false)
+	return nil
+}
+
+// MarkIncomplete records that the member just finished left the history in a
+// state a solid successor's back-references do not assume.
+//
+// Called from what happened to the member -- it ended short, or failed its
+// checksum, or was refused before decoding -- and never from the error a
+// caller received. Those answer different questions: the caller's error asks
+// "may traversal continue?", this asks "is the window intact?", and deriving
+// one from the other left every non-continuable short member recorded as
+// undamaged.
+func (w *Window) MarkIncomplete() { w.incomplete = true }

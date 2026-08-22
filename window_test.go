@@ -426,3 +426,31 @@ func TestWindow_CompletelyFull(t *testing.T) {
 		}
 	}
 }
+
+func TestWindowBeginFileRefusesSolidAfterIncomplete(t *testing.T) {
+	w := NewWindow(0x40000)
+
+	if err := w.BeginFile(false); err != nil {
+		t.Fatalf("first BeginFile(false): %v", err)
+	}
+	w.writeBytes([]byte("hello"))
+	w.MarkIncomplete()
+
+	if err := w.BeginFile(true); !errors.Is(err, ErrSolidStreamBroken) {
+		t.Fatalf("BeginFile(true) after MarkIncomplete = %v, want ErrSolidStreamBroken", err)
+	}
+}
+
+func TestWindowBeginFileNonSolidClearsIncomplete(t *testing.T) {
+	w := NewWindow(0x40000)
+	w.MarkIncomplete()
+
+	// A non-solid file resets the history, so nothing it or its successors
+	// reference depends on what the damaged file failed to write.
+	if err := w.BeginFile(false); err != nil {
+		t.Fatalf("BeginFile(false) after MarkIncomplete: %v", err)
+	}
+	if err := w.BeginFile(true); err != nil {
+		t.Fatalf("BeginFile(true) after a clean non-solid file: %v", err)
+	}
+}
