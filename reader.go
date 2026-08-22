@@ -2,6 +2,7 @@ package rarengine
 
 import (
 	"errors"
+	"fmt"
 	"io"
 )
 
@@ -35,6 +36,26 @@ type Reader struct {
 	// decides whether abandoning a member must decode its remainder to keep
 	// the window valid for a successor -- see NextEntry.
 	solid bool
+
+	// fatal is sticky once set: NextEntry checks it first and, if non-nil,
+	// returns it again without touching r.vol. It is set by NextEntry itself
+	// -- never by dispatch or any other helper -- for exactly the errors
+	// that leave r.vol non-nil after a failure. Those are the ones where the
+	// stream is left positioned past a block whose bytes were consumed but
+	// not trusted (a malformed archive header, a header-encryption failure):
+	// r.vol itself has no memory of the failure, so a retry would call
+	// r.vol.next() again and parse the following bytes as a fresh header,
+	// which is exactly the fabricated-entry risk this field exists to close.
+	//
+	// It deliberately does NOT latch io.EOF or ErrNoNextVolume: both are
+	// ordinary end-of-archive signals, not failures, and nextVolume already
+	// leaves r.vol nil on every one of its own failure paths -- including
+	// ErrNoNextVolume -- so a retry there starts fresh on the next channel
+	// volume rather than resuming into anything fabricated. It also does not
+	// need to latch a non-EOF error from r.vol.next(): volume.err is already
+	// sticky (see volume's err field), so that error is self-latching
+	// without r.vol ever being retried into unread bytes.
+	fatal error
 }
 
 // NewReader constructs a Reader over volumes, allocating the 32 MB window.
@@ -58,6 +79,7 @@ func (r *Reader) Reset(volumes <-chan io.ReadCloser) {
 	r.entry = nil
 	r.resolved, r.hasResolved = "", false
 	r.solid = false
+	r.fatal = nil
 	// BeginFile(false) is the window's one entrance for discarding history: it
 	// resets the pointers and clears incomplete together. Poking r.win.incomplete
 	// directly here would reintroduce a second writer of that flag, which is
@@ -77,6 +99,25 @@ func (r *Reader) SetPasswords(candidates []string) { r.passwords = candidates }
 // delivered by the Entry, including refusals, which arrive as an Entry that is
 // already terminal.
 func (r *Reader) NextEntry() (*Entry, error) {
+	if r.fatal != nil {
+		return nil, r.fatal
+	}
+	e, err := r.nextEntry()
+	// Latch every error except the ordinary end-of-archive signals. Both
+	// leave r.vol nil already (see nextVolume and the fatal field's
+	// comment), so retrying them resumes cleanly rather than resuming past
+	// an unresolved failure -- there is nothing here for the latch to guard.
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, ErrNoNextVolume) {
+		r.fatal = err
+	}
+	return e, err
+}
+
+// nextEntry is NextEntry's scan loop, unlatched: every error it returns is
+// evaluated by NextEntry for whether it should end traversal for the rest of
+// this Reader's life. Nothing below this point may be called except through
+// NextEntry.
+func (r *Reader) nextEntry() (*Entry, error) {
 	if err := r.finishActive(); err != nil {
 		return nil, err
 	}
@@ -148,8 +189,12 @@ func (r *Reader) dispatch(h *BlockHeader) (*Entry, error) {
 			// archive is solid. NextEntry's error set is explicitly
 			// archive-level, and a header this library cannot parse is
 			// precisely an archive-level problem: continuing past it means
-			// proceeding with unknown archive-wide semantics.
-			return nil, err
+			// proceeding with unknown archive-wide semantics. Wrapped so a
+			// caller can alarm on ErrCorruptArchiveHeader specifically while
+			// errors.Is still reaches the underlying parse failure -- see
+			// ErrCorruptArchiveHeader's doc comment. NextEntry latches this
+			// (see Reader.fatal) so a second call cannot resume past it.
+			return nil, fmt.Errorf("%w: %w", ErrCorruptArchiveHeader, err)
 		}
 		r.solid = r.solid || ah.Solid
 		return nil, nil

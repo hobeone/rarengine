@@ -60,6 +60,17 @@ var (
 	// content regardless can disable verification; see SetVerifyCRC.
 	ErrChecksumUnsupported = errors.New("rarengine: file records a checksum this library cannot verify")
 
+	// ErrCorruptArchiveHeader reports that the archive-level header (the
+	// block that declares archive-wide semantics, including whether the
+	// archive is solid) failed to parse. Traversal has ended: Reader latches
+	// this error and every subsequent NextEntry call returns it again
+	// without reading further, because the stream is left positioned past a
+	// block whose bytes could not be trusted, and continuing risks handing
+	// back a member fabricated from attacker-chosen content. Reset clears
+	// the latch. The underlying parse failure -- typically ErrTruncatedVint
+	// -- is still reachable through errors.Is via the wrap.
+	ErrCorruptArchiveHeader = errors.New("rarengine: archive header is corrupt, traversal ended")
+
 	// ErrSolidStreamBroken is returned when a solid file cannot be decoded
 	// because an earlier file in the same solid run was damaged.
 	//

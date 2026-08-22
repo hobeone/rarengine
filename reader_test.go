@@ -351,14 +351,14 @@ func truncatedThenSolidArchive(t testing.TB) []byte {
 	)
 }
 
-// A malformed archive header ends traversal instead of being skipped: the
-// archive header defines archive-wide semantics (including whether the
-// archive is solid), so a header this library cannot parse is an
-// archive-level problem, not a block to scan past.
-func TestMalformedArchiveHeaderEndsTraversal(t *testing.T) {
-	// The block header itself is CRC-valid (rar5Block computes that), but the
-	// archive header BODY does not parse: it declares ArcFlagVolNum without
-	// the volume-number vint that flag promises follows.
+// malformedArchiveHeaderStream builds a stream whose archive header body
+// fails to parse (it declares ArcFlagVolNum without the volume-number vint
+// that flag promises follows, though the BLOCK header itself stays
+// CRC-valid), followed by a real, well-formed member named plantedName. A
+// Reader that does not stop dead at the malformed header can resume scanning
+// and hand plantedName back as though nothing happened.
+func malformedArchiveHeaderStream(t testing.TB, plantedName string) []byte {
+	t.Helper()
 	var p bytes.Buffer
 	p.Write(EncodeVint(HeaderTypeArchive))
 	p.Write(EncodeVint(0))
@@ -368,8 +368,16 @@ func TestMalformedArchiveHeaderEndsTraversal(t *testing.T) {
 	archive.Write([]byte{0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x01, 0x00})
 	archive.Write(rar5Block(p.Bytes()))
 
-	good := rar5Member(t, memberSpec{name: "good.bin", content: "payload", withCRC: true})
-	stream := append(archive.Bytes(), good...)
+	planted := rar5Member(t, memberSpec{name: plantedName, content: "payload", withCRC: true})
+	return append(archive.Bytes(), planted...)
+}
+
+// A malformed archive header ends traversal instead of being skipped: the
+// archive header defines archive-wide semantics (including whether the
+// archive is solid), so a header this library cannot parse is an
+// archive-level problem, not a block to scan past.
+func TestMalformedArchiveHeaderEndsTraversal(t *testing.T) {
+	stream := malformedArchiveHeaderStream(t, "good.bin")
 
 	r := NewReader(volumesOf(stream))
 	e, err := r.NextEntry()
@@ -388,6 +396,117 @@ func TestMalformedArchiveHeaderEndsTraversal(t *testing.T) {
 	}
 	if e != nil && e.Header != nil && e.Header.Name == "good.bin" {
 		t.Fatalf("the good member behind the malformed archive header was returned")
+	}
+}
+
+// TestMalformedArchiveHeaderWrapsSentinels pins the wrap in dispatch's
+// HeaderTypeArchive case: a caller must be able to alarm on
+// ErrCorruptArchiveHeader specifically, and errors.Is must still reach the
+// underlying ErrTruncatedVint through the wrap for callers that want the
+// detail.
+func TestMalformedArchiveHeaderWrapsSentinels(t *testing.T) {
+	stream := malformedArchiveHeaderStream(t, "good.bin")
+
+	r := NewReader(volumesOf(stream))
+	_, err := r.NextEntry()
+	if err == nil {
+		t.Fatal("NextEntry succeeded past a malformed archive header, want an error")
+	}
+	if !errors.Is(err, ErrCorruptArchiveHeader) {
+		t.Fatalf("NextEntry error = %v, want errors.Is(err, ErrCorruptArchiveHeader)", err)
+	}
+	if !errors.Is(err, ErrTruncatedVint) {
+		t.Fatalf("NextEntry error = %v, want errors.Is(err, ErrTruncatedVint) to still "+
+			"hold through the ErrCorruptArchiveHeader wrap", err)
+	}
+}
+
+// TestFatalLatchSurvivesSecondCall is the important one: a second NextEntry
+// call after a malformed archive header must return the same error and must
+// NEVER hand back the well-formed member planted right after it in the
+// stream. Asserting only "the second call also errors" is weaker than it
+// looks -- a Reader that resumed scanning and stumbled into an unrelated
+// parse failure on unrelated bytes would also satisfy that. What actually
+// matters is that the planted member is never returned, from any call.
+func TestFatalLatchSurvivesSecondCall(t *testing.T) {
+	const planted = "should-never-be-returned.bin"
+	stream := malformedArchiveHeaderStream(t, planted)
+
+	r := NewReader(volumesOf(stream))
+
+	assertNeverPlanted := func(e *Entry) {
+		t.Helper()
+		if e == nil {
+			return
+		}
+		defer func() { _ = e.Close() }()
+		if e.Header != nil && e.Header.Name == planted {
+			t.Fatalf("NextEntry returned the planted member %q after a malformed "+
+				"archive header; the latch failed to stop traversal", planted)
+		}
+	}
+
+	e1, err1 := r.NextEntry()
+	assertNeverPlanted(e1)
+	if err1 == nil {
+		t.Fatal("first NextEntry call succeeded past a malformed archive header")
+	}
+	if !errors.Is(err1, ErrCorruptArchiveHeader) {
+		t.Fatalf("first NextEntry error = %v, want ErrCorruptArchiveHeader", err1)
+	}
+
+	e2, err2 := r.NextEntry()
+	assertNeverPlanted(e2)
+	if e2 != nil {
+		t.Fatalf("second NextEntry call returned a non-nil Entry %v after the "+
+			"latch, want nil", e2)
+	}
+	if !errors.Is(err2, ErrCorruptArchiveHeader) {
+		t.Fatalf("second NextEntry error = %v, want the same ErrCorruptArchiveHeader "+
+			"the first call reported", err2)
+	}
+	if !errors.Is(err2, err1) && err2.Error() != err1.Error() {
+		t.Fatalf("second NextEntry error = %v, want the identical error the first "+
+			"call latched (%v)", err2, err1)
+	}
+
+	// A third call, for good measure -- the latch must not decay after one repeat.
+	e3, err3 := r.NextEntry()
+	assertNeverPlanted(e3)
+	if !errors.Is(err3, ErrCorruptArchiveHeader) {
+		t.Fatalf("third NextEntry error = %v, want ErrCorruptArchiveHeader", err3)
+	}
+}
+
+// TestResetClearsFatalLatch pins that Reset -- not merely time or further
+// calls -- is what clears a latched archive-level failure. A Reader latched
+// by a malformed archive header must traverse a fresh, healthy archive
+// normally after Reset.
+func TestResetClearsFatalLatch(t *testing.T) {
+	bad := malformedArchiveHeaderStream(t, "irrelevant.bin")
+	r := NewReader(volumesOf(bad))
+
+	if _, err := r.NextEntry(); !errors.Is(err, ErrCorruptArchiveHeader) {
+		t.Fatalf("NextEntry error = %v, want ErrCorruptArchiveHeader", err)
+	}
+
+	good := rar5Archive(t, false,
+		rar5Member(t, memberSpec{name: "healthy.bin", content: "hello", withCRC: true}),
+	)
+	r.Reset(volumesOf(good))
+
+	e, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("NextEntry after Reset = %v, want a clean traversal", err)
+	}
+	if e == nil || e.Header == nil || e.Header.Name != "healthy.bin" {
+		t.Fatalf("NextEntry after Reset returned %v, want the healthy.bin member", e)
+	}
+	_ = e.Close()
+
+	if _, err := r.NextEntry(); !errors.Is(err, ErrNoNextVolume) && !errors.Is(err, io.EOF) {
+		t.Fatalf("NextEntry at end of the post-Reset archive = %v, want "+
+			"ErrNoNextVolume or io.EOF", err)
 	}
 }
 
