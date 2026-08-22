@@ -1,6 +1,7 @@
 package rarengine
 
 import (
+	"errors"
 	"fmt"
 	"io"
 )
@@ -60,6 +61,37 @@ func (r *Reader) nextVolumePayload(e *Entry) (io.Reader, error) {
 	for {
 		h, err := r.vol.next()
 		if err != nil {
+			// This loop and NextEntry's must agree about what an exhausted
+			// volume means, or a member spanning volumes 1->3 whose middle
+			// volume carries no continuation block (nothing but its own
+			// archive header, or an end header) dies here instead of
+			// advancing to volume 3. NextEntry treats io.EOF/
+			// io.ErrUnexpectedEOF from vol.next() as "this volume is spent,
+			// open the next one and keep scanning" -- so this must too. The
+			// old engine got this for free from an explicit HeaderTypeEnd
+			// case in processVolumePayloadHeader that called nextVolume()
+			// itself; that case does not exist here, because end headers
+			// now fall through the same generic "not a file header, keep
+			// scanning" path as everything else. That is correct for
+			// payload accounting (volume.next() already dropped the
+			// declared bytes) but it silently dropped the volume advance
+			// the old case also provided.
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				_ = r.vol.Close()
+				r.vol = nil
+				if verr := r.nextVolume(); verr != nil {
+					// Do not translate to io.EOF: reaching here means a read
+					// already in progress could not find its continuation,
+					// so the member is unfinished. Entry.Read turns this
+					// into the member's verdict (ErrTruncatedFile), the same
+					// as it would for any other short read -- reporting a
+					// clean end of stream here would be exactly the
+					// truncation-as-success decay that sentinel exists to
+					// prevent.
+					return nil, verr
+				}
+				continue
+			}
 			return nil, err
 		}
 		if h.Type != HeaderTypeFile {
