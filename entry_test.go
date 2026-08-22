@@ -208,3 +208,22 @@ func TestEntryCloseDoesNotTranslateWrappedEOF(t *testing.T) {
 		t.Fatalf("Close() = %v, want the wrapped verdict %v unchanged", got, wrapped)
 	}
 }
+
+// TestEntryReadBeforeSourceIsSetReportsNoActiveFile covers the entry a
+// dispatched member starts as: Reader.dispatch constructs it with a nil src
+// via newEntry(fh, nil) before the decode chain is known to build
+// successfully, filling e.src in only once it does. A caller that somehow
+// reached Read before that point -- or a future admission path that forgets
+// the fill-in -- must not get a nil-pointer panic or silently produce zero
+// bytes with no error.
+func TestEntryReadBeforeSourceIsSetReportsNoActiveFile(t *testing.T) {
+	e := newEntry(headerFor("hello world", true), nil)
+
+	n, err := e.Read(make([]byte, 8))
+	if n != 0 {
+		t.Fatalf("Read produced %d bytes with no source", n)
+	}
+	if !errors.Is(err, ErrNoActiveFile) {
+		t.Fatalf("Read with no source = %v, want ErrNoActiveFile", err)
+	}
+}

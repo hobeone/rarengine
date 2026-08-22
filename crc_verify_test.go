@@ -180,3 +180,66 @@ func TestCRCVerification_UnconditionalOnMismatch(t *testing.T) {
 		t.Fatalf("Close() = %v, want ErrCRCMismatch", closeErr)
 	}
 }
+
+// rar5FileEntryUnknownSize builds a RAR5 file block declaring
+// FileFlagUnpSizeUnknown, the flag ParseFileHeader refuses because it makes
+// the declared size -- and so truncation detection -- meaningless.
+func rar5FileEntryUnknownSize(name string, content []byte, crc32Value uint32) []byte {
+	var fp bytes.Buffer
+	fp.Write(EncodeVint(FileFlagHasCRC32 | FileFlagUnpSizeUnknown))
+	fp.Write(EncodeVint(uint64(len(content))))
+	fp.Write(EncodeVint(0))
+	var crcBuf [4]byte
+	binary.LittleEndian.PutUint32(crcBuf[:], crc32Value)
+	fp.Write(crcBuf[:])
+	fp.Write(EncodeVint(0))
+	fp.Write(EncodeVint(1))
+	fp.Write(EncodeVint(uint64(len(name))))
+	fp.WriteString(name)
+
+	var hp bytes.Buffer
+	hp.Write(EncodeVint(HeaderTypeFile))
+	hp.Write(EncodeVint(HeaderFlagHasData))
+	hp.Write(EncodeVint(uint64(len(content))))
+	hp.Write(fp.Bytes())
+
+	var out bytes.Buffer
+	out.Write(rar5Block(hp.Bytes()))
+	out.Write(content)
+	return out.Bytes()
+}
+
+// TestUnknownUnpackedSizeIsSkippable checks that refusing a file whose
+// unpacked size is unknown does not leave its payload in the stream for the
+// next header read to land in -- and, stronger than that, that the archive's
+// genuine next member is what NextEntry actually reaches. ParseFileHeader
+// failing is not surfaced to the caller as a distinguishable error: dispatch
+// treats it the same as any other unclaimed block and keeps scanning (see
+// reader.go's HeaderTypeFile case), so the only observable property is
+// positional recovery, which TestParseFileHeader_RejectsUnknownUnpackedSize
+// in header_test.go pairs with to pin that ErrUnpSizeUnknown specifically
+// is what ParseFileHeader itself returns.
+func TestUnknownUnpackedSizeIsSkippable(t *testing.T) {
+	// Distinctive so its presence in the unread remainder would be unambiguous.
+	content := []byte("PAYLOAD-MUST-BE-DISCARDED")
+	unknownSize := rar5FileEntryUnknownSize("streamed.txt", content, crc32.ChecksumIEEE(content))
+
+	var archive bytes.Buffer
+	archive.Write(rar5ArchiveHeader())
+	archive.Write(unknownSize)
+	archive.Write(rar5FileEntry("real.txt", 4, crc32.ChecksumIEEE([]byte("real")), []byte("real")))
+	archive.Write(rar5EndHeader())
+
+	r := NewReader(volumesOf(archive.Bytes()))
+	e, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("NextEntry: %v", err)
+	}
+	if e.Header == nil || e.Header.Name != "real.txt" {
+		t.Fatalf("NextEntry returned %v, want real.txt -- the refused member's "+
+			"payload must not survive into the next header read", e.Header)
+	}
+	if got, err := io.ReadAll(e); err != nil || string(got) != "real" {
+		t.Fatalf("reading real.txt = %q, %v; want \"real\", nil", got, err)
+	}
+}

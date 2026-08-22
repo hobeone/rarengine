@@ -108,9 +108,11 @@ type FileHeader struct {
 	// name -- reading the salt bit as encryption is how an encrypted member
 	// carrying no salt came to be decoded as though it were plaintext.
 	//
-	// A RAR3 member is refused before Next returns it, so a true value on
-	// that path is only ever observed through a FileError's Header. RAR5
-	// members are decrypted normally and returned with this set.
+	// Reader.NextEntry only ever traverses RAR5 archives -- openVolume
+	// refuses a RAR3 signature outright, before any per-member parsing runs
+	// -- so a RAR3-flavoured Encrypted value is observed only by a caller
+	// that calls ParseRAR3FileHeader directly for inspection. RAR5 members
+	// are decrypted normally by NextEntry and returned with this set.
 	Encrypted        bool
 	KdfCount         int
 	Salt             []byte

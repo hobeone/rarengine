@@ -276,6 +276,16 @@ func TestIntegration_Oracle(t *testing.T) {
 			"rar5_solid_multi_qo.part5.rar", "rar5_solid_multi_qo.part6.rar",
 			"rar5_solid_multi_qo.part7.rar", "rar5_solid_multi_qo.part8.rar",
 		}},
+		// A quick-open record and a recovery record after every volume's file
+		// block, so this is the fixture that actually exercises service
+		// records being skipped ACROSS a multi-volume split -- rar5_solid_multi_qo
+		// carries a quick-open record too, but only in its first volume.
+		// See testdata/generate.sh for why regenerating it must keep
+		// producing more than one volume.
+		{name: "rar5_multi_service", volumes: []string{
+			"rar5_multi_service.part01.rar", "rar5_multi_service.part02.rar",
+			"rar5_multi_service.part03.rar", "rar5_multi_service.part04.rar",
+		}},
 	}
 
 	for _, tc := range testArchives {

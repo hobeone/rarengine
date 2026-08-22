@@ -423,3 +423,36 @@ func TestFixtureBuildersRoundTrip(t *testing.T) {
 			"backs proves nothing")
 	}
 }
+
+// TestCRCVerificationIgnoresIsDir pins that FileFlagIsDir cannot switch
+// checksum verification off.
+//
+// entry.go's verifyChecksum gates on e.size == 0 -- the produced size, which
+// this type enforces -- rather than on IsDir, which the archive asserts and
+// nothing cross-checks. CLAUDE.md names this as a fixed vulnerability:
+// gating on IsDir let a crafted archive claiming to be a directory deliver
+// arbitrary bytes under a header nothing verified, because the checksum
+// check never ran. An entry that produced bytes is verified whatever it
+// calls itself.
+func TestCRCVerificationIgnoresIsDir(t *testing.T) {
+	member := rar5Member(t, memberSpec{
+		name:    "d",
+		content: "attacker payload",
+		isDir:   true,
+		withCRC: true,
+		crcOf:   "not the actual content", // deliberately wrong CRC32
+	})
+	archive := rar5Archive(t, false, member)
+
+	r := NewReader(volumesOf(archive))
+	e, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("NextEntry: %v", err)
+	}
+	if _, err := io.Copy(io.Discard, e); err != nil && !errors.Is(err, ErrCRCMismatch) {
+		t.Fatalf("reading an IsDir entry with a wrong CRC32 returned %v", err)
+	}
+	if closeErr := e.Close(); !errors.Is(closeErr, ErrCRCMismatch) {
+		t.Fatalf("Close() on an IsDir entry with a wrong CRC32 = %v, want ErrCRCMismatch", closeErr)
+	}
+}

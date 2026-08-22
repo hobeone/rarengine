@@ -87,7 +87,7 @@ func (c *cbcDecryptReader) Read(p []byte) (int, error) {
 			// Recorded so it survives a second call. Returning it while
 			// leaving c.err at io.EOF let the next Read report a clean end of
 			// stream, decaying a truncation into success -- the exact decay
-			// fileReader.finish exists to prevent one layer up, which is not a
+			// Entry.finish exists to prevent one layer up, which is not a
 			// reason for this layer to produce it.
 			c.inLen = 0
 			c.err = io.ErrUnexpectedEOF

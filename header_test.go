@@ -3,6 +3,7 @@ package rarengine
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"hash/crc32"
 	"testing"
 )
@@ -283,5 +284,19 @@ func TestParseHashRecord(t *testing.T) {
 	}
 	if fhShort.HasBlake2sp {
 		t.Errorf("expected HasBlake2sp to be false for short hash record")
+	}
+}
+
+// TestParseFileHeader_RejectsUnknownUnpackedSize covers the flag that makes
+// the declared size meaningless. Detecting truncation depends on that size,
+// so a header declining to state it is refused rather than decoded against a
+// value that means nothing.
+func TestParseFileHeader_RejectsUnknownUnpackedSize(t *testing.T) {
+	h := &BlockHeader{
+		Type:    HeaderTypeFile,
+		Payload: EncodeVint(FileFlagUnpSizeUnknown),
+	}
+	if _, err := ParseFileHeader(h); !errors.Is(err, ErrUnpSizeUnknown) {
+		t.Fatalf("ParseFileHeader returned %v; want ErrUnpSizeUnknown", err)
 	}
 }
