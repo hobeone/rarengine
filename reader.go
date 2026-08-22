@@ -165,6 +165,22 @@ func (r *Reader) finishActive() error {
 	}
 	if r.solid {
 		_ = e.Close()
+	} else {
+		// Sever before anything can read through it. e.src bottoms out on the
+		// volume's aliased v.body, which the next v.next() call re-points to
+		// describe a following block; an abandoned Entry that still holds it
+		// would silently start serving that block's bytes with a nil error
+		// instead of reporting its own truncation. Cutting the source here,
+		// rather than decoding to completion, is what keeps a non-solid
+		// abandon cheap -- see the doc comment above.
+		e.src = nil
+		if e.done == nil {
+			if e.short() {
+				_ = e.finish(e.truncated())
+			} else {
+				_ = e.finish(nil)
+			}
+		}
 	}
 	if e.short() || (e.done != nil && !errors.Is(e.done, io.EOF) &&
 		!errors.Is(e.done, ErrChecksumUnsupported)) {

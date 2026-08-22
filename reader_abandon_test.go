@@ -157,6 +157,66 @@ func TestNonSolidAbandonSkipsDecode(t *testing.T) {
 	}
 }
 
+// TestAbandonedEntryCannotReadNextMember is the regression pin for the
+// Critical finding: finishActive used to call Entry.Close() only on the solid
+// path, leaving a non-solid abandon's Entry with e.src still aliasing
+// v.body -- which the next volume.next() call re-points at the FOLLOWING
+// member's payload. Reading the abandoned Entry after that point silently
+// produced the next member's bytes with a nil error instead of reporting its
+// own truncation.
+//
+// This asserts on the CONTENT the abandoned entry produces, not merely on an
+// error being present: the failure mode this pins is wrong bytes with a nil
+// error, and an error-only assertion would pass against that bug too (it
+// would also pass, uselessly, if e1 simply returned no bytes and no error).
+func TestAbandonedEntryCannotReadNextMember(t *testing.T) {
+	aContent := strings.Repeat("A", 16)
+	bContent := strings.Repeat("B", 16)
+	stream := rar5Archive(t, false,
+		rar5Member(t, memberSpec{name: "A.txt", content: aContent, withCRC: true}),
+		rar5Member(t, memberSpec{name: "B.txt", content: bContent, withCRC: true}),
+	)
+
+	r := NewReader(volumesOf(stream))
+	e1, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("first NextEntry: %v", err)
+	}
+	if e1.Header.Name != "A.txt" {
+		t.Fatalf("first member = %q, want A.txt", e1.Header.Name)
+	}
+
+	var first [1]byte
+	if _, err := e1.Read(first[:]); err != nil {
+		t.Fatalf("reading 1 byte of A.txt: %v", err)
+	}
+
+	e2, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("second NextEntry: %v", err)
+	}
+	if e2.Header.Name != "B.txt" {
+		t.Fatalf("second member = %q, want B.txt", e2.Header.Name)
+	}
+
+	rest, readErr := io.ReadAll(e1)
+	got := string(first[:]) + string(rest)
+	if got == aContent+bContent || strings.Contains(got, "B") {
+		t.Fatalf("abandoned A.txt produced %q, which contains B.txt's content; "+
+			"an abandoned entry must never read through to the next member", got)
+	}
+	if readErr == nil {
+		t.Fatalf("abandoned A.txt Read returned nil error with content %q, "+
+			"want a truthful failure", got)
+	}
+
+	closeErr := e1.Close()
+	if closeErr == nil {
+		t.Fatalf("abandoned A.txt Close() = nil, want a non-nil verdict: " +
+			"it never produced its declared bytes")
+	}
+}
+
 func nonSolidArchiveWithCompressedMembers(t testing.TB) []byte {
 	t.Helper()
 	// Content is large enough, relative to the fixed per-block header
