@@ -123,6 +123,43 @@ func (r *Reader) NextEntry() (*Entry, error) {
 	return e, r.latchArchive(err)
 }
 
+// armHeaderDecryption switches the current volume onto the decrypting header
+// path from a HEAD_CRYPT block.
+//
+// Shared by dispatch and nextVolumePayload (splice.go) because EVERY volume of
+// a header-encrypted archive repeats its own HEAD_CRYPT in plaintext, and each
+// volume is a fresh value with its own nil decryptor -- openVolume carries
+// nothing forward. Handling it in only one of the two header-reading paths
+// left a member spanning a volume boundary reading volume two's ciphertext as
+// plaintext, which surfaced as ErrBadHeaderCRC partway through the file.
+//
+// Every failure here is archive-level: once a HEAD_CRYPT is present, every
+// header after it is ciphertext this library cannot read, so there is no
+// member to name and nothing to continue to. Callers latch what this returns.
+func (r *Reader) armHeaderDecryption(h *BlockHeader) error {
+	ch, err := ParseCryptHeader(h)
+	if err != nil {
+		// Classified so a caller can tell "this archive uses an encryption
+		// version this library does not implement" -- the archive need not be
+		// damaged -- from "this header is corrupt", while errors.Is still
+		// reaches the underlying parse failure through either wrap.
+		if errors.Is(err, ErrUnknownEncryptMethod) {
+			return fmt.Errorf("%w: %w", ErrUnsupportedEncryptionVersion, err)
+		}
+		return fmt.Errorf("%w: %w", ErrCorruptArchiveHeader, err)
+	}
+	password, err := r.resolveHeaderPassword(ch)
+	if err != nil {
+		return err
+	}
+	key, err := headerKeyFromPassword(ch, password)
+	if err != nil {
+		return err
+	}
+	r.vol.useEncryptedHeaders(key)
+	return nil
+}
+
 // latchArchive records err on r.fatal, unless it is one of the ordinary
 // end-of-archive signals (io.EOF, ErrNoNextVolume), and returns err
 // unchanged so a call site can wrap a return in one expression.
@@ -315,38 +352,9 @@ func (r *Reader) dispatch(h *BlockHeader) (*Entry, error) {
 		return e, nil
 
 	case HeaderTypeEncryption:
-		ch, err := ParseCryptHeader(h)
-		if err != nil {
-			// Fatal, not skipped -- unlike a damaged later-volume archive
-			// header, where solidity and volume numbering are already known
-			// from the first volume, an unparsed HEAD_CRYPT leaves EVERY
-			// subsequent header unreadable ciphertext. There is no
-			// degraded-but-useful mode to fall back to, so this is
-			// archive-level exactly like the HeaderTypeArchive parse
-			// failure above. Classified so a caller can tell "this archive
-			// uses an encryption version this library does not implement"
-			// (ErrUnsupportedEncryptionVersion -- the archive need not be
-			// damaged) apart from "this header is corrupt"
-			// (ErrCorruptArchiveHeader), while errors.Is still reaches the
-			// underlying parse failure through either wrap. NextEntry
-			// latches this (see Reader.fatal) so a second call cannot
-			// resume past it.
-			if errors.Is(err, ErrUnknownEncryptMethod) {
-				return nil, fmt.Errorf("%w: %w", ErrUnsupportedEncryptionVersion, err)
-			}
-			return nil, fmt.Errorf("%w: %w", ErrCorruptArchiveHeader, err)
-		}
-		password, err := r.resolveHeaderPassword(ch)
-		if err != nil {
-			// Every header after this one is ciphertext, so there is no member
-			// to name and nothing to continue to. Archive-level.
+		if err := r.armHeaderDecryption(h); err != nil {
 			return nil, err
 		}
-		key, err := headerKeyFromPassword(ch, password)
-		if err != nil {
-			return nil, err
-		}
-		r.vol.useEncryptedHeaders(key)
 		return nil, nil
 
 	default:

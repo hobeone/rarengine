@@ -2,7 +2,9 @@ package rarengine
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"io"
 	"testing"
 )
@@ -143,5 +145,64 @@ func TestUnverifiedGuessDoesNotSuppressLaterCandidateScan(t *testing.T) {
 	if !r.hasResolved || r.resolved != rightPassword {
 		t.Fatalf("after a verified match, resolved = %q hasResolved = %v; "+
 			"want %q latched", r.resolved, r.hasResolved, rightPassword)
+	}
+}
+
+// TestEncryptedHeaderMultiVolume pins that a member spanning a volume boundary
+// in a header-encrypted archive decodes.
+//
+// Every volume of such an archive repeats its own HEAD_CRYPT block in
+// plaintext, and each volume is a fresh value whose header decryptor starts
+// nil -- openVolume carries nothing forward. dispatch armed decryption from
+// that block, but nextVolumePayload's continuation scan skipped it, so the
+// rest of volume two's headers were read as plaintext when they were
+// ciphertext and the member died partway through with ErrBadHeaderCRC.
+//
+// The fixture is three volumes produced by `rar a -hpsecret -v9k -m0 -ma5`,
+// so the member genuinely crosses two boundaries and the scan runs twice.
+// Verification is by SHA-256 against the original rather than by an expected-
+// output fixture: the archive's own CRC32 is checked by Close, and an
+// independent digest keeps this test from passing on the library agreeing
+// with itself.
+func TestEncryptedHeaderMultiVolume(t *testing.T) {
+	const (
+		wantSHA256 = "e1736e7aca9926d24deddc82ab7a68319eeaffae732c48e19cd3b9c278f074b6"
+		wantLen    = 24000
+	)
+	parts := []string{
+		"rar5_enchdr_multi.part1.rar",
+		"rar5_enchdr_multi.part2.rar",
+		"rar5_enchdr_multi.part3.rar",
+	}
+	ch := make(chan io.ReadCloser, len(parts))
+	for _, p := range parts {
+		ch <- io.NopCloser(bytes.NewReader(fixtureBytes(t, p)))
+	}
+	close(ch)
+
+	r := NewReader(ch)
+	r.SetPasswords([]string{"secret"})
+
+	e, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("NextEntry: %v", err)
+	}
+	if e.Header.Name != "payload.bin" {
+		t.Fatalf("entry = %q, want payload.bin", e.Header.Name)
+	}
+
+	got, err := io.ReadAll(e)
+	if err != nil {
+		t.Fatalf("reading across volumes: %v -- the continuation scan did not "+
+			"arm header decryption on the next volume", err)
+	}
+	if err := e.Close(); err != nil {
+		t.Fatalf("Close = %v, want nil", err)
+	}
+	if len(got) != wantLen {
+		t.Fatalf("read %d bytes, want %d", len(got), wantLen)
+	}
+	if sum := fmt.Sprintf("%x", sha256.Sum256(got)); sum != wantSHA256 {
+		t.Fatalf("content SHA-256 = %s, want %s", sum, wantSHA256)
 	}
 }

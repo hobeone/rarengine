@@ -105,6 +105,21 @@ func (r *Reader) nextVolumePayload(e *Entry) (io.Reader, error) {
 			return nil, r.latchArchive(err)
 		}
 		if h.Type != HeaderTypeFile {
+			if h.Type == HeaderTypeEncryption {
+				// Every volume of a header-encrypted archive repeats its own
+				// HEAD_CRYPT in plaintext, and each volume is a fresh value
+				// whose header decryptor starts nil. Skipping this block left
+				// the rest of the volume's headers -- including the
+				// continuation this loop is looking for -- read as plaintext
+				// when they are ciphertext, which surfaced as
+				// ErrBadHeaderCRC partway through a member that spanned the
+				// boundary. Archive-level, so it latches like the archive
+				// header below.
+				if aerr := r.armHeaderDecryption(h); aerr != nil {
+					return nil, r.latchArchive(aerr)
+				}
+				continue
+			}
 			if h.Type == HeaderTypeArchive {
 				ah, aerr := ParseArchiveHeader(h)
 				if aerr != nil {
