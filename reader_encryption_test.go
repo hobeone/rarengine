@@ -206,3 +206,56 @@ func TestEncryptedHeaderMultiVolume(t *testing.T) {
 		t.Fatalf("content SHA-256 = %s, want %s", sum, wantSHA256)
 	}
 }
+
+// TestEmptyCandidateDoesNotEndThePasswordScan pins that an unusable
+// candidate costs itself and nothing else.
+//
+// VerifyFilePassword reports ErrPasswordRequired for an empty password,
+// which says that candidate cannot be checked -- a fact about the
+// candidate, not about the archive. Treated as fatal, it ended the scan, so
+// a caller passing "" alongside real guesses (the natural way to say "try
+// no password first") never reached the guess that would have worked.
+//
+// Mutation check: return the error instead of continuing in
+// resolvePassword and this member is refused with ErrPasswordRequired.
+func TestEmptyCandidateDoesNotEndThePasswordScan(t *testing.T) {
+	r := NewReader(encryptedFixtureVolumes(t))
+	r.SetPasswords([]string{"", encryptedFixturePassword})
+
+	e, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("NextEntry: %v", err)
+	}
+	if _, err := io.Copy(io.Discard, e); err != nil && !errors.Is(err, io.EOF) &&
+		!errors.Is(err, ErrChecksumUnsupported) {
+		t.Fatalf("read after an empty first candidate: %v -- the scan stopped "+
+			"at the candidate it could not check", err)
+	}
+	if err := e.Close(); err != nil && !errors.Is(err, ErrChecksumUnsupported) {
+		t.Fatalf("Close = %v, want nil or ErrChecksumUnsupported", err)
+	}
+}
+
+// TestHeaderPasswordIsNotLatchedUnverified pins that resolveHeaderPassword
+// latches a candidate only when a check value proved it, the same rule
+// resolvePassword follows.
+//
+// A latched password suppresses the scan for every later header. Latching
+// one that nothing verified means the archive is committed to whichever
+// candidate sorts first, and header decryption then fails with
+// ErrBadHeaderCRC -- an archive-level failure, latched on Reader.fatal, so
+// the remaining candidates are never reached.
+func TestHeaderPasswordIsNotLatchedUnverified(t *testing.T) {
+	r := NewReader(encryptedFixtureVolumes(t))
+	r.SetPasswords([]string{"wrong-one", encryptedFixturePassword})
+
+	// A crypt header carrying no check value: nothing here can verify a
+	// candidate, so the first is used and must NOT be recorded as resolved.
+	if _, err := r.resolveHeaderPassword(&CryptHeader{}); err != nil {
+		t.Fatalf("resolveHeaderPassword with no check value: %v", err)
+	}
+	if r.hasResolved {
+		t.Fatalf("an unverified candidate was latched as %q; a later header "+
+			"carrying a real check value would never be scanned", r.resolved)
+	}
+}

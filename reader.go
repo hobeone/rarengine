@@ -434,11 +434,18 @@ func (r *Reader) resolvePassword(fh *FileHeader) (string, error) {
 	for _, candidate := range r.passwords {
 		ok, hasCheck, err := VerifyFilePassword(fh, candidate)
 		if err != nil {
+			// An empty candidate cannot be checked against anything, which
+			// is a fact about that candidate and not about the archive. It
+			// used to end the scan, so a caller passing "" alongside real
+			// guesses -- the natural way to say "try no password first" --
+			// never reached the guess that would have worked.
+			if errors.Is(err, ErrPasswordRequired) {
+				continue
+			}
 			return "", err
 		}
 		if !hasCheck {
-			r.resolved, r.hasResolved = candidate, true
-			return r.resolved, nil
+			return candidate, nil
 		}
 		if ok {
 			r.resolved, r.hasResolved = candidate, true
@@ -458,12 +465,26 @@ func (r *Reader) resolveHeaderPassword(ch *CryptHeader) (string, error) {
 	if len(r.passwords) == 0 {
 		return "", ErrPasswordRequired
 	}
+	// No check value at all: the same case resolvePassword handles above,
+	// and for the same reason. Every candidate is unverifiable against this
+	// header, so scanning them is pointless -- and latching the first as
+	// though it were knowledge would suppress the scan for a later header
+	// that DOES carry a check value.
+	if ch.CheckValue == nil {
+		return r.passwords[0], nil
+	}
 	for _, candidate := range r.passwords {
 		ok, hasCheck, err := VerifyPassword(ch, candidate)
 		if err != nil {
+			if errors.Is(err, ErrPasswordRequired) {
+				continue
+			}
 			return "", err
 		}
-		if !hasCheck || ok {
+		if !hasCheck {
+			return candidate, nil
+		}
+		if ok {
 			r.resolved, r.hasResolved = candidate, true
 			return r.resolved, nil
 		}
