@@ -194,7 +194,7 @@ func (e *Entry) verifyChecksum() error {
 	// digest uncheckable, and RAR says so by setting this flag. Gating on
 	// Encrypted would hand the archive a bit that switches verification off.
 	if e.cur.UseMac {
-		return fmt.Errorf("%w: file %q", ErrChecksumUnsupported, e.cur.Name)
+		return fmt.Errorf("%w: file %q", ErrChecksumUnsupported, e.Header.Name)
 	}
 	// Gated on the produced size, which this type enforces, rather than on
 	// IsDir, which the archive asserts and nothing cross-checks. An entry that
@@ -205,12 +205,18 @@ func (e *Entry) verifyChecksum() error {
 	}
 	if e.crc != e.cur.CRC32 {
 		return fmt.Errorf("%w: file %q: computed=%08x header=%08x",
-			ErrCRCMismatch, e.cur.Name, e.crc, e.cur.CRC32)
+			ErrCRCMismatch, e.Header.Name, e.crc, e.cur.CRC32)
 	}
 	return nil
 }
 
+// truncated and the messages in verifyChecksum name the member by
+// e.Header.Name, never by the header in force. The digest and its flags must
+// come from e.cur -- RAR records them on the LAST part -- but the NAME is the
+// member's identity, fixed when it was announced, and a caller matching an
+// error against the entry it was handed should not have to know that a later
+// volume's header could have carried a different one.
 func (e *Entry) truncated() error {
 	return fmt.Errorf("%w: file %q: got %d of %d bytes",
-		ErrTruncatedFile, e.cur.Name, e.size-e.remaining, e.size)
+		ErrTruncatedFile, e.Header.Name, e.size-e.remaining, e.size)
 }

@@ -213,6 +213,19 @@ func (r *Reader) nextVolumePayload(e *Entry) (io.Reader, error) {
 				"Encrypted=%v, first block declared %v",
 				ErrCorruptFileHeader, e.Header.Name, fh.Encrypted, e.Header.Encrypted)
 		}
+		// Same rule, applied to what says this is the same member's bytes at
+		// all. Nothing but the !FirstBlock flag connected a continuation to
+		// the member it was spliced into, so volumes presented out of order,
+		// or an archive built to interleave two members, had another file's
+		// payload delivered as this one's content -- and a method mismatch
+		// fed compressed bytes to the store reader that the first block
+		// selected, or the reverse.
+		if fh.Name != e.Header.Name || fh.Method != e.Header.Method {
+			return nil, fmt.Errorf("%w: file %q: continuation declares name %q "+
+				"method %d, first block declared name %q method %d",
+				ErrCorruptFileHeader, e.Header.Name, fh.Name, fh.Method,
+				e.Header.Name, e.Header.Method)
+		}
 		// Captures the whole-file CRC32, LastBlock and UseMac, all of which
 		// RAR records on the LAST part rather than the first.
 		e.advanceVolume(fh)

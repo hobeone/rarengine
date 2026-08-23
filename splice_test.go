@@ -376,3 +376,55 @@ func TestNewMemberWithABadHeaderSurvivesTheContinuationScan(t *testing.T) {
 		t.Fatalf("reading refused.bin = %v, want ErrUnknownEncryptMethod", err)
 	}
 }
+
+// TestContinuationForADifferentMemberIsRefused pins that a continuation must
+// say it belongs to the member it is being spliced into.
+//
+// Only the !FirstBlock flag connected the two, so volumes presented out of
+// order -- or an archive built to interleave two members -- had another
+// file's payload delivered as this one's content, under this one's name and
+// with a nil error. The method half of the check matters for the same
+// reason: the reader chain is chosen once, from the first block, so a
+// continuation switching method fed compressed bytes to a store reader.
+func TestContinuationForADifferentMemberIsRefused(t *testing.T) {
+	v1 := rar5Archive(t, false, rar5Member(t, memberSpec{
+		name: "split.bin", content: "aaaa", unpackedSz: 8, packedSz: 4, notLast: true,
+	}))
+	v2 := rar5Archive(t, false, rar5Member(t, memberSpec{
+		name: "other.bin", content: "bbbb", notFirst: true,
+	}))
+
+	r := NewReader(volumesOf(v1, v2))
+	e, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("NextEntry: %v", err)
+	}
+	got, err := io.ReadAll(e)
+	if !errors.Is(err, ErrCorruptFileHeader) {
+		t.Fatalf("reading split.bin = %q, %v; want ErrCorruptFileHeader for a "+
+			"continuation naming a different member", got, err)
+	}
+	if bytes.Contains(got, []byte("bbbb")) {
+		t.Fatalf("split.bin was served %q from another member's block", got)
+	}
+}
+
+// TestNilVolumeStreamIsReportedNotDereferenced pins that a nil element on the
+// volumes channel is an error rather than a process kill. It is the caller's
+// bug, but openVolume would read the signature straight out of the nil
+// interface, and a library cannot answer a bad argument by taking the program
+// down with it.
+func TestNilVolumeStreamIsReportedNotDereferenced(t *testing.T) {
+	volumes := make(chan io.ReadCloser, 1)
+	volumes <- nil
+	close(volumes)
+
+	r := NewReader(volumes)
+	e, err := r.NextEntry()
+	if err == nil {
+		t.Fatalf("NextEntry returned %v for a nil volume, want an error", e)
+	}
+	if errors.Is(err, io.EOF) {
+		t.Fatalf("NextEntry reported a clean end of archive for a nil volume")
+	}
+}
