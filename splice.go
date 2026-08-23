@@ -142,8 +142,21 @@ func (r *Reader) nextVolumePayload(e *Entry) (io.Reader, error) {
 			}
 			continue
 		}
-		fh, err := ParseFileHeader(h)
+		fh, err := parseFileHeader(h)
 		if err != nil {
+			if fh != nil && fh.FirstBlock {
+				// A new member whose header failed to parse. Its bytes are
+				// not this member's continuation, so the member in progress
+				// ended short -- and the new member is staged rather than
+				// dropped, exactly as an intact new member is below. The
+				// exported ParseFileHeader stood here and discards the
+				// header it built, so this branch could not exist: the new
+				// member's failure was reported as the spliced member's, and
+				// nextEntry then skipped the block entirely, losing a member
+				// that dispatch would have refused by name.
+				r.staged = h
+				return nil, io.EOF
+			}
 			// Member-level, not archive-level: volume.next() has already
 			// drained the previous block and will drop this one's unclaimed
 			// payload on its way to the following header, so the stream is

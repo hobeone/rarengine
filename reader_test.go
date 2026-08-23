@@ -231,6 +231,13 @@ type memberSpec struct {
 	// ParseFileHeader fails its bounds check while the BLOCK header stays
 	// CRC-valid. That is the case the traversal must skip rather than stop on.
 	badName bool
+
+	// badEncVersion attaches a file-encryption extra record declaring an
+	// unsupported version. It fails LATER than badName does -- inside
+	// parseExtraRecords, after the name has been decoded -- which is the
+	// only failure that yields a header alongside its error, so the member
+	// can be refused by name instead of vanishing from the listing.
+	badEncVersion bool
 }
 
 // rar5Member builds one RAR5 file block followed by its payload.
@@ -293,11 +300,28 @@ func rar5Member(t testing.TB, s memberSpec) []byte {
 		blockFlags |= HeaderFlagDataNotLast
 	}
 
+	// The extra area sits at the END of the header payload, and its length is
+	// declared before the data size -- so it has to be built before the block
+	// header fields are written.
+	var extra bytes.Buffer
+	if s.badEncVersion {
+		var rec bytes.Buffer
+		rec.Write(EncodeVint(1))  // record type: encryption
+		rec.Write(EncodeVint(99)) // version: not 0, so unsupported
+		extra.Write(EncodeVint(uint64(rec.Len())))
+		extra.Write(rec.Bytes())
+		blockFlags |= HeaderFlagHasExtra
+	}
+
 	var p bytes.Buffer
 	p.Write(EncodeVint(HeaderTypeFile))
 	p.Write(EncodeVint(blockFlags))
+	if extra.Len() > 0 {
+		p.Write(EncodeVint(uint64(extra.Len())))
+	}
 	p.Write(EncodeVint(uint64(packed)))
 	p.Write(f.Bytes())
+	p.Write(extra.Bytes())
 
 	var out bytes.Buffer
 	out.Write(rar5Block(p.Bytes()))

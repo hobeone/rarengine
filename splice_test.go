@@ -331,3 +331,48 @@ func TestSplicePreservesReadErrorAlongsideBytes(t *testing.T) {
 			"caller would see a clean stream", err, wantErr)
 	}
 }
+
+// TestNewMemberWithABadHeaderSurvivesTheContinuationScan pins that a member
+// whose header fails to parse is still reported, even when the scan that
+// found it was looking for something else.
+//
+// nextVolumePayload called the exported ParseFileHeader, which discards the
+// header it built. With no header there is no FirstBlock to test, so a NEW
+// member's parse failure was returned as the SPLICED member's failure, and
+// the new member was never staged -- the next nextEntry call asked
+// volume.next() for a header, which skipped the unclaimed block, and the
+// member disappeared from the listing without a name.
+//
+// The internal parseFileHeader returns the header alongside the error for
+// exactly this class of failure. Asserting the refused member by name is the
+// point: it is the difference between "refused" and "gone".
+func TestNewMemberWithABadHeaderSurvivesTheContinuationScan(t *testing.T) {
+	v1 := rar5Archive(t, false, rar5Member(t, memberSpec{
+		name: "split.bin", content: "aaaa", unpackedSz: 8, packedSz: 4, notLast: true,
+	}))
+	v2 := rar5Archive(t, false, rar5Member(t, memberSpec{
+		name: "refused.bin", content: "bbbb", badEncVersion: true,
+	}))
+
+	r := NewReader(volumesOf(v1, v2))
+
+	first, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("first NextEntry: %v", err)
+	}
+	if _, err := io.Copy(io.Discard, first); !errors.Is(err, ErrTruncatedFile) {
+		t.Fatalf("reading the split member = %v, want ErrTruncatedFile", err)
+	}
+
+	second, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("second NextEntry: %v -- the member whose header failed to "+
+			"parse was dropped instead of refused", err)
+	}
+	if second.Header.Name != "refused.bin" {
+		t.Fatalf("second entry = %q, want refused.bin", second.Header.Name)
+	}
+	if _, err := io.ReadAll(second); !errors.Is(err, ErrUnknownEncryptMethod) {
+		t.Fatalf("reading refused.bin = %v, want ErrUnknownEncryptMethod", err)
+	}
+}
