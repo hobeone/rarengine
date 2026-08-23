@@ -6,6 +6,7 @@ import (
 	"errors"
 	"hash/crc32"
 	"io"
+	"math"
 	"testing"
 )
 
@@ -521,4 +522,34 @@ func TestNegativeSizeContinuationBlockSkipsSilently(t *testing.T) {
 		t.Fatalf("NextEntry returned %+v, want after.bin (continuation block must not surface)", e)
 	}
 	_ = e.Close()
+}
+
+// TestBombRatioSurvivesAnAbsurdPackedSize pins that the expansion guard
+// answers the question it was asked, for every declared packed size.
+//
+// The ratio was computed as 1000*PackedSize, which wraps negative for a
+// packed size above MaxInt64/1000. Every member over 1 MB then compared
+// greater than a negative number and was refused as a bomb -- the guard
+// firing on archives it exists to let through.
+//
+// Nothing real declares 9 PB packed, which is the point: the value is
+// attacker-chosen, and a guard that can be switched into refusing
+// everything is as much a defect as one that can be switched off.
+func TestBombRatioSurvivesAnAbsurdPackedSize(t *testing.T) {
+	member := rar5Member(t, memberSpec{
+		name:       "honest.bin",
+		content:    "payload",
+		unpackedSz: 2 << 20,                // over the 1 MB floor the guard applies above
+		packedSz:   math.MaxInt64/1000 + 1, // one past where the product wraps
+	})
+	r := NewReader(volumesOf(rar5Archive(t, false, member)))
+
+	e, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("NextEntry: %v", err)
+	}
+	if _, err := io.ReadAll(e); errors.Is(err, ErrRarBombDetected) {
+		t.Fatal("a member expanding 2 MiB from an enormous packed size was " +
+			"refused as a rar bomb; the ratio wrapped negative")
+	}
 }

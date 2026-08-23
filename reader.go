@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 )
 
 // Reader is a sequential, tar-like reader over a RAR5 archive delivered as a
@@ -366,7 +367,16 @@ func (r *Reader) dispatch(h *BlockHeader) (*Entry, error) {
 		if !fh.FirstBlock {
 			return nil, nil
 		}
-		if fh.UnpackedSize > 1024*1024 && fh.UnpackedSize > 1000*fh.PackedSize {
+		// The multiplication is guarded, not replaced by a division: a
+		// division floors, so it would let a member declaring exactly one
+		// byte past the ratio through, and this guard must not be weakened.
+		// A packed size above MaxInt64/1000 cannot reach the ratio at all --
+		// no unpacked size fits -- so it is not a bomb, whereas the
+		// unguarded product wrapped negative there and refused every member
+		// over 1 MB.
+		expands := fh.PackedSize == 0 ||
+			(fh.PackedSize <= math.MaxInt64/1000 && fh.UnpackedSize > 1000*fh.PackedSize)
+		if fh.UnpackedSize > 1024*1024 && expands {
 			r.win.MarkIncomplete()
 			return terminalEntry(fh, ErrRarBombDetected), nil
 		}
@@ -567,6 +577,13 @@ func (r *Reader) nextVolume() error {
 	rc, ok := <-r.volumes
 	if !ok {
 		return ErrNoNextVolume
+	}
+	if rc == nil {
+		// A nil element on the channel is the caller's bug, but the library
+		// must report it rather than dereference it: openVolume would read
+		// the signature straight out of a nil interface and take the process
+		// down with it.
+		return errors.New("rarengine: nil volume stream on the volumes channel")
 	}
 	v, err := openVolume(rc)
 	if err != nil {
