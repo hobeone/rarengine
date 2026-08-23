@@ -163,9 +163,11 @@ func TestEntryAdvanceVolumeChangesLastBlock(t *testing.T) {
 	}
 }
 
-// short reports whether the member stopped before its declared size --
-// false while bytes remain undelivered, false again once they are all read,
-// and true only when a short Read leaves the budget unmet.
+// short reports whether the member's declared size is still unmet, which is
+// true from the moment it is created -- before a single byte has been read --
+// and becomes false only once every declared byte has been delivered. It is a
+// statement about the budget, not about whether a Read has failed, which is
+// why finishActive can consult it on a member the caller merely abandoned.
 func TestEntryShortReflectsRemainingBudget(t *testing.T) {
 	const content = "hello world"
 	e := entryOver(content, headerFor(content, true))

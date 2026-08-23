@@ -122,7 +122,7 @@ func TestSolidArchiveSkipStillMaintainsWindow(t *testing.T) {
 }
 
 // TestNonSolidAbandonSkipsDecode is the mutation-sensitive pin that
-// TestListingNonSolidArchiveDoesNotDecompress's byte count cannot be, per the
+// TestListingNonSolidArchiveReadsBoundedBytes's byte count cannot be, per the
 // comment on that test: a non-solid abandon must never write the member's
 // bytes into the window, because that write is exactly the decode work this
 // design exists to skip.
