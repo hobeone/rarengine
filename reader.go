@@ -235,7 +235,7 @@ func (r *Reader) nextEntry() (*Entry, error) {
 			h, r.staged = r.staged, nil
 		} else {
 			if r.vol == nil {
-				if err := r.nextVolume(); err != nil {
+				if err := r.openNextVolume(); err != nil {
 					// Running out of volumes with no member in progress is
 					// the archive being over, which NextEntry reports as
 					// io.EOF -- the one thing its doc comment promises.
@@ -374,7 +374,7 @@ func (r *Reader) dispatch(h *BlockHeader) (*Entry, error) {
 			// back-references assume otherwise. Marking only the named path
 			// left exactly the unreportable failures decoding a successor
 			// against history nobody wrote.
-			if fh == nil || fh.FirstBlock {
+			if fh == nil {
 				r.win.MarkIncomplete()
 			}
 			return nil, nil
@@ -601,6 +601,28 @@ func (s *storeReader) Read(p []byte) (int, error) {
 // behind. Under the previous design this had to be maintained by hand at each
 // exit, and a volume left standing after a failure was read again at whatever
 // offset the failure stopped at.
+// openNextVolume advances to the next volume, skipping any that cannot be
+// opened because they ended inside their signature.
+//
+// Empty and truncated parts are damage, recorded and reported once the
+// volumes run out -- not a reason to stop reading the parts that are still
+// intact, which is the same judgement the scan makes about a cut inside a
+// block. A bad signature is deliberately NOT skipped: that is a different
+// fact, a stream that is not this archive, and it stays fatal.
+func (r *Reader) openNextVolume() error {
+	for {
+		err := r.nextVolume()
+		if err == nil {
+			return nil
+		}
+		if errors.Is(err, io.ErrUnexpectedEOF) {
+			r.damaged = err
+			continue
+		}
+		return err
+	}
+}
+
 func (r *Reader) nextVolume() error {
 	if r.vol != nil {
 		_ = r.vol.Close()
