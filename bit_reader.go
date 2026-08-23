@@ -38,14 +38,6 @@ func (r *BitReader) Reset(buf []byte, limitBits int) {
 	r.bitsRead = 0
 }
 
-// RefillBuffer updates the source buffer for incremental stream reading,
-// preserving any unread bits in the bit cache.
-func (r *BitReader) RefillBuffer(buf []byte, limitBits int) {
-	r.buf = buf
-	r.off = 0
-	r.limit += limitBits
-}
-
 // fill refills the bit buffer v so it contains 57-64 valid bits.
 //
 // Hot path: when at least 8 bytes remain, load them as a single big-endian
@@ -114,21 +106,8 @@ func (r *BitReader) Advance(k uint8) {
 	r.bitsRead += int(k)
 }
 
-// AlignByte aligns the current bit stream to the next byte boundary.
-func (r *BitReader) AlignByte() {
-	discard := r.n % 8
-	r.v >>= discard
-	r.n -= discard
-	r.bitsRead += int(discard)
-}
-
 // ReadByte reads a single byte from the bit reader.
 func (r *BitReader) ReadByte() (byte, error) {
 	val, err := r.ReadBits(8)
 	return byte(val), err
-}
-
-// BitsRead returns the total number of bits read.
-func (r *BitReader) BitsRead() int {
-	return r.bitsRead
 }

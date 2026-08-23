@@ -32,8 +32,8 @@ func TestMemberSplicesAcrossVolumes(t *testing.T) {
 
 // The defect this fixes: a continuation claiming encryption when the first
 // block did not had that volume's ciphertext spliced in and delivered verbatim
-// as content, with Encrypted reported false. PR #44 fixed the same hole for
-// RAR3 and it was never applied to RAR5.
+// as content, with Encrypted reported false. PR #44 fixed the same hole in
+// the RAR3 engine since deleted, and the fix was never carried across.
 //
 // This exercises the mismatch from the other direction from the brief's
 // original sketch: the FIRST block declares encryption (a real encrypted

@@ -37,9 +37,8 @@ var (
 	ErrPasswordRequired = errors.New("rarengine: password required for encrypted file")
 
 	// ErrUnsupportedFormat reports an archive this library cannot decode.
-	// RAR3 archives reach this: their headers remain parseable through
-	// ReadRAR3BlockHeader and ParseRAR3FileHeader for callers that inspect
-	// archives, but no RAR3 decoder is provided.
+	// A RAR3 signature reaches this: it is recognised so it can be refused
+	// by name, and nothing beyond the signature is parsed.
 	ErrUnsupportedFormat = errors.New("rarengine: unsupported archive format")
 
 	// ErrTruncatedFile is returned when the archive stream ends before a file's

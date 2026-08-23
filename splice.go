@@ -79,7 +79,7 @@ func (s *multiVolumePayloadReader) Read(p []byte) (int, error) {
 // service records -- because volume.next() skips each block's declared payload
 // on the way to the following header. Nothing here has to discard.
 func (r *Reader) nextVolumePayload(e *Entry) (io.Reader, error) {
-	if err := r.nextVolume(); err != nil {
+	if err := r.openNextVolume(); err != nil {
 		return nil, r.latchArchive(err)
 	}
 	for {
@@ -112,7 +112,7 @@ func (r *Reader) nextVolumePayload(e *Entry) (io.Reader, error) {
 				}
 				_ = r.vol.Close()
 				r.vol = nil
-				if verr := r.nextVolume(); verr != nil {
+				if verr := r.openNextVolume(); verr != nil {
 					// Do not translate to io.EOF: reaching here means a read
 					// already in progress could not find its continuation, so
 					// the member is unfinished. Entry.Read records this as the
@@ -139,7 +139,7 @@ func (r *Reader) nextVolumePayload(e *Entry) (io.Reader, error) {
 				// follows.
 				_ = r.vol.Close()
 				r.vol = nil
-				if verr := r.nextVolume(); verr != nil {
+				if verr := r.openNextVolume(); verr != nil {
 					return nil, r.latchArchive(verr)
 				}
 				continue

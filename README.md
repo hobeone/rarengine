@@ -85,11 +85,10 @@ on a real block boundary, so the archive stays readable past it.
 
 ### RAR3 archives
 
-`rarengine` decodes RAR5 only. `NewReader` refuses a RAR3 signature with
-`ErrUnsupportedFormat` before any per-member parsing runs. `ReadRAR3BlockHeader`
-and `ParseRAR3FileHeader` remain exported for a caller that only needs to
-inspect a RAR3 archive's headers — names, sizes, encryption flags — without
-decoding content.
+`rarengine` is RAR5 only. A RAR3 signature is recognised so it can be refused
+by name — `ErrUnsupportedFormat`, before any per-member parsing runs — and
+nothing past the signature is parsed. A caller that needs to inspect a RAR3
+archive should hand it to `unrar`.
 
 ---
 

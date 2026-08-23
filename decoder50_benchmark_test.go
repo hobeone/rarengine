@@ -35,9 +35,9 @@ func BenchmarkFilterExecution(b *testing.B) {
 			case 0:
 				out = FilterDelta(int(f.param), filterBuf, filterOutBuf)
 			case 1:
-				out = FilterE8(0xe8, true, filterBuf, tot)
+				out = FilterE8(0xe8, filterBuf, tot)
 			case 2:
-				out = FilterE8(0xe9, true, filterBuf, tot)
+				out = FilterE8(0xe9, filterBuf, tot)
 			case 3:
 				out = FilterArm(filterBuf, tot)
 			}

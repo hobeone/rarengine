@@ -54,7 +54,7 @@ func FilterArm(buf []byte, offset int64) []byte {
 }
 
 // FilterE8 relocates relative CALL/JMP offset addresses to absolute offsets in x86 executables.
-func FilterE8(c byte, v5 bool, buf []byte, offset int64) []byte {
+func FilterE8(c byte, buf []byte, offset int64) []byte {
 	off := int32(offset)
 	for b := buf; len(b) >= 5; {
 		if filterE8ScanSIMD != nil && len(b) >= 32 {
@@ -77,9 +77,7 @@ func FilterE8(c byte, v5 bool, buf []byte, offset int64) []byte {
 		if ch != 0xe8 && ch != c {
 			continue
 		}
-		if v5 {
-			off %= fileSize
-		}
+		off %= fileSize
 		addr := int32(binary.LittleEndian.Uint32(b))
 		if addr < 0 {
 			if addr+off >= 0 {

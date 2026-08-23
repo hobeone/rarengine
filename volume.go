@@ -2,6 +2,7 @@ package rarengine
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 )
@@ -54,15 +55,29 @@ type volume struct {
 
 var rar5Signature = []byte{0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x01, 0x00}
 
+// signatureReadError names a volume that ended inside its own signature.
+//
+// io.ReadFull reports a stream holding nothing at all as bare io.EOF, which
+// travels all the way out of NextEntry as "the archive is over" -- so an
+// empty volume ended the traversal and every volume behind it went unread,
+// with the caller told the set was complete. A zero-length part is an
+// ordinary way for a download to fail, which is exactly why it must not be
+// indistinguishable from the end of the archive.
+func signatureReadError(err error) error {
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return fmt.Errorf("%w: volume ended inside its signature", io.ErrUnexpectedEOF)
+	}
+	return err
+}
+
 // openVolume reads and validates the RAR5 signature, leaving v positioned on
-// the first block boundary. A RAR3 signature is reported as
-// ErrUnsupportedFormat: its headers stay parseable through
-// ReadRAR3BlockHeader for callers that inspect archives, but there is no RAR3
-// decoder to hand the volume to.
+// the first block boundary. A RAR3 signature is recognised only so it can be
+// reported as ErrUnsupportedFormat by name; nothing past the signature is
+// parsed.
 func openVolume(rc io.ReadCloser) (*volume, error) {
 	var sig [8]byte
 	if _, err := io.ReadFull(rc, sig[:7]); err != nil {
-		return nil, err
+		return nil, signatureReadError(err)
 	}
 	if !bytes.Equal(sig[:6], rar5Signature[:6]) {
 		return nil, fmt.Errorf("%w: bad signature", ErrUnsupportedFormat)
@@ -72,7 +87,7 @@ func openVolume(rc io.ReadCloser) (*volume, error) {
 		return nil, fmt.Errorf("%w: RAR3", ErrUnsupportedFormat)
 	case 0x01:
 		if _, err := io.ReadFull(rc, sig[7:]); err != nil {
-			return nil, err
+			return nil, signatureReadError(err)
 		}
 		if sig[7] != 0x00 {
 			return nil, fmt.Errorf("%w: bad signature", ErrUnsupportedFormat)
