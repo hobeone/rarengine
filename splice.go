@@ -115,7 +115,17 @@ func (r *Reader) nextVolumePayload(e *Entry) (io.Reader, error) {
 		}
 		fh, err := ParseFileHeader(h)
 		if err != nil {
-			return nil, r.latchArchive(err)
+			// Member-level, not archive-level: volume.next() has already
+			// drained the previous block and will drop this one's unclaimed
+			// payload on its way to the following header, so the stream is
+			// standing somewhere vouchable and the members behind this one
+			// are still readable. Latching it here ended the whole archive
+			// for one member's corrupt continuation -- and dispatch treats
+			// the identical failure as a per-member outcome, so latching was
+			// also the two paths disagreeing about the same header. The
+			// encryption-claim check below returns member-level for the same
+			// reason.
+			return nil, err
 		}
 		if fh.FirstBlock {
 			// A new member where a continuation was expected: the member in

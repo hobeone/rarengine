@@ -242,3 +242,48 @@ func TestMissingContinuationDoesNotConsumeNextMember(t *testing.T) {
 		t.Fatalf("survivor.bin Close = %v, want nil", err)
 	}
 }
+
+// TestCorruptContinuationHeaderCostsOneMember pins that a member whose
+// continuation header does not parse costs that member and no more.
+//
+// volume.next() has already drained the previous block and drops this one's
+// unclaimed payload on the way to the following header, so the stream is
+// standing somewhere vouchable and every member behind it is still readable.
+// Latching the failure as archive-level ended the entire archive for one
+// member's corruption -- and dispatch treats the identical parse failure as a
+// per-member outcome, so latching also had the two paths disagreeing about
+// the same header.
+func TestCorruptContinuationHeaderCostsOneMember(t *testing.T) {
+	v1 := rar5Archive(t, false, rar5Member(t, memberSpec{
+		name: "split.bin", content: "aaaa", unpackedSz: 8, packedSz: 4, notLast: true,
+	}))
+	v2 := rar5Archive(t, false,
+		// badName fails ParseFileHeader's name bounds check while the BLOCK
+		// header stays CRC-valid, so the continuation scan reaches a header it
+		// cannot parse.
+		rar5Member(t, memberSpec{name: "split.bin", content: "bbbb", notFirst: true, badName: true}),
+		rar5Member(t, memberSpec{name: "after.bin", content: "still here", withCRC: true}),
+	)
+
+	r := NewReader(volumesOf(v1, v2))
+
+	first, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("first NextEntry: %v", err)
+	}
+	if _, err := io.Copy(io.Discard, first); err == nil {
+		t.Fatal("reading the split member succeeded; want its continuation failure")
+	}
+
+	second, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("second NextEntry: %v -- one member's corrupt continuation "+
+			"ended the whole archive", err)
+	}
+	if second.Header.Name != "after.bin" {
+		t.Fatalf("second entry = %q, want after.bin", second.Header.Name)
+	}
+	if got, err := io.ReadAll(second); err != nil || string(got) != "still here" {
+		t.Fatalf("after.bin = %q, %v; want \"still here\", nil", got, err)
+	}
+}
