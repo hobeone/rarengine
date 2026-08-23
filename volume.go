@@ -55,10 +55,9 @@ type volume struct {
 var rar5Signature = []byte{0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x01, 0x00}
 
 // openVolume reads and validates the RAR5 signature, leaving v positioned on
-// the first block boundary. A RAR3 signature is reported as
-// ErrUnsupportedFormat: its headers stay parseable through
-// ReadRAR3BlockHeader for callers that inspect archives, but there is no RAR3
-// decoder to hand the volume to.
+// the first block boundary. A RAR3 signature is recognised only so it can be
+// reported as ErrUnsupportedFormat by name; nothing past the signature is
+// parsed.
 func openVolume(rc io.ReadCloser) (*volume, error) {
 	var sig [8]byte
 	if _, err := io.ReadFull(rc, sig[:7]); err != nil {

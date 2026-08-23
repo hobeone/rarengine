@@ -13,8 +13,8 @@ import (
 // next header read.
 //
 // The vulnerability these cover (#48) is that a block header may declare
-// payload whatever its type -- RAR5 reads DataSize whenever HeaderFlagHasData
-// is set, RAR3 whenever longBlock is, and neither consults the block type -- so
+// payload whatever its type -- DataSize is read whenever HeaderFlagHasData is
+// set, and nothing consults the block type -- so
 // a crafted archive can put a complete, CRC-valid file entry in that region.
 // Whatever fails to consume it leaves the next header to be parsed out of
 // attacker-chosen bytes, and NextEntry hands back an entry that exists nowhere

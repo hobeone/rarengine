@@ -102,23 +102,11 @@ type FileHeader struct {
 	HasCRC32     bool
 	HasBlake2sp  bool
 	Blake2sp     []byte // 32-byte BLAKE2sp hash
-	// Encrypted reports that the member's content is encrypted: RAR5's
-	// encryption record, or RAR3's LHD_PASSWORD (0x0004). Not RAR3's
-	// LHD_SALT (0x0400), which says only that eight salt bytes follow the
-	// name -- reading the salt bit as encryption is how an encrypted member
-	// carrying no salt came to be decoded as though it were plaintext.
-	//
-	// Reader.NextEntry only ever traverses RAR5 archives -- openVolume
-	// refuses a RAR3 signature outright, before any per-member parsing runs
-	// -- so a RAR3-flavoured Encrypted value is observed only by a caller
-	// that calls ParseRAR3FileHeader directly for inspection. RAR5 members
-	// are decrypted normally by NextEntry and returned with this set.
+	// Encrypted reports that the member's content is encrypted, from RAR5's
+	// encryption extra record.
 	Encrypted bool
 	KdfCount  int
-	// Salt is the PBKDF2 salt for an encrypted member. For RAR3, LHD_SALT and
-	// LHD_PASSWORD are each independently a claim of encryption (see
-	// Encrypted's comment); a caller that wants full encryption-claim
-	// detection across both bits should check Encrypted || len(Salt) > 0.
+	// Salt is the PBKDF2 salt for an encrypted member.
 	Salt             []byte
 	IV               []byte
 	UseMac           bool

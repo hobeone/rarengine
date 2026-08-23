@@ -167,7 +167,7 @@ This repository is fully indexed by **Repowise** and supports MCP (Model Context
 | **Encryption** | AES-256-CBC decryption and PBKDF2-HMAC-SHA256 key derivation. | [crypto.go](./crypto.go) |
 | **Decoding & Decompression** | LZ77 sliding window history, 10-bit direct-lookup Huffman tables, MSB bit reader, and V5 dynamic state-machine. | [decoder50.go](./decoder50.go), [huffman.go](./huffman.go), [bit_reader.go](./bit_reader.go), [window.go](./window.go) |
 | **Post-Processing Filters** | SIMD/Assembly x86 relative E8 branch relocation, ARM relocations, and byte-striping delta filters. | [filters.go](./filters.go), `filter_arm_amd64.s`, `filter_e8_amd64.s` |
-| **Header Parsing & Traversal Safe** | RAR5 block, file, and archive header parsers. RAR3 header parsing only (no RAR3 decoding). OS-independent traversal sanitization. | [header.go](./header.go), [header_rar3.go](./header_rar3.go), [vint.go](./vint.go) |
+| **Header Parsing & Traversal Safe** | RAR5 block, file, and archive header parsers. OS-independent traversal sanitization. | [header.go](./header.go), [vint.go](./vint.go) |
 
 ### Churn Hotspots & Biomarkers
 
