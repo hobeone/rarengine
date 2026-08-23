@@ -650,3 +650,51 @@ func TestResetSeversARetainedEntry(t *testing.T) {
 		t.Fatalf("retained Entry error = %v, want ErrTruncatedFile", err)
 	}
 }
+
+// TestFatalLatchedMidCallOutrunsNoEntry pins that an archive-level failure
+// latched partway through a NextEntry call ends that call, rather than being
+// overtaken by whatever the scan found next.
+//
+// The trigger is a solid archive, a multi-volume member the caller abandons,
+// and a corrupt archive header in the next volume. finishActive Closes the
+// abandoned member -- solid, so it drains -- and that drain runs through the
+// splice into volume two, where the malformed archive header latches r.fatal.
+// finishActive discards the error, because its result is the member's verdict
+// and not the archive's. The scan loop then reads the bytes sitting after that
+// untrusted header, and dispatch turns them into a member.
+//
+// Before the re-check, that member came back with a NIL error: latchArchive
+// only records, and returns its argument unchanged, so a nil scan error never
+// consulted r.fatal. The latch bit on the call after -- one fabricated member
+// too late, which is precisely the fabrication the latch exists to stop.
+func TestFatalLatchedMidCallOutrunsNoEntry(t *testing.T) {
+	v1 := rar5Archive(t, true, rar5Member(t, memberSpec{
+		name: "solid.bin", content: "aaaa", unpackedSz: 8, packedSz: 4,
+		solid: true, notLast: true,
+	}))
+	v2 := malformedArchiveHeaderStream(t, "SHOULD_NEVER_BE_REACHABLE.txt")
+
+	r := NewReader(volumesOf(v1, v2))
+
+	first, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("first NextEntry: %v", err)
+	}
+	if first.Header.Name != "solid.bin" {
+		t.Fatalf("first entry = %q, want solid.bin", first.Header.Name)
+	}
+	// Abandoned deliberately: the drain happens inside the NEXT call.
+
+	second, err := r.NextEntry()
+	if second != nil {
+		t.Fatalf("second NextEntry returned %q -- a member built from the "+
+			"bytes after a malformed archive header", second.Header.Name)
+	}
+	if !errors.Is(err, ErrCorruptArchiveHeader) {
+		t.Fatalf("second NextEntry error = %v, want ErrCorruptArchiveHeader", err)
+	}
+	// And it stays fatal.
+	if _, err := r.NextEntry(); !errors.Is(err, ErrCorruptArchiveHeader) {
+		t.Fatalf("third NextEntry error = %v, want the latched error again", err)
+	}
+}

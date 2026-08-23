@@ -120,7 +120,22 @@ func (r *Reader) NextEntry() (*Entry, error) {
 		return nil, r.fatal
 	}
 	e, err := r.nextEntry()
-	return e, r.latchArchive(err)
+	if err != nil {
+		return nil, r.latchArchive(err)
+	}
+	// A latch set DURING this call must not be outrun by whatever the scan
+	// went on to find. finishActive drains an abandoned solid member through
+	// the splice, which reaches every archive-level failure nextVolumePayload
+	// latches -- a corrupt archive header in the continuation volume, say --
+	// and it discards that error because its own result is the member's, not
+	// the archive's. The scan loop then read the bytes after that untrusted
+	// header and dispatch built a member out of them, which was returned with
+	// a nil error because latchArchive(nil) never consults r.fatal. The latch
+	// only bit on the following call, one fabricated member too late.
+	if r.fatal != nil {
+		return nil, r.fatal
+	}
+	return e, nil
 }
 
 // armHeaderDecryption switches the current volume onto the decrypting header
