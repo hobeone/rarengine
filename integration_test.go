@@ -65,7 +65,7 @@ func TestIntegration_MultiVolume(t *testing.T) {
 	for {
 		e, err := r.NextEntry()
 		if err != nil {
-			if errors.Is(err, rarengine.ErrNoNextVolume) || err == io.EOF {
+			if errors.Is(err, io.EOF) {
 				break
 			}
 			t.Fatalf("NextEntry() failed: %v", err)
@@ -330,7 +330,7 @@ func TestIntegration_Oracle(t *testing.T) {
 			for {
 				e, err := r.NextEntry()
 				if err != nil {
-					if errors.Is(err, rarengine.ErrNoNextVolume) || err == io.EOF {
+					if errors.Is(err, io.EOF) {
 						break
 					}
 					t.Fatalf("NextEntry() failed: %v", err)

@@ -47,6 +47,16 @@ func (s *multiVolumePayloadReader) Read(p []byte) (int, error) {
 			if s.e.lastBlock() {
 				return 0, io.EOF
 			}
+			// Unless the volume was cut inside the payload it declared. The
+			// LimitedReader reports EOF either way, so without this the
+			// missing bytes were stitched over with the next volume's
+			// continuation and the member completed -- reporting success for
+			// content it never received, or a CRC mismatch that names the
+			// wrong cause.
+			if s.r.vol.bodyShort() {
+				return 0, fmt.Errorf("%w: file %q: volume ended inside its payload",
+					io.ErrUnexpectedEOF, s.e.Header.Name)
+			}
 			next, nextErr := s.r.nextVolumePayload(s.e)
 			if nextErr != nil {
 				return 0, nextErr
@@ -87,6 +97,15 @@ func (r *Reader) nextVolumePayload(e *Entry) (io.Reader, error) {
 			// declared bytes) but it silently dropped the volume advance
 			// the old case also provided.
 			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				// A volume cut inside some OTHER block -- an end header
+				// claiming a payload it does not carry, say -- is spent, not
+				// disqualifying: this member's own bytes are whole in the
+				// volumes either side of it, and multiVolumePayloadReader.Read
+				// is what refuses a cut through THIS member's payload. So the
+				// scan advances, and only records that the set is damaged.
+				if !errors.Is(err, io.EOF) {
+					r.damaged = err
+				}
 				_ = r.vol.Close()
 				r.vol = nil
 				if verr := r.nextVolume(); verr != nil {

@@ -255,8 +255,8 @@ func TestTerminatorPayloadUnreachableWhenChannelCloses_RAR5(t *testing.T) {
 	ch := keepReadableVolumes(vol1.Bytes())
 
 	r := NewReader(ch)
-	if _, err := r.NextEntry(); !errors.Is(err, ErrNoNextVolume) {
-		t.Fatalf("NextEntry: got %v, want ErrNoNextVolume", err)
+	if _, err := r.NextEntry(); !errors.Is(err, io.EOF) {
+		t.Fatalf("NextEntry: got %v, want io.EOF", err)
 	}
 	if e, err := r.NextEntry(); err == nil {
 		t.Fatalf("second NextEntry surfaced %q out of the end header's payload", e.Header.Name)

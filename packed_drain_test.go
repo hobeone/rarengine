@@ -237,9 +237,12 @@ func TestPackedRemainder_NoReadAfterVolumeClose(t *testing.T) {
 }
 
 // TestPackedRemainder_NoJoinOnCleanArchiveEnd guards the error value a caller
-// actually sees when a multi-volume set simply runs out. Wrapping that in a
-// join would break identity comparisons against the sentinel, which is how
-// several loops in this repo decide the archive is over.
+// actually sees when a multi-volume set simply runs out: the bare io.EOF
+// sentinel, by identity. Wrapping it in a join would break the identity
+// comparisons callers use to decide the archive is over -- and reporting
+// anything else would mean a healthy set that reached its end is
+// indistinguishable from one that ended on damage, which is the whole
+// distinction Reader.damaged exists to keep.
 func TestPackedRemainder_NoJoinOnCleanArchiveEnd(t *testing.T) {
 	// Untrimmed: the archive is healthy and read to completion, so the only
 	// thing left to report is that no further volume exists.
@@ -255,10 +258,10 @@ func TestPackedRemainder_NoJoinOnCleanArchiveEnd(t *testing.T) {
 
 	_, err = r.NextEntry()
 	//nolint:errorlint // identity is the property under test, not equivalence.
-	if err != ErrNoNextVolume {
+	if err != io.EOF {
 		t.Errorf("NextEntry at the end of a healthy archive returned %v (%T); "+
-			"want the bare ErrNoNextVolume sentinel. Wrapping it in a join "+
-			"breaks the identity comparisons callers use to stop looping", err, err)
+			"want the bare io.EOF sentinel. Wrapping it in a join breaks the "+
+			"identity comparisons callers use to stop looping", err, err)
 	}
 }
 
@@ -349,8 +352,8 @@ func TestRefusedFile_CorruptHeaderPayloadIsDropped(t *testing.T) {
 		t.Fatalf("NextEntry#2 surfaced %q out of the refused file's payload; "+
 			"want end of archive", e2.Header.Name)
 	}
-	if !errors.Is(err, io.EOF) && !errors.Is(err, ErrNoNextVolume) {
-		t.Fatalf("NextEntry#2 error = %v, want io.EOF or ErrNoNextVolume", err)
+	if !errors.Is(err, io.EOF) {
+		t.Fatalf("NextEntry#2 error = %v, want io.EOF", err)
 	}
 }
 

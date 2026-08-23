@@ -81,7 +81,7 @@ func BenchmarkDecompress_Compress(b *testing.B) {
 		for {
 			e, err := r.NextEntry()
 			if err != nil {
-				if errors.Is(err, rarengine.ErrNoNextVolume) || errors.Is(err, io.EOF) {
+				if errors.Is(err, io.EOF) {
 					break
 				}
 				b.Fatal(err)
@@ -129,7 +129,7 @@ func BenchmarkDecompress_Solid(b *testing.B) {
 		for {
 			e, err := r.NextEntry()
 			if err != nil {
-				if errors.Is(err, rarengine.ErrNoNextVolume) || errors.Is(err, io.EOF) {
+				if errors.Is(err, io.EOF) {
 					break
 				}
 				b.Fatal(err)

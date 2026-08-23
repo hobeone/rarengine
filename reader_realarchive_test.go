@@ -83,7 +83,7 @@ type realArchiveResult struct {
 
 // drainReader reads every member to completion via io.Copy so each one's
 // checksum is verified, then records its Close() verdict. It returns once
-// NextEntry reports the archive is over (io.EOF or ErrNoNextVolume); any
+// NextEntry reports the archive is over (io.EOF); any
 // other NextEntry error fails the test immediately, since these tests are
 // about per-member damage, not archive-level failure.
 func drainReader(t *testing.T, r *Reader) []realArchiveResult {
@@ -92,7 +92,7 @@ func drainReader(t *testing.T, r *Reader) []realArchiveResult {
 	for {
 		e, err := r.NextEntry()
 		if err != nil {
-			if errors.Is(err, io.EOF) || errors.Is(err, ErrNoNextVolume) {
+			if errors.Is(err, io.EOF) {
 				return results
 			}
 			t.Fatalf("NextEntry: %v", err)
@@ -180,11 +180,13 @@ func TestReader_RealArchive_CorruptedMemberIsSkipped(t *testing.T) {
 // TestReader_RealArchive_MissingFinalVolume covers the failure this library
 // was built for: a Usenet download whose last segment never arrived.
 //
-// The member cannot be completed, so it is damage -- but ErrNoNextVolume
-// means something different at each site. Reaching NextEntry it means the
-// archive is over and ends traversal cleanly; reaching a read in progress it
-// means THIS member is unfinished. Treating the second as an ordinary
-// end-of-archive would report success for a member that never completed.
+// The member cannot be completed, so it is damage. ErrNoNextVolume is what
+// says so: reaching a read in progress, it means THIS member is unfinished,
+// and treating it as an ordinary end-of-archive would report success for a
+// member that never completed. Running out of volumes with no member in
+// progress is a different fact and gets a different signal -- io.EOF, the
+// archive is over -- which is why the sentinel has only the one meaning
+// left.
 func TestReader_RealArchive_MissingFinalVolume(t *testing.T) {
 	parts, err := filepath.Glob(filepath.Join("testdata", "rar5_multi.part*.rar"))
 	if err != nil || len(parts) < 2 {
@@ -213,8 +215,8 @@ func TestReader_RealArchive_MissingFinalVolume(t *testing.T) {
 	// The traversal itself ends cleanly: the next NextEntry call finds the
 	// volume channel closed and reports the archive is over, not a per-member
 	// failure.
-	if _, err := r.NextEntry(); !errors.Is(err, ErrNoNextVolume) && !errors.Is(err, io.EOF) {
-		t.Fatalf("NextEntry after the unfinished member = %v, want io.EOF or "+
-			"ErrNoNextVolume ending traversal cleanly", err)
+	if _, err := r.NextEntry(); !errors.Is(err, io.EOF) {
+		t.Fatalf("NextEntry after the unfinished member = %v, want io.EOF "+
+			"ending traversal cleanly", err)
 	}
 }

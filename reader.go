@@ -48,6 +48,16 @@ type Reader struct {
 	// between setting staged and consuming it.
 	staged *BlockHeader
 
+	// damaged remembers a volume that ended somewhere this traversal cannot
+	// vouch for -- inside a block's declared payload, or partway through a
+	// header. Scanning continues past it, because the members in the volumes
+	// beyond the cut are still readable and a set arriving with a part
+	// missing is ordinary rather than exceptional. What it must not do is
+	// call the archive finished CLEANLY afterwards: this is reported in
+	// io.EOF's place once the volumes run out, so a caller looping until
+	// io.EOF cannot mistake a set with a hole in it for a complete one.
+	damaged error
+
 	// solid reports whether the archive header declared a solid archive. It
 	// decides whether abandoning a member must decode its remainder to keep
 	// the window valid for a successor -- see NextEntry.
@@ -94,6 +104,7 @@ func (r *Reader) Reset(volumes <-chan io.ReadCloser) {
 	r.volumes = volumes
 	r.entry = nil
 	r.staged = nil
+	r.damaged = nil
 	r.resolved, r.hasResolved = "", false
 	r.solid = false
 	r.fatal = nil
@@ -218,6 +229,18 @@ func (r *Reader) nextEntry() (*Entry, error) {
 		} else {
 			if r.vol == nil {
 				if err := r.nextVolume(); err != nil {
+					// Running out of volumes with no member in progress is
+					// the archive being over, which NextEntry reports as
+					// io.EOF -- the one thing its doc comment promises.
+					// ErrNoNextVolume keeps its meaning where it is a
+					// failure: reached mid-member, through the splice, it is
+					// that member's verdict and says a part is missing.
+					if errors.Is(err, ErrNoNextVolume) {
+						if r.damaged != nil {
+							return nil, r.damaged
+						}
+						return nil, io.EOF
+					}
 					return nil, err
 				}
 			}
@@ -225,6 +248,9 @@ func (r *Reader) nextEntry() (*Entry, error) {
 			h, err = r.vol.next()
 			if err != nil {
 				if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+					if !errors.Is(err, io.EOF) {
+						r.damaged = err
+					}
 					_ = r.vol.Close()
 					r.vol = nil
 					continue

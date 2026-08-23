@@ -66,7 +66,7 @@ func TestListingNonSolidArchiveReadsBoundedBytes(t *testing.T) {
 	for {
 		e, err := r.NextEntry()
 		if err != nil {
-			if errors.Is(err, io.EOF) || errors.Is(err, ErrNoNextVolume) {
+			if errors.Is(err, io.EOF) {
 				break
 			}
 			t.Fatalf("NextEntry: %v", err)

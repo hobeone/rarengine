@@ -38,7 +38,7 @@ r.SetPasswords([]string{"first-guess", "second-guess"})
 for {
 	e, err := r.NextEntry()
 	if err != nil {
-		if errors.Is(err, io.EOF) || errors.Is(err, rarengine.ErrNoNextVolume) {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		return err // the archive stopped being parseable

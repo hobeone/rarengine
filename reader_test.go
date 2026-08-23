@@ -83,8 +83,8 @@ func TestNextEntrySkipsFabricatedHeaderInPayload(t *testing.T) {
 			"archive -- it was parsed out of the archive header's payload",
 			e.Header.Name)
 	}
-	if !errors.Is(err, io.EOF) && !errors.Is(err, ErrNoNextVolume) {
-		t.Fatalf("NextEntry error = %v, want io.EOF or ErrNoNextVolume", err)
+	if !errors.Is(err, io.EOF) {
+		t.Fatalf("NextEntry error = %v, want io.EOF", err)
 	}
 }
 
@@ -187,10 +187,16 @@ func TestRefusedMemberWithTruncatedPayloadDoesNotFabricateNextEntry(t *testing.T
 	for {
 		e, err := r.NextEntry()
 		if err != nil {
-			if errors.Is(err, io.EOF) || errors.Is(err, ErrNoNextVolume) {
+			// io.ErrUnexpectedEOF is the honest answer here and the one this
+			// fixture earns: the refused member declared 1000 more packed
+			// bytes than the volume carries, so the set ends on a cut rather
+			// than on a boundary. Any of the three ends the scan; what this
+			// test forbids is a member coming back instead.
+			if errors.Is(err, io.EOF) || errors.Is(err, ErrNoNextVolume) ||
+				errors.Is(err, io.ErrUnexpectedEOF) {
 				return
 			}
-			t.Fatalf("NextEntry error = %v, want io.EOF or ErrNoNextVolume", err)
+			t.Fatalf("NextEntry error = %v, want an end-of-archive signal", err)
 		}
 		if e.Header != nil && e.Header.Name == "FABRICATED.txt" {
 			_ = e.Close()
@@ -528,9 +534,8 @@ func TestResetClearsFatalLatch(t *testing.T) {
 	}
 	_ = e.Close()
 
-	if _, err := r.NextEntry(); !errors.Is(err, ErrNoNextVolume) && !errors.Is(err, io.EOF) {
-		t.Fatalf("NextEntry at end of the post-Reset archive = %v, want "+
-			"ErrNoNextVolume or io.EOF", err)
+	if _, err := r.NextEntry(); !errors.Is(err, io.EOF) {
+		t.Fatalf("NextEntry at end of the post-Reset archive = %v, want io.EOF", err)
 	}
 }
 

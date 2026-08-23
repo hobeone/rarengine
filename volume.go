@@ -102,6 +102,16 @@ func (v *volume) next() (*BlockHeader, error) {
 		v.err = err
 		return nil, err
 	}
+	// io.Copy reports a source that ended early as success, so the skip
+	// completing says nothing about whether the bytes were there. What the
+	// block declared and what the volume held is the difference below: a
+	// volume cut inside a payload leaves the next header to be read out of
+	// whatever follows the cut, which is nothing this type can vouch for.
+	if v.body.N > 0 {
+		v.err = fmt.Errorf("%w: volume ended %d bytes inside a block's payload",
+			io.ErrUnexpectedEOF, v.body.N)
+		return nil, v.err
+	}
 	if v.rc == nil {
 		v.err = fmt.Errorf("rarengine: next called on a closed volume")
 		return nil, v.err
@@ -132,6 +142,11 @@ func (v *volume) next() (*BlockHeader, error) {
 // payload instead of erroring, because the alias keeps working -- it just
 // stops meaning what the caller thinks it means.
 func (v *volume) payload() io.Reader { return &v.body }
+
+// bodyShort reports that the block's declared payload was not all there.
+// Only meaningful once payload() has reported io.EOF: before that it is
+// simply how many bytes are still to come.
+func (v *volume) bodyShort() bool { return v.body.N > 0 }
 
 // useEncryptedHeaders switches next() to the decrypting header path, once an
 // encryption header has yielded a key.
