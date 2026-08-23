@@ -207,9 +207,7 @@ func (r *Reader) latchArchive(err error) error {
 // this Reader's life. Nothing below this point may be called except through
 // NextEntry.
 func (r *Reader) nextEntry() (*Entry, error) {
-	if err := r.finishActive(); err != nil {
-		return nil, err
-	}
+	r.finishActive()
 	for {
 		var h *BlockHeader
 		if r.staged != nil {
@@ -255,11 +253,11 @@ func (r *Reader) nextEntry() (*Entry, error) {
 // Either way a member that did not reach its declared size marks the window
 // incomplete, so a solid successor is refused rather than decoded against
 // history nobody wrote.
-func (r *Reader) finishActive() error {
+func (r *Reader) finishActive() {
 	e := r.entry
 	r.entry = nil
 	if e == nil {
-		return nil
+		return
 	}
 	if r.solid {
 		_ = e.Close()
@@ -284,7 +282,6 @@ func (r *Reader) finishActive() error {
 		!errors.Is(e.done, ErrChecksumUnsupported)) {
 		r.win.MarkIncomplete()
 	}
-	return nil
 }
 
 // dispatch consumes one block and reports what it was.

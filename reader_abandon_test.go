@@ -145,9 +145,7 @@ func TestNonSolidAbandonSkipsDecode(t *testing.T) {
 	}
 	before := r.win.w
 
-	if err := r.finishActive(); err != nil {
-		t.Fatalf("finishActive: %v", err)
-	}
+	r.finishActive()
 	after := r.win.w
 
 	if after != before {

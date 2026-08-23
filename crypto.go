@@ -14,6 +14,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"slices"
 )
 
 type cbcDecryptReader struct {
@@ -129,17 +130,22 @@ func pbkdf2HmacSha256(password, salt []byte, iter int) ([]byte, []byte) {
 	mac.Write(block[:])
 	u := mac.Sum(nil)
 
-	fn := append([]byte(nil), u...)
+	fn := slices.Clone(u)
 
 	for j := 1; j < iter; j++ {
 		mac.Reset()
 		mac.Write(u)
-		u = mac.Sum(nil)
+		// Sum(u[:0]) reuses u's backing array instead of allocating a fresh
+		// 32-byte slice per iteration. Safe because Write has already copied
+		// u into the MAC state by the time Sum appends over it, and iter
+		// reaches 1<<24 for a maximally expensive KDF count -- that is 16.7
+		// million allocations this loop no longer makes.
+		u = mac.Sum(u[:0])
 		for k := range fn {
 			fn[k] ^= u[k]
 		}
 	}
-	key := append([]byte(nil), fn...)
+	key := slices.Clone(fn)
 
 	for range 16 {
 		mac.Reset()
@@ -158,7 +164,7 @@ func pbkdf2HmacSha256(password, salt []byte, iter int) ([]byte, []byte) {
 			fn[k] ^= u[k]
 		}
 	}
-	pswCheckVal := append([]byte(nil), fn...)
+	pswCheckVal := slices.Clone(fn)
 
 	return key, pswCheckVal
 }

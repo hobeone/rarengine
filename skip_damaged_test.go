@@ -650,9 +650,7 @@ func TestFinishActive_DamageOnNonCleanOutcome(t *testing.T) {
 					"or it is testing the short path instead", e.remaining)
 			}
 
-			if err := r.finishActive(); err != nil {
-				t.Fatalf("finishActive: %v", err)
-			}
+			r.finishActive()
 
 			// Observe the effect the same way a solid member's admission does:
 			// BeginFile(true) refuses iff the window was left incomplete.

@@ -40,6 +40,12 @@ func fileVolumesOf(t *testing.T, names ...string) <-chan io.ReadCloser {
 		if err != nil {
 			t.Fatalf("open %s: %v", name, err)
 		}
+		// The Reader closes each volume it finishes with, but a test that
+		// fails early or stops before draining the channel leaves the rest
+		// open until the process exits. Close is idempotent on *os.File only
+		// in the sense that a second call errors harmlessly, which is what
+		// the discard here is for.
+		t.Cleanup(func() { _ = f.Close() })
 		ch <- f
 	}
 	close(ch)
