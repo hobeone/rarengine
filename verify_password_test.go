@@ -8,9 +8,9 @@ import (
 )
 
 // cryptHeaderFromFixture opens a header-encrypted RAR5 fixture and reads
-// block headers, in the same order engine_rar5.go's processHeader does,
-// until it finds the HEAD_CRYPT (archive header encryption) block, then
-// returns its parsed CryptHeader.
+// block headers, in the same order Reader.dispatch does, until it finds the
+// HEAD_CRYPT (archive header encryption) block, then returns its parsed
+// CryptHeader.
 func cryptHeaderFromFixture(t *testing.T, name string) *CryptHeader {
 	t.Helper()
 
@@ -20,8 +20,8 @@ func cryptHeaderFromFixture(t *testing.T, name string) *CryptHeader {
 	}
 	t.Cleanup(func() { _ = f.Close() })
 
-	if _, err := detectVersion(f); err != nil {
-		t.Fatalf("detectVersion: %v", err)
+	if _, err := openVolume(f); err != nil {
+		t.Fatalf("openVolume: %v", err)
 	}
 
 	for {
@@ -66,12 +66,12 @@ func fileHeaderFromFixture(t *testing.T, name string) *FileHeader {
 	volumes <- f
 	close(volumes)
 
-	sd := NewStreamDecompressor(volumes)
-	fh, err := sd.Next()
+	r := NewReader(volumes)
+	e, err := r.NextEntry()
 	if err != nil {
-		t.Fatalf("Next: %v", err)
+		t.Fatalf("NextEntry: %v", err)
 	}
-	return fh
+	return e.Header
 }
 
 func TestVerifyPassword_HeaderEncrypted(t *testing.T) {

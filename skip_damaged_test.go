@@ -19,43 +19,56 @@ func goodEntry(name string, content []byte) []byte {
 	return rar5FileEntry(name, uint64(len(content)), crc32.ChecksumIEEE(content), content)
 }
 
-// damageFirstFile runs a decompressor up to the point where the leading short
-// file has failed and been reported, and returns it positioned to continue.
+// badCRCEntry carries its full declared length but records a checksum the
+// content does not match: damage by wrong bytes rather than missing ones.
+func badCRCEntry(name string, content []byte) []byte {
+	wrong := crc32.ChecksumIEEE(content) ^ 0xffffffff
+	return rar5FileEntry(name, uint64(len(content)), wrong, content)
+}
+
+// rar5SplitEntry emits a file block marked as continuing into the next volume,
+// so reading it drives the multi-volume advance path.
+func rar5SplitEntry(name string, unpackedSize uint64, payload []byte) []byte {
+	return rar5EntryFlags(name, 0, HeaderFlagHasData|HeaderFlagDataNotLast,
+		unpackedSize, 0, payload)
+}
+
+// damageFirstEntry runs a Reader up to the point where the leading short file
+// has failed and its verdict has been read from Close, and returns the
+// Reader positioned to continue.
 //
-// The four tests below all need that same five-step preamble; sharing it keeps
-// a change to how damage is produced or asserted from having to be made four
+// The three tests below all need that same preamble; sharing it keeps a
+// change to how damage is produced or asserted from having to be made three
 // times. It asserts rather than assumes each step, so a fixture that stops
-// producing a damaged file fails here instead of silently making the caller's
-// own assertion vacuous.
-func damageFirstFile(t *testing.T, archive []byte) (*StreamDecompressor, error) {
+// producing a damaged file fails here instead of silently making the
+// caller's own assertion vacuous.
+func damageFirstEntry(t *testing.T, archive []byte) *Reader {
 	t.Helper()
 
-	sd := decompressorFor(archive)
-	fh, err := sd.Next()
+	r := readerFor(archive)
+	e, err := r.NextEntry()
 	if err != nil {
-		t.Fatalf("Next #1: %v", err)
+		t.Fatalf("NextEntry #1: %v", err)
 	}
-	if fh.Name != "truncated.bin" {
-		t.Fatalf("first entry is %q; the fixture is not the shape these tests need", fh.Name)
+	if e.Header.Name != "truncated.bin" {
+		t.Fatalf("first entry is %q; the fixture is not the shape these tests need", e.Header.Name)
 	}
-	if _, err := io.Copy(io.Discard, sd); !errors.Is(err, ErrTruncatedFile) {
-		t.Fatalf("reading the damaged file returned %v; want ErrTruncatedFile", err)
+	_, _ = io.Copy(io.Discard, e)
+	if closeErr := e.Close(); !errors.Is(closeErr, ErrTruncatedFile) {
+		t.Fatalf("Close() on the damaged file returned %v; want ErrTruncatedFile", closeErr)
 	}
-	_, err = sd.Next()
-	if err == nil {
-		t.Fatal("the damaged file was not reported by Next")
-	}
-	return sd, err
+	return r
 }
 
 // TestSkipDamagedFile_TraversalContinues is the #30 acceptance test.
 //
-// A file that ends short leaves packed bytes unread. Those are drained on the
-// terminal path, so the stream is already at a real block boundary and the
-// files after it are reachable -- but before FileError the caller was handed a
-// bare error indistinguishable from "the archive is over", and the only safe
-// reading was to stop. For a Usenet download with one damaged segment that
-// meant discarding every intact file in the archive.
+// A file that ends short leaves packed bytes unread. volume.next() skips
+// them unconditionally on the way to the following header, so the stream is
+// already at a real block boundary and the files after it are reachable --
+// but before this rewrite the caller was handed a bare error indistinguishable
+// from "the archive is over", and the only safe reading was to stop. For a
+// Usenet download with one damaged segment that meant discarding every
+// intact file in the archive.
 func TestSkipDamagedFile_TraversalContinues(t *testing.T) {
 	good := []byte("second file content, entirely intact")
 
@@ -65,34 +78,17 @@ func TestSkipDamagedFile_TraversalContinues(t *testing.T) {
 	archive.Write(goodEntry("good.bin", good))
 	archive.Write(rar5EndHeader())
 
-	sd, err := damageFirstFile(t, archive.Bytes())
+	r := damageFirstEntry(t, archive.Bytes())
 
-	// Next reports the failure rather than the following header.
-	fe, ok := errors.AsType[*FileError](err)
-	if !ok {
-		t.Fatalf("Next after a short file returned %v (%T); want a *FileError, "+
-			"which is what tells the caller traversal can continue", err, err)
-	}
-	if fe.Header == nil || fe.Header.Name != "truncated.bin" {
-		t.Fatalf("FileError names %v; want the file that failed", fe.Header)
-	}
-	// The wrapper must not hide the cause: callers already switch on these.
-	if !errors.Is(err, ErrTruncatedFile) {
-		t.Errorf("errors.Is(err, ErrTruncatedFile) = false through FileError; "+
-			"wrapping must not break the sentinels (got %v)", err)
-	}
-
-	// The point of the type: the stream was already positioned, so this works.
-	fh2, err := sd.Next()
+	e2, err := r.NextEntry()
 	if err != nil {
-		t.Fatalf("Next after FileError returned %v; a FileError promises "+
-			"traversal can continue, so this must reach the next file", err)
+		t.Fatalf("NextEntry after a damaged file returned %v; traversal must continue", err)
 	}
-	if fh2.Name != "good.bin" {
-		t.Fatalf("continued to %q; want good.bin", fh2.Name)
+	if e2.Header.Name != "good.bin" {
+		t.Fatalf("continued to %q; want good.bin", e2.Header.Name)
 	}
-	got, err := io.ReadAll(sd)
-	if err != nil && !errors.Is(err, io.EOF) {
+	got, err := io.ReadAll(e2)
+	if err != nil {
 		t.Fatalf("reading the intact file after a damaged one: %v", err)
 	}
 	if !bytes.Equal(got, good) {
@@ -107,7 +103,7 @@ func TestSkipDamagedFile_TraversalContinues(t *testing.T) {
 // Solid files share one LZ77 history. A damaged predecessor never writes the
 // bytes its solid successor back-references, so decoding it produces
 // plausible-looking output with no marker that it is wrong -- silent
-// corruption, which is worse than the lost-files problem FileError solves.
+// corruption, which is worse than the lost-files problem skipping solves.
 func TestSkipDamagedFile_SolidSuccessorRefused(t *testing.T) {
 	var archive bytes.Buffer
 	archive.Write(rar5ArchiveHeader())
@@ -117,20 +113,23 @@ func TestSkipDamagedFile_SolidSuccessorRefused(t *testing.T) {
 		[]byte("twenty bytes exactly")))
 	archive.Write(rar5EndHeader())
 
-	sd, _ := damageFirstFile(t, archive.Bytes())
+	r := damageFirstEntry(t, archive.Bytes())
 
-	_, err := sd.Next()
-	if !errors.Is(err, ErrSolidStreamBroken) {
-		t.Fatalf("continuing into a solid file after damage returned %v; want "+
-			"ErrSolidStreamBroken. Decoding it would emit bytes derived from "+
-			"history that was never written", err)
+	e2, err := r.NextEntry()
+	if err != nil && !errors.Is(err, ErrSolidStreamBroken) {
+		t.Fatalf("solid successor NextEntry error = %v, want ErrSolidStreamBroken", err)
+	}
+	if err == nil {
+		if closeErr := e2.Close(); !errors.Is(closeErr, ErrSolidStreamBroken) {
+			t.Fatalf("solid successor Close = %v, want ErrSolidStreamBroken", closeErr)
+		}
 	}
 }
 
 // TestSkipDamagedFile_NonSolidSuccessorClearsDamage pins the other half: a
-// non-solid file resets the window, so it owes nothing to the damaged file and
-// neither does the solid run that starts on top of it. Refusing here would
-// make the guard above cost far more than it protects.
+// non-solid file resets the window, so it owes nothing to the damaged file
+// and neither does the solid run that starts on top of it. Refusing here
+// would make the guard above cost far more than it protects.
 func TestSkipDamagedFile_NonSolidSuccessorClearsDamage(t *testing.T) {
 	first := []byte("independent file, resets the window")
 	second := []byte("solid on top of a clean base!!!")
@@ -143,32 +142,38 @@ func TestSkipDamagedFile_NonSolidSuccessorClearsDamage(t *testing.T) {
 		crc32.ChecksumIEEE(second), second))
 	archive.Write(rar5EndHeader())
 
-	sd, _ := damageFirstFile(t, archive.Bytes())
+	r := damageFirstEntry(t, archive.Bytes())
 
-	fh, err := sd.Next()
+	e2, err := r.NextEntry()
 	if err != nil {
 		t.Fatalf("non-solid file after damage returned %v; it resets the "+
 			"window and owes the damaged file nothing", err)
 	}
-	if fh.Name != "independent.bin" {
-		t.Fatalf("reached %q; want independent.bin", fh.Name)
+	if e2.Header.Name != "independent.bin" {
+		t.Fatalf("reached %q; want independent.bin", e2.Header.Name)
 	}
-	if _, err := io.Copy(io.Discard, sd); err != nil && !errors.Is(err, io.EOF) {
+	if _, err := io.Copy(io.Discard, e2); err != nil {
 		t.Fatalf("reading independent.bin: %v", err)
 	}
+	if closeErr := e2.Close(); closeErr != nil {
+		t.Fatalf("independent.bin Close() = %v, want nil", closeErr)
+	}
 
-	fh, err = sd.Next()
+	e3, err := r.NextEntry()
 	if err != nil {
 		t.Fatalf("solid file built on a clean base returned %v; the damage was "+
 			"cleared by the non-solid file before it", err)
 	}
-	if fh.Name != "solid.bin" {
-		t.Fatalf("reached %q; want solid.bin", fh.Name)
+	if e3.Header.Name != "solid.bin" {
+		t.Fatalf("reached %q; want solid.bin", e3.Header.Name)
+	}
+	if closeErr := e3.Close(); closeErr != nil {
+		t.Fatalf("solid.bin built on a clean base Close() = %v, want nil", closeErr)
 	}
 }
 
-// TestSkipDamagedFile_ResetClearsDamage pins that damage belongs to the stream
-// that caused it. A reused decompressor refusing the next archive's solid
+// TestSkipDamagedFile_ResetClearsDamage pins that damage belongs to the
+// stream that caused it. A reused Reader refusing the next archive's solid
 // files over an unrelated failure would be a leak of exactly the kind Reset
 // exists to prevent.
 func TestSkipDamagedFile_ResetClearsDamage(t *testing.T) {
@@ -177,10 +182,7 @@ func TestSkipDamagedFile_ResetClearsDamage(t *testing.T) {
 	damagedArchive.Write(shortEntry("truncated.bin"))
 	damagedArchive.Write(rar5EndHeader())
 
-	sd, _ := damageFirstFile(t, damagedArchive.Bytes())
-	if !sd.damaged {
-		t.Fatal("the damaged state was never set, so this cannot test clearing it")
-	}
+	r := damageFirstEntry(t, damagedArchive.Bytes())
 
 	content := []byte("a fresh archive, solid from the start")
 	var fresh bytes.Buffer
@@ -189,27 +191,23 @@ func TestSkipDamagedFile_ResetClearsDamage(t *testing.T) {
 		crc32.ChecksumIEEE(content), content))
 	fresh.Write(rar5EndHeader())
 
-	volumes := make(chan io.ReadCloser, 1)
-	volumes <- &mockReadCloser{bytes.NewReader(fresh.Bytes())}
-	close(volumes)
-	sd.Reset(volumes)
+	r.Reset(volumesOf(fresh.Bytes()))
 
-	if sd.damaged {
-		t.Fatal("Reset left the previous stream's damage in place")
-	}
-	if _, err := sd.Next(); err != nil {
+	e, err := r.NextEntry()
+	if err != nil {
 		t.Fatalf("a solid file in a fresh archive returned %v; the previous "+
 			"stream's damage must not reach it", err)
+	}
+	if e.Header.Name != "solid.bin" {
+		t.Fatalf("reached %q; want solid.bin", e.Header.Name)
+	}
+	if closeErr := e.Close(); closeErr != nil {
+		t.Fatalf("solid.bin after Reset Close() = %v, want nil", closeErr)
 	}
 }
 
 // alwaysFailsAfter serves data and then fails with the same non-EOF error on
 // every subsequent call.
-//
-// errAfterBytes reports io.EOF after its one failure, which makes io.Copy in
-// packedCursor.drain stop cleanly -- so a test built on it exercises the
-// short-drain branch, not the failed-drain branch. Distinguishing the two is
-// the whole point here.
 type alwaysFailsAfter struct {
 	data   []byte
 	off    int
@@ -227,49 +225,38 @@ func (a *alwaysFailsAfter) Read(p []byte) (int, error) {
 	return n, nil
 }
 
-// TestSkipDamagedFile_ShortDrainIsNotContinuable covers a truncated volume:
-// the promised payload is simply not on the media, so the drain stops early.
+// TestSkipDamagedFile_ShortDrainNeverFabricates covers a truncated volume:
+// the promised bytes are simply not on the media, so volume.next()'s skip
+// stops early and the following header read fails too.
 //
-// The stream is then wherever the media ran out, which the block structure
-// does not describe, so no continuation is offered. The window is still
-// incomplete though, and that must be recorded -- the file wrote fewer bytes
-// than it declared whatever the reason.
-func TestSkipDamagedFile_ShortDrainIsNotContinuable(t *testing.T) {
+// Structurally, NextEntry can never return both an error and an entry --
+// so a non-nil error here is already proof that nothing was fabricated out
+// of whatever bytes happened to sit where the header read gave up.
+func TestSkipDamagedFile_ShortDrainNeverFabricates(t *testing.T) {
 	var archive bytes.Buffer
 	archive.Write(rar5ArchiveHeader())
 	archive.Write(shortEntry("truncated.bin"))
 	full := archive.Bytes()
 
-	sd := decompressorFor(full[:len(full)-4])
-	if _, err := sd.Next(); err != nil {
-		t.Fatalf("Next #1: %v", err)
+	r := readerFor(full[:len(full)-4])
+	e, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("NextEntry #1: %v", err)
 	}
-	_, _ = io.Copy(io.Discard, sd)
+	_, _ = io.Copy(io.Discard, e)
+	_ = e.Close()
 
-	_, err := sd.Next()
-	// Checked before the type assertion: AsType also reports false for a nil
-	// error, so without this a regression where Next simply succeeds -- the
-	// worse outcome, since it surfaces whatever the stream is sitting on --
-	// would satisfy the assertion below.
-	if err == nil {
-		t.Fatal("Next reported success after a short drain; the stream is " +
+	if _, err := r.NextEntry(); err == nil {
+		t.Fatal("NextEntry succeeded after a short drain; the stream is " +
 			"wherever the media ran out, so there is nothing safe to return")
-	}
-	if _, ok := errors.AsType[*FileError](err); ok {
-		t.Fatalf("a short drain was offered as continuable (%v); the stream is "+
-			"wherever the media ran out, not on a block header", err)
-	}
-	if !sd.damaged {
-		t.Error("a file that delivered less than it declared was not recorded " +
-			"as damaging the window; a solid successor would then decode " +
-			"against history that was never written")
 	}
 }
 
-// TestSkipDamagedFile_FailedDrainIsNotContinuable covers the other unsettled
-// case: the drain itself errors, so the offset is unknown rather than merely
-// past the end of the media.
-func TestSkipDamagedFile_FailedDrainIsNotContinuable(t *testing.T) {
+// TestSkipDamagedFile_FailedDrainSurfacesTheRealError covers the other
+// unsettled case: the drain itself hard-errors, so the offset is unknown
+// rather than merely past the end of the media. The failure must reach the
+// caller as itself, not be silently converted into a clean end of archive.
+func TestSkipDamagedFile_FailedDrainSurfacesTheRealError(t *testing.T) {
 	var archive bytes.Buffer
 	archive.Write(rar5ArchiveHeader())
 	archive.Write(shortEntry("truncated.bin"))
@@ -278,39 +265,36 @@ func TestSkipDamagedFile_FailedDrainIsNotContinuable(t *testing.T) {
 	readErr := errors.New("media failed mid-payload")
 	src := &alwaysFailsAfter{data: full, failAt: len(full) - 4, err: readErr}
 
-	volumes := make(chan io.ReadCloser, 1)
-	volumes <- &mockReadCloser{src}
-	close(volumes)
-	sd := NewStreamDecompressor(volumes)
+	r := NewReader(volumesOf2(src))
+	e, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("NextEntry #1: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, e)
+	_ = e.Close()
 
-	if _, err := sd.Next(); err != nil {
-		t.Fatalf("Next #1: %v", err)
+	if _, err := r.NextEntry(); !errors.Is(err, readErr) {
+		t.Fatalf("got %v; want the underlying media error surfaced, not "+
+			"silently converted to a clean end of archive", err)
 	}
-	_, _ = io.Copy(io.Discard, sd)
+}
 
-	_, err := sd.Next()
-	if err == nil {
-		t.Fatal("a failed drain reported success")
-	}
-	// Asserted, not assumed: without this the test could pass through the
-	// short-drain branch and never exercise a failing drain at all.
-	if !errors.Is(err, readErr) {
-		t.Fatalf("got %v; the drain did not fail, so this test is not "+
-			"exercising the branch it names", err)
-	}
-	if _, ok := errors.AsType[*FileError](err); ok {
-		t.Fatalf("a failed drain was offered as continuable (%v); the stream "+
-			"offset is unknown, so reading on risks parsing a header out of "+
-			"payload", err)
-	}
+// volumesOf2 wraps a single already-built io.Reader as one volume, for
+// fixtures whose reader needs its own failure behaviour rather than being
+// built from a plain byte slice.
+func volumesOf2(r io.Reader) <-chan io.ReadCloser {
+	ch := make(chan io.ReadCloser, 1)
+	ch <- &mockReadCloser{r}
+	close(ch)
+	return ch
 }
 
 // TestSkipDamagedFile_SolidRefusedAcrossVolumeAfterTruncation is the
 // regression test for the case damage tracking originally missed.
 //
-// A truncated volume takes the short-drain path, which produces no FileError.
-// While damage was recorded from the FileError rather than from the file
-// ending short, this left damaged clear -- and a solid file opening the NEXT
+// A truncated volume takes the short-drain path. While damage was recorded
+// from the caller-visible error rather than from what happened to the file,
+// this left the window looking intact -- and a solid file opening the NEXT
 // volume was admitted, decoding against a window its predecessor never
 // finished writing. That is the ordinary Usenet shape: one segment lost, the
 // remaining volumes intact.
@@ -330,66 +314,56 @@ func TestSkipDamagedFile_SolidRefusedAcrossVolumeAfterTruncation(t *testing.T) {
 		crc32.ChecksumIEEE(content), content))
 	vol2.Write(rar5EndHeader())
 
-	volumes := make(chan io.ReadCloser, 2)
-	volumes <- &mockReadCloser{bytes.NewReader(truncated)}
-	volumes <- &mockReadCloser{bytes.NewReader(vol2.Bytes())}
-	close(volumes)
-	sd := NewStreamDecompressor(volumes)
+	r := NewReader(volumesOf(truncated, vol2.Bytes()))
 
-	fh, err := sd.Next()
+	e, err := r.NextEntry()
 	if err != nil {
-		t.Fatalf("Next #1: %v", err)
+		t.Fatalf("NextEntry #1: %v", err)
 	}
-	if fh.Name != "truncated.bin" {
-		t.Fatalf("first entry is %q; fixture is not the shape this tests", fh.Name)
+	if e.Header.Name != "truncated.bin" {
+		t.Fatalf("first entry is %q; fixture is not the shape this tests", e.Header.Name)
 	}
-	n, err := io.Copy(io.Discard, sd)
+	n, err := io.Copy(io.Discard, e)
 	if err == nil {
-		t.Fatal("the truncated file reported success")
+		t.Fatal("reading the truncated file reported success")
 	}
 	// Guards the fixture: if the file somehow delivered everything it
 	// declared, there is no damage and the assertion below proves nothing.
 	if n >= 1000 {
 		t.Fatalf("the file delivered %d of 1000 bytes, so it is not truncated", n)
 	}
-
-	// The first Next reports the truncation. Nothing in the library stops the
-	// caller from calling again -- there is no sticky terminal state on
-	// StreamDecompressor -- so the second advances to volume 2. That is the
-	// call the damage state has to survive to.
-	if _, err = sd.Next(); err == nil {
-		t.Fatal("the truncation was not reported")
-	}
-	if !sd.damaged {
-		t.Fatal("a truncated file was not recorded as damaging the window, so " +
-			"the guard below cannot fire for the right reason")
+	if closeErr := e.Close(); closeErr == nil {
+		t.Fatal("the truncation was not reported by Close")
 	}
 
-	_, err = sd.Next()
-	if !errors.Is(err, ErrSolidStreamBroken) {
-		t.Fatalf("a solid file opening the next volume after a truncated one "+
+	// The next call advances to volume 2. That is the call the damage state
+	// has to survive to.
+	e2, err := r.NextEntry()
+	if err != nil && !errors.Is(err, ErrSolidStreamBroken) {
+		t.Fatalf("solid file opening the next volume after a truncated one "+
 			"returned %v; want ErrSolidStreamBroken. Its back-references reach "+
 			"into %d bytes that were never written", err, 1000-n)
 	}
+	if err == nil {
+		if closeErr := e2.Close(); !errors.Is(closeErr, ErrSolidStreamBroken) {
+			t.Fatalf("solid file opening the next volume after a truncated one "+
+				"Close() = %v; want ErrSolidStreamBroken", closeErr)
+		}
+	}
 }
 
-// TestSkipDamagedFile_AbandonedCursorIsNotContinuable is the regression test
-// for the fabrication this type nearly enabled.
+// TestSkipDamagedFile_AbandonedAdvanceNeverFabricates is the regression test
+// for the fabrication a failed volume advance nearly enabled.
 //
-// packedCursor.invalidate zeroes the count without reading, and the
-// volume-advance path invalidates BEFORE it discovers whether a next volume
-// exists. So every failure there -- a header that fails its CRC, a refused
-// header, a channel that closed -- reaches endFile with the count at zero and
-// the file short. While continuation was gated on owed() == 0, that looked
-// exactly like a completed drain, and the caller was told it could resume from
-// a position no drain had established.
+// A header that fails its CRC after consuming some bytes leaves the volume
+// poisoned at whatever offset it gave up at -- an offset the archive itself
+// chose, since the bytes that fail the CRC also decide how far the reader
+// got before giving up. CLAUDE.md names parsing a header out of that offset
+// as the class this library must never allow.
 //
-// A crafted archive turns that into a fabricated entry: the bytes that fail
-// the header CRC also decide how far ReadBlockHeader consumed before giving
-// up, so the archive chooses the offset the next header is parsed from --
-// including inside a preceding file's payload. CLAUDE.md names that class as
-// the one this library must never allow.
-func TestSkipDamagedFile_AbandonedCursorIsNotContinuable(t *testing.T) {
+// Structurally, NextEntry cannot return both a name and an error, so proving
+// no fabrication reduces to: this returns an error.
+func TestSkipDamagedFile_AbandonedAdvanceNeverFabricates(t *testing.T) {
 	// Volume 1: a file whose payload continues into the next volume.
 	var vol1 bytes.Buffer
 	vol1.Write(rar5ArchiveHeader())
@@ -404,65 +378,38 @@ func TestSkipDamagedFile_AbandonedCursorIsNotContinuable(t *testing.T) {
 	// planted entry: ReadBlockHeader reads 7, decodes a 1-byte size vint of 3,
 	// then reads bufSize-3 = 1 more. The CRC then fails. An oversized vint
 	// here would make it swallow the rest of the volume instead, and the
-	// planted entry would be unreachable -- which is what an earlier version
-	// of this fixture did, leaving the assertions below unable to fire.
+	// planted entry would be unreachable.
 	vol2.Write([]byte{0xff, 0xff, 0xff, 0xff, 0x03, 0xaa, 0xbb, 0xcc})
 	vol2.Write(goodEntry("PWNED.bin", pwned))
 	vol2.Write(rar5EndHeader())
 
-	volumes := make(chan io.ReadCloser, 2)
-	volumes <- &mockReadCloser{bytes.NewReader(vol1.Bytes())}
-	volumes <- &mockReadCloser{bytes.NewReader(vol2.Bytes())}
-	close(volumes)
-	sd := NewStreamDecompressor(volumes)
+	r := NewReader(volumesOf(vol1.Bytes(), vol2.Bytes()))
 
-	fh, err := sd.Next()
+	e, err := r.NextEntry()
 	if err != nil {
-		t.Fatalf("Next #1: %v", err)
+		t.Fatalf("NextEntry #1: %v", err)
 	}
-	if fh.Name != "a.bin" {
-		t.Fatalf("first entry is %q; fixture is not the shape this tests", fh.Name)
+	if e.Header.Name != "a.bin" {
+		t.Fatalf("first entry is %q; fixture is not the shape this tests", e.Header.Name)
 	}
-	_, _ = io.Copy(io.Discard, sd)
+	_, _ = io.Copy(io.Discard, e)
+	_ = e.Close()
 
-	fh, err = sd.Next()
-	// A nil error here is the worst outcome, not a passing one: it means Next
-	// surfaced whatever the failed advance left the stream pointing at. AsType
-	// reports false for nil, so this has to be rejected first.
-	if err == nil {
-		t.Fatalf("Next reported success after a failed volume advance and "+
-			"returned %q; the offset it parsed that from was chosen by the "+
-			"archive", fh.Name)
+	if _, err := r.NextEntry(); err == nil {
+		t.Fatal("NextEntry reported success after a failed volume advance; " +
+			"the offset it would have parsed from was chosen by the archive")
 	}
-	if fh != nil && fh.Name == "PWNED.bin" {
-		t.Fatalf("Next surfaced the entry planted after the CRC-failing "+
-			"header: %q", fh.Name)
-	}
-	if fe, ok := errors.AsType[*FileError](err); ok {
-		t.Fatalf("a file whose cursor was abandoned on a failed volume advance "+
-			"was offered as continuable (%v, header %v). No drain established "+
-			"that position, so resuming parses a header from an offset the "+
-			"archive chose", err, fe.Header)
-	}
-}
-
-// rar5SplitEntry emits a file block marked as continuing into the next volume,
-// so reading it drives the multi-volume advance path.
-func rar5SplitEntry(name string, unpackedSize uint64, payload []byte) []byte {
-	return rar5EntryFlags(name, 0, HeaderFlagHasData|HeaderFlagDataNotLast,
-		unpackedSize, 0, payload)
 }
 
 // TestSkipDamagedFile_SolidRefusalDropsPayload pins that ErrSolidStreamBroken
 // obeys the rule every other refusal in this package obeys.
 //
 // CLAUDE.md: "Refusing a file means dropping its payload, whatever the reason
-// for the refusal ... Do not narrow it to particular errors." A refused block
-// that keeps its payload supplies the next entry, because traversal continues
-// afterwards -- the caller gets the error and calls Next again. This refusal
-// reason is newer than that rule, and asserting the error alone would not have
-// noticed: replacing the refuse() call with a bare return leaves every other
-// test in this file passing while a crafted archive gets a fabricated entry.
+// for the refusal ... Do not narrow it to particular errors." A refused
+// block that keeps its payload supplies the next entry, because traversal
+// continues afterwards. This refusal is checked the same way as every other:
+// what the caller reaches next must be the archive's real next entry, not
+// whatever the refused block's own smuggled payload contains.
 func TestSkipDamagedFile_SolidRefusalDropsPayload(t *testing.T) {
 	// The solid file's payload is itself a well-formed entry. If the refusal
 	// leaves those bytes in the stream, the next header is parsed out of them.
@@ -478,30 +425,37 @@ func TestSkipDamagedFile_SolidRefusalDropsPayload(t *testing.T) {
 	archive.Write(goodEntry("legit.bin", tail))
 	archive.Write(rar5EndHeader())
 
-	sd, _ := damageFirstFile(t, archive.Bytes())
+	r := damageFirstEntry(t, archive.Bytes())
 
-	if _, err := sd.Next(); !errors.Is(err, ErrSolidStreamBroken) {
+	e2, err := r.NextEntry()
+	if err != nil && !errors.Is(err, ErrSolidStreamBroken) {
 		t.Fatalf("the solid file was not refused (%v); this test cannot check "+
 			"what a refusal drops if nothing was refused", err)
+	}
+	if err == nil {
+		if closeErr := e2.Close(); !errors.Is(closeErr, ErrSolidStreamBroken) {
+			t.Fatalf("solid file Close() = %v; want ErrSolidStreamBroken", closeErr)
+		}
 	}
 
 	// Traversal continues, so whatever the refusal left behind is what gets
 	// parsed next.
-	fh, err := sd.Next()
+	e3, err := r.NextEntry()
 	if err != nil {
-		t.Fatalf("Next after a refusal returned %v; the refused payload should "+
-			"have been dropped, leaving the stream on the next real header", err)
+		t.Fatalf("NextEntry after a refusal returned %v; the refused payload "+
+			"should have been dropped, leaving the stream on the next real "+
+			"header", err)
 	}
-	if fh.Name == "PWNED.bin" {
+	if e3.Header.Name == "PWNED.bin" {
 		t.Fatalf("the refused file's payload supplied the next entry: got %q. "+
 			"ErrSolidStreamBroken must drop the payload like every other "+
-			"refusal, or it becomes a header-fabrication route", fh.Name)
+			"refusal, or it becomes a header-fabrication route", e3.Header.Name)
 	}
-	if fh.Name != "legit.bin" {
-		t.Fatalf("reached %q; want legit.bin", fh.Name)
+	if e3.Header.Name != "legit.bin" {
+		t.Fatalf("reached %q; want legit.bin", e3.Header.Name)
 	}
-	got, err := io.ReadAll(sd)
-	if err != nil && !errors.Is(err, io.EOF) {
+	got, err := io.ReadAll(e3)
+	if err != nil {
 		t.Fatalf("reading the file after a refusal: %v", err)
 	}
 	if !bytes.Equal(got, tail) {
@@ -509,22 +463,12 @@ func TestSkipDamagedFile_SolidRefusalDropsPayload(t *testing.T) {
 	}
 }
 
-// badCRCEntry carries its full declared length but records a checksum the
-// content does not match: damage by wrong bytes rather than missing ones.
-func badCRCEntry(name string, content []byte) []byte {
-	wrong := crc32.ChecksumIEEE(content) ^ 0xffffffff
-	return rar5FileEntry(name, uint64(len(content)), wrong, content)
-}
-
-// TestSkipDamagedFile_ChecksumFailureIsContinuable covers the commonest damage
-// signal in the workload this feature targets.
+// TestSkipDamagedFile_ChecksumFailureIsContinuable covers the commonest
+// damage signal in the workload this feature targets.
 //
 // A file that reached its declared size and then failed its CRC32 is just as
-// skippable as a truncated one: the cursor is drained and the stream is on the
-// next header. Requiring the file to have ended short left this case reported
-// as a bare error indistinguishable from end-of-archive -- and asymmetrically
-// so, since reading the same file to EOF surfaces the mismatch during Read and
-// then returns cleanly from Next.
+// skippable as a truncated one: the packed bytes are drained by volume.next()
+// on the way to the next header regardless of how the file ended.
 func TestSkipDamagedFile_ChecksumFailureIsContinuable(t *testing.T) {
 	tail := []byte("an entirely intact second file")
 
@@ -534,45 +478,33 @@ func TestSkipDamagedFile_ChecksumFailureIsContinuable(t *testing.T) {
 	archive.Write(goodEntry("good.bin", tail))
 	archive.Write(rar5EndHeader())
 
-	sd := decompressorFor(archive.Bytes())
-	fh, err := sd.Next()
+	r := readerFor(archive.Bytes())
+	e, err := r.NextEntry()
 	if err != nil {
-		t.Fatalf("Next #1: %v", err)
+		t.Fatalf("NextEntry #1: %v", err)
 	}
-	if fh.Name != "bad.bin" {
-		t.Fatalf("first entry is %q; fixture is not the shape this tests", fh.Name)
+	if e.Header.Name != "bad.bin" {
+		t.Fatalf("first entry is %q; fixture is not the shape this tests", e.Header.Name)
+	}
+	_, _ = io.Copy(io.Discard, e)
+	if closeErr := e.Close(); !errors.Is(closeErr, ErrCRCMismatch) {
+		t.Fatalf("Close() on the mismatched file returned %v; want ErrCRCMismatch", closeErr)
 	}
 
-	// Skipped, not read: the mismatch is found by the teardown drain.
-	_, err = sd.Next()
-	fe, ok := errors.AsType[*FileError](err)
-	if !ok {
-		t.Fatalf("skipping a CRC-mismatched file returned %v (%T); want a "+
-			"*FileError. The stream is on the next header, so the caller has "+
-			"no way to learn it may continue", err, err)
-	}
-	if !errors.Is(err, ErrCRCMismatch) {
-		t.Errorf("the wrapper hid the cause: %v", err)
-	}
-	if fe.Header == nil || fe.Header.Name != "bad.bin" {
-		t.Errorf("FileError names %v; want bad.bin", fe.Header)
-	}
-
-	fh, err = sd.Next()
+	e2, err := r.NextEntry()
 	if err != nil {
-		t.Fatalf("Next after the FileError returned %v; it promised the "+
-			"traversal could continue", err)
+		t.Fatalf("NextEntry after the CRC mismatch returned %v; traversal "+
+			"could continue", err)
 	}
-	if fh.Name != "good.bin" {
-		t.Fatalf("continued to %q; want good.bin", fh.Name)
+	if e2.Header.Name != "good.bin" {
+		t.Fatalf("continued to %q; want good.bin", e2.Header.Name)
 	}
 }
 
-// TestSkipDamagedFile_ChecksumFailureDamagesWindow pins the other half. A file
-// whose CRC32 did not match wrote the WRONG bytes into the shared history, so
-// a solid successor decodes against content the archive never assumed --
-// silently, since nothing in the format marks it. Keying damage on "ended
-// short" alone admitted exactly this.
+// TestSkipDamagedFile_ChecksumFailureDamagesWindow pins the other half. A
+// file whose CRC32 did not match wrote the WRONG bytes into the shared
+// history, so a solid successor decodes against content the archive never
+// assumed -- silently, since nothing in the format marks it.
 func TestSkipDamagedFile_ChecksumFailureDamagesWindow(t *testing.T) {
 	var archive bytes.Buffer
 	archive.Write(rar5ArchiveHeader())
@@ -581,41 +513,43 @@ func TestSkipDamagedFile_ChecksumFailureDamagesWindow(t *testing.T) {
 		[]byte("twenty bytes exactly")))
 	archive.Write(rar5EndHeader())
 
-	sd := decompressorFor(archive.Bytes())
-	if _, err := sd.Next(); err != nil {
-		t.Fatalf("Next #1: %v", err)
+	r := readerFor(archive.Bytes())
+	e, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("NextEntry #1: %v", err)
 	}
-	if _, err := io.Copy(io.Discard, sd); !errors.Is(err, ErrCRCMismatch) {
-		t.Fatalf("reading bad.bin returned %v; want ErrCRCMismatch, or this "+
-			"test is not exercising a checksum failure", err)
+	_, _ = io.Copy(io.Discard, e)
+	if closeErr := e.Close(); !errors.Is(closeErr, ErrCRCMismatch) {
+		t.Fatalf("Close() on bad.bin returned %v; want ErrCRCMismatch, or this "+
+			"test is not exercising a checksum failure", closeErr)
 	}
-	// No second report from Next: the mismatch was already delivered during
-	// Read, and repeating it would make one corrupt file an archive nobody can
-	// read past. So this call goes straight on to the solid successor.
-	_, err := sd.Next()
-	if !sd.damaged {
-		t.Fatal("a CRC-mismatched file was not recorded as damaging the window")
-	}
-	if !errors.Is(err, ErrSolidStreamBroken) {
+
+	e2, err := r.NextEntry()
+	if err != nil && !errors.Is(err, ErrSolidStreamBroken) {
 		t.Fatalf("a solid file after a CRC-mismatched one returned %v; want "+
 			"ErrSolidStreamBroken. Its back-references reach into bytes known "+
 			"to be wrong", err)
+	}
+	if err == nil {
+		if closeErr := e2.Close(); !errors.Is(closeErr, ErrSolidStreamBroken) {
+			t.Fatalf("solid file after a CRC-mismatched one Close() = %v; want "+
+				"ErrSolidStreamBroken", closeErr)
+		}
 	}
 }
 
 // TestSkipDamagedFile_RefusedFileDamagesWindow covers a file that never
 // decoded at all.
 //
-// A refusal drops the payload and returns before fileReader.begin, so the file
-// never becomes active and finishCurrentFile never sees it. Its output is
-// nonetheless absent from the shared window, and a solid successor's
-// back-references assume it is there. Window.CopyBytes bounds distances by the
-// history actually written, but the shortfall here sits INSIDE that bound --
-// the successor reads an earlier file's bytes rather than reading past the
-// end -- so nothing catches it and the output is silently wrong.
+// A refusal drops the payload and never begins the entry, so it never writes
+// anything to the shared window. That is nonetheless absent history a solid
+// successor's back-references assume is there. Window.CopyBytes bounds
+// distances by the history actually written, but the shortfall here sits
+// INSIDE that bound -- the successor would read an earlier file's bytes
+// rather than reading past the end -- so nothing else catches it.
 func TestSkipDamagedFile_RefusedFileDamagesWindow(t *testing.T) {
 	// A rar bomb: declared unpacked size far exceeds both 1 MiB and 1000x the
-	// packed size, so processHeader refuses it before any decoding.
+	// packed size, so dispatch refuses it before any decoding.
 	bomb := rar5FileEntry("bomb.bin", 2*1024*1024, 0x1234, []byte("ten bytes!"))
 
 	var archive bytes.Buffer
@@ -625,24 +559,28 @@ func TestSkipDamagedFile_RefusedFileDamagesWindow(t *testing.T) {
 		[]byte("twenty bytes exactly")))
 	archive.Write(rar5EndHeader())
 
-	sd := decompressorFor(archive.Bytes())
+	r := readerFor(archive.Bytes())
 
-	_, err := sd.Next()
-	if !errors.Is(err, ErrRarBombDetected) {
-		t.Fatalf("the first entry returned %v; want ErrRarBombDetected, or "+
-			"this test is not exercising a refusal", err)
+	e, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("NextEntry #1: %v", err)
 	}
-	if !sd.damaged {
-		t.Error("a refused file was not recorded as damaging the window; its " +
-			"output never reached the window, so a solid successor's " +
-			"back-references land on an earlier file's bytes")
+	if closeErr := e.Close(); !errors.Is(closeErr, ErrRarBombDetected) {
+		t.Fatalf("Close() on the bomb entry returned %v; want ErrRarBombDetected, "+
+			"or this test is not exercising a refusal", closeErr)
 	}
 
-	_, err = sd.Next()
-	if !errors.Is(err, ErrSolidStreamBroken) {
+	e2, err := r.NextEntry()
+	if err != nil && !errors.Is(err, ErrSolidStreamBroken) {
 		t.Fatalf("a solid file after a refused one returned %v; want "+
 			"ErrSolidStreamBroken. The refused file contributed nothing to "+
 			"the window it back-references", err)
+	}
+	if err == nil {
+		if closeErr := e2.Close(); !errors.Is(closeErr, ErrSolidStreamBroken) {
+			t.Fatalf("solid file after a refused one Close() = %v; want "+
+				"ErrSolidStreamBroken", closeErr)
+		}
 	}
 }
 
@@ -667,21 +605,28 @@ func (e *errWithFinalBytes) Read(p []byte) (int, error) {
 	return n, nil
 }
 
-// TestEndFile_DamageOnNonCleanOutcome covers a file that met its declared size
-// and still failed.
+// TestFinishActive_DamageOnNonCleanOutcome covers a file that met its
+// declared size and still failed.
 //
 // A decoder that errors on the final block -- an invalid Huffman code, a
 // corrupt bitstream, bad AES padding -- returns the last bytes together with
-// the error, so remaining reaches zero and Read takes finish(err) without ever
-// running verifyChecksum. The file is neither short nor CRC-mismatched, but
-// the bytes it put in the window are whatever the decoder produced before it
-// gave up, and a solid successor back-references them.
+// the error, so remaining reaches zero and Read takes finish(err) without
+// ever running verifyChecksum. The file is neither short nor CRC-mismatched,
+// but the bytes it put in the window are whatever the decoder produced
+// before it gave up, and a solid successor back-references them.
 //
 // ErrChecksumUnsupported is deliberately NOT damage: that file decoded
 // normally and the library simply cannot check its digest. Treating every
 // non-nil outcome as damage would refuse the solid successors of every
 // encrypted file recording a MAC, which decode correctly.
-func TestEndFile_DamageOnNonCleanOutcome(t *testing.T) {
+//
+// This drives Reader.finishActive directly, as the old per-site test drove
+// fileReader.endFile directly: the decision is a three-way classification
+// with no natural home in a round-tripped archive (a decode error exactly at
+// the final byte is not reproducible through a legitimate fixture in any
+// reasonable way), so it is pinned as a unit, observing its effect the same
+// way production code does -- through Window.BeginFile.
+func TestFinishActive_DamageOnNonCleanOutcome(t *testing.T) {
 	content := []byte("bytes the decoder produced before it gave up")
 
 	for _, tc := range []struct {
@@ -694,22 +639,24 @@ func TestEndFile_DamageOnNonCleanOutcome(t *testing.T) {
 		{"clean completion", nil, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			var fr fileReader
+			r := NewReader(nil)
 			fh := &FileHeader{Name: "x.bin", UnpackedSize: int64(len(content))}
-			fr.begin(fh, &errWithFinalBytes{data: content, err: tc.err}, true)
+			e := newEntry(fh, &errWithFinalBytes{data: content, err: tc.err})
+			r.entry = e
 
-			// Drives Read to the terminal switch with remaining == 0.
-			_, _ = io.Copy(io.Discard, &fr)
-			if fr.remaining != 0 {
+			_, _ = io.Copy(io.Discard, e)
+			if e.remaining != 0 {
 				t.Fatalf("remaining = %d; this case must reach the byte budget, "+
-					"or it is testing the short path instead", fr.remaining)
+					"or it is testing the short path instead", e.remaining)
 			}
 
-			var cursor packedCursor
-			cursor.repoint(bytes.NewReader(nil), 0)
-			damaged, _ := fr.endFile(&cursor)
-			if damaged != tc.want {
-				t.Errorf("damaged = %v, want %v for outcome %v", damaged, tc.want, tc.err)
+			r.finishActive()
+
+			// Observe the effect the same way a solid member's admission does:
+			// BeginFile(true) refuses iff the window was left incomplete.
+			gotDamaged := errors.Is(r.win.BeginFile(true), ErrSolidStreamBroken)
+			if gotDamaged != tc.want {
+				t.Errorf("damaged = %v, want %v for outcome %v", gotDamaged, tc.want, tc.err)
 			}
 		})
 	}

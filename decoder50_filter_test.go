@@ -334,25 +334,21 @@ func TestDecodedTracksOutput(t *testing.T) {
 	volumes <- f
 	close(volumes)
 
-	sd := NewStreamDecompressor(volumes)
-	h, err := sd.Next()
+	r := NewReader(volumes)
+	e, err := r.NextEntry()
 	if err != nil {
-		t.Fatalf("Next: %v", err)
+		t.Fatalf("NextEntry: %v", err)
 	}
-	n, err := io.Copy(io.Discard, sd)
+	n, err := io.Copy(io.Discard, e)
 	if err != nil {
 		t.Fatalf("draining: %v", err)
 	}
 
-	re, ok := sd.engine.(*rar5Engine)
-	if !ok {
-		t.Fatalf("engine is %T, want *rar5Engine", sd.engine)
+	if r.dec50.decoded != n {
+		t.Errorf("decoded = %d, want %d (bytes emitted)", r.dec50.decoded, n)
 	}
-	if re.dec50.decoded != n {
-		t.Errorf("decoded = %d, want %d (bytes emitted)", re.dec50.decoded, n)
-	}
-	if n != h.UnpackedSize {
-		t.Errorf("emitted %d bytes, header says %d", n, h.UnpackedSize)
+	if n != e.Header.UnpackedSize {
+		t.Errorf("emitted %d bytes, header says %d", n, e.Header.UnpackedSize)
 	}
 }
 

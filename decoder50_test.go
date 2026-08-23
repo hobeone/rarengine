@@ -127,35 +127,32 @@ func TestDecoder50_DecodeSymbol(t *testing.T) {
 	}
 }
 
-// TestStreamDecompressor_RejectsOverReachingBackReference exercises the
-// disclosure at the public API boundary: a back-reference reaching past the
-// bytes the current file has produced used to surface the previous file's
-// plaintext from StreamDecompressor.Read.
+// TestEntry_RejectsOverReachingBackReference exercises the disclosure at the
+// public API boundary: a back-reference reaching past the bytes the current
+// file has produced used to surface the previous file's plaintext from
+// Entry.Read.
 //
 // The over-reaching distance is injected as an already-decoded offset rather
 // than encoded as a Huffman-coded bit stream. Nothing sits between the decoded
 // offset and CopyBytes, so how the value was derived does not affect what is
 // under test here.
-func TestStreamDecompressor_RejectsOverReachingBackReference(t *testing.T) {
+func TestEntry_RejectsOverReachingBackReference(t *testing.T) {
 	win := NewWindow(0x40000)
 	fillWindowWithPriorFile(win)
 
-	// A new non-solid file begins, exactly as processHeader does.
+	// A new non-solid file begins, exactly as buildChain does.
 	win.Reset(false)
 
-	sd := &StreamDecompressor{win: win, verifyCRC: true}
-	re := newRAR5Engine(sd)
-	re.dec50.init(bytes.NewReader(nil), true)
-	re.lzReader.dec = re.dec50
-	re.lzReader.win = win
-	sd.engine = re
-	sd.file.begin(&FileHeader{Name: "current.bin", UnpackedSize: 16}, &re.lzReader, sd.verifyCRC)
+	dec := newDecoder50()
+	dec.init(bytes.NewReader(nil), true)
+	lz := &lz50Reader{dec: dec, win: win}
+	e := newEntry(&FileHeader{Name: "current.bin", UnpackedSize: 16}, lz)
 
 	// The file's first token is a match reaching 1000 bytes back, before it has
 	// produced anything at all.
-	re.dec50.offset[0] = 1000
-	re.dec50.length = 16
-	err := re.dec50.decodeSymbol(win, 257)
+	dec.offset[0] = 1000
+	dec.length = 16
+	err := dec.decodeSymbol(win, 257)
 	if !errors.Is(err, ErrWindowOffsetBounds) {
 		t.Fatalf("over-reaching back-reference accepted: %v", err)
 	}
@@ -166,9 +163,9 @@ func TestStreamDecompressor_RejectsOverReachingBackReference(t *testing.T) {
 	// (That the window itself stages nothing is covered one layer down, by
 	// TestWindow_CopyBytes_DoesNotLeakPriorFile.)
 	out := make([]byte, 16)
-	n, _ := sd.Read(out)
+	n, _ := e.Read(out)
 	if n != 0 {
-		t.Fatalf("StreamDecompressor.Read produced %d bytes after a rejected copy: %q", n, out[:n])
+		t.Fatalf("Entry.Read produced %d bytes after a rejected copy: %q", n, out[:n])
 	}
 	if bytes.Contains(out, []byte("SECRET")) {
 		t.Fatalf("prior file's content leaked: %q", out)

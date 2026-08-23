@@ -66,18 +66,18 @@ func TestEncryptedMultiVolume_DecodesEveryVolume(t *testing.T) {
 		{"store", "rar5_encrypted_multi_store"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			sd := NewStreamDecompressor(encryptedMultiVolumeChan(t, tc.prefix))
-			sd.SetPassword("test")
+			r := NewReader(encryptedMultiVolumeChan(t, tc.prefix))
+			r.SetPasswords([]string{"test"})
 
-			fh, err := sd.Next()
+			e, err := r.NextEntry()
 			if err != nil {
-				t.Fatalf("Next: %v", err)
+				t.Fatalf("NextEntry: %v", err)
 			}
-			if !fh.Encrypted {
+			if !e.Header.Encrypted {
 				t.Fatal("fixture is not encrypted, so it cannot exercise this path")
 			}
 
-			got, err := io.ReadAll(sd)
+			got, err := io.ReadAll(e)
 			// These fixtures record a key-derived MAC on their last part, so
 			// completion is reported as unverifiable rather than as a match.
 			// That is another test's subject; here it must simply not be a
@@ -85,8 +85,8 @@ func TestEncryptedMultiVolume_DecodesEveryVolume(t *testing.T) {
 			if err != nil && !errors.Is(err, ErrChecksumUnsupported) {
 				t.Fatalf("reading: %v", err)
 			}
-			if int64(len(got)) != fh.UnpackedSize {
-				t.Fatalf("read %d of %d declared bytes", len(got), fh.UnpackedSize)
+			if int64(len(got)) != e.Header.UnpackedSize {
+				t.Fatalf("read %d of %d declared bytes", len(got), e.Header.UnpackedSize)
 			}
 			decoded[tc.name] = got
 		})
@@ -124,13 +124,14 @@ func TestEncryptedMultiVolume_DecodesEveryVolume(t *testing.T) {
 // leaves the caller free to accept the content. ErrCRCMismatch would say the
 // content is wrong, which is false.
 func TestEncryptedMultiVolume_ChecksumIsReportedUnverifiable(t *testing.T) {
-	sd := NewStreamDecompressor(encryptedMultiVolumeChan(t, "rar5_encrypted_multi"))
-	sd.SetPassword("test")
+	r := NewReader(encryptedMultiVolumeChan(t, "rar5_encrypted_multi"))
+	r.SetPasswords([]string{"test"})
 
-	if _, err := sd.Next(); err != nil {
-		t.Fatalf("Next: %v", err)
+	e, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("NextEntry: %v", err)
 	}
-	_, err := io.ReadAll(sd)
+	_, err = io.ReadAll(e)
 	if !errors.Is(err, ErrChecksumUnsupported) {
 		t.Fatalf("reading an encrypted file returned %v; want "+
 			"ErrChecksumUnsupported. ErrCRCMismatch here would report correct "+

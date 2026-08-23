@@ -7,7 +7,7 @@ import (
 
 // errKdfCountExceeded builds the error returned when a header/file's
 // declared KdfCount exceeds the sanity ceiling also enforced by
-// headerKeyFromPassword and rar5Engine.newDecompressionReader.
+// headerKeyFromPassword and Reader.buildChain.
 func errKdfCountExceeded(got, max int) error {
 	return fmt.Errorf("rarengine: KdfCount %d exceeds maximum %d", got, max)
 }
@@ -57,10 +57,9 @@ func VerifyPassword(ch *CryptHeader, password string) (verified bool, hasCheckVa
 // encrypted. Same semantics as VerifyPassword: hasCheckValue distinguishes
 // "no check value present" from a definite verification result.
 //
-// This reuses the same derivation/check logic that
-// rar5Engine.newDecompressionReader already runs lazily during extraction
-// setup (engine_rar5.go), exposed standalone so it can be checked ahead of
-// extraction.
+// This reuses the same derivation/check logic that Reader.buildChain
+// already runs lazily during extraction setup (reader.go), exposed
+// standalone so it can be checked ahead of extraction.
 func VerifyFilePassword(fh *FileHeader, password string) (verified bool, hasCheckValue bool, err error) {
 	if fh == nil {
 		return false, false, errors.New("rarengine: nil file header")

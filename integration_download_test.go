@@ -40,24 +40,17 @@ func TestIntegration_Download_RAR5(t *testing.T) {
 	volumes <- io.NopCloser(bytes.NewReader(data))
 	close(volumes)
 
-	sd := rarengine.NewStreamDecompressor(volumes)
-	fh, err := sd.Next()
+	r := rarengine.NewReader(volumes)
+	e, err := r.NextEntry()
 	if err != nil {
-		t.Fatalf("Next() failed: %v", err)
+		t.Fatalf("NextEntry() failed: %v", err)
 	}
 
-	if sd.Version() != rarengine.VersionRAR5 {
-		t.Errorf("expected version RAR5, got %v", sd.Version())
-	}
-	if sd.Version().String() != "RAR5" {
-		t.Errorf("expected version string 'RAR5', got %q", sd.Version().String())
+	if e.Header.Name != "testfile.txt" {
+		t.Errorf("expected filename 'testfile.txt', got %q", e.Header.Name)
 	}
 
-	if fh.Name != "testfile.txt" {
-		t.Errorf("expected filename 'testfile.txt', got %q", fh.Name)
-	}
-
-	buf, err := io.ReadAll(sd)
+	buf, err := io.ReadAll(e)
 	if err != nil {
 		t.Fatalf("ReadAll failed: %v", err)
 	}
@@ -75,17 +68,17 @@ func TestIntegration_Download_RAR5_Solid(t *testing.T) {
 	volumes <- io.NopCloser(bytes.NewReader(data))
 	close(volumes)
 
-	sd := rarengine.NewStreamDecompressor(volumes)
-	fh, err := sd.Next()
+	r := rarengine.NewReader(volumes)
+	e, err := r.NextEntry()
 	if err != nil {
-		t.Fatalf("Next() failed: %v", err)
+		t.Fatalf("NextEntry() failed: %v", err)
 	}
 
-	if fh.Name != "testfile.txt" {
-		t.Errorf("expected filename 'testfile.txt', got %q", fh.Name)
+	if e.Header.Name != "testfile.txt" {
+		t.Errorf("expected filename 'testfile.txt', got %q", e.Header.Name)
 	}
 
-	buf, err := io.ReadAll(sd)
+	buf, err := io.ReadAll(e)
 	if err != nil {
 		t.Fatalf("ReadAll failed: %v", err)
 	}

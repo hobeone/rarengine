@@ -92,12 +92,17 @@ func rar5EntryFlags(name string, compFlags uint64, blockFlags uint64, unpackedSi
 // than its block's DataSize completes successfully, leaving the trailing
 // payload to be parsed as the next block header. Those trailing bytes are
 // attacker-chosen and can carry a well-formed, CRC-valid file header, so
-// Next() hands back an entry that exists nowhere in the archive's real
-// structure.
+// NextEntry would otherwise hand back an entry that exists nowhere in the
+// archive's real structure.
 //
 // The archive is byte-for-byte legitimate up to the point of the lie: only
 // the relationship between UnpackedSize and DataSize is abnormal, and
 // nothing rejected it -- the rar-bomb guard checks the opposite ratio.
+//
+// The property is positional recovery: what NextEntry reaches after the
+// oversized block is the archive's genuine next entry, not merely "an
+// error" (equally true of vulnerable code) and not merely "some entry other
+// than EVIL.txt" (satisfied by consuming too much or too little).
 func TestPackedRemainder_RAR5FabricatedHeaderIsRefused(t *testing.T) {
 	evil := rar5FileEntry("EVIL.txt", 5, crc32.ChecksumIEEE([]byte("PWNED")), []byte("PWNED"))
 
@@ -108,32 +113,36 @@ func TestPackedRemainder_RAR5FabricatedHeaderIsRefused(t *testing.T) {
 	arc.Write(rar5ArchiveHeader())
 	arc.Write(rar5FileEntry("benign.txt", uint64(len(content)),
 		crc32.ChecksumIEEE(content), payload))
+	arc.Write(rar5FileEntry("real_next.bin", 4, crc32.ChecksumIEEE([]byte("real")), []byte("real")))
 	arc.Write(rar5EndHeader())
 
-	sd := decompressorFor(arc.Bytes())
+	r := readerFor(arc.Bytes())
 
-	fh1, err := sd.Next()
+	e1, err := r.NextEntry()
 	if err != nil {
-		t.Fatalf("Next#1: %v", err)
+		t.Fatalf("first NextEntry: %v", err)
 	}
-	if fh1.Name != "benign.txt" {
-		t.Fatalf("Next#1 = %q, want benign.txt", fh1.Name)
+	if e1.Header.Name != "benign.txt" {
+		t.Fatalf("Next#1 = %q, want benign.txt", e1.Header.Name)
 	}
-	if got, err := io.ReadAll(sd); err != nil || !bytes.Equal(got, content) {
+	if got, err := io.ReadAll(e1); err != nil || !bytes.Equal(got, content) {
 		t.Fatalf("reading benign.txt = %q, %v; want %q, nil", got, err, content)
 	}
+	_ = e1.Close()
 
-	fh2, err2 := sd.Next()
-	if err2 == nil {
-		t.Fatalf("Next#2 surfaced fabricated entry %q; want an error", fh2.Name)
+	e2, err := r.NextEntry() // Must cleanly reach the real next entry, never the planted payload
+	if err != nil || e2.Header.Name != "real_next.bin" {
+		t.Fatalf("failed to reach genuine next entry: %v", err)
 	}
 }
 
 // TestPackedRemainder_ConsumedOnCompletion pins the mechanism rather than the
 // symptom: after a file ends, none of its packed block may still be owed.
-// Asserting the byte count separately from the fabrication tests above means
-// a fix that merely stops the fabricated entry from parsing -- without
-// consuming the bytes -- still fails here.
+// Asserting the byte count separately from the fabrication test above means
+// a fix that merely stops one particular fabricated header from parsing --
+// without consuming the trailing bytes exactly -- still fails here, because a
+// sentinel header planted right after the padding can only be reached by
+// consuming precisely as many bytes as were declared, neither fewer nor more.
 func TestPackedRemainder_ConsumedOnCompletion(t *testing.T) {
 	content := []byte("0123456789")
 	payload := append(append([]byte{}, content...), bytes.Repeat([]byte{0xAA}, 31)...)
@@ -142,24 +151,27 @@ func TestPackedRemainder_ConsumedOnCompletion(t *testing.T) {
 	arc.Write(rar5ArchiveHeader())
 	arc.Write(rar5FileEntry("benign.txt", uint64(len(content)),
 		crc32.ChecksumIEEE(content), payload))
+	arc.Write(rar5FileEntry("sentinel.bin", 4, crc32.ChecksumIEEE([]byte("real")), []byte("real")))
 	arc.Write(rar5EndHeader())
 
-	sd := decompressorFor(arc.Bytes())
-	if _, err := sd.Next(); err != nil {
+	r := readerFor(arc.Bytes())
+	e1, err := r.NextEntry()
+	if err != nil {
 		t.Fatalf("Next#1: %v", err)
 	}
-	if _, err := io.ReadAll(sd); err != nil {
+	if _, err := io.ReadAll(e1); err != nil {
 		t.Fatalf("reading: %v", err)
 	}
-	_, _ = sd.Next()
+	_ = e1.Close()
 
-	re, ok := sd.engine.(*rar5Engine)
-	if !ok {
-		t.Fatalf("engine is %T, want *rar5Engine", sd.engine)
+	e2, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("Next#2: %v", err)
 	}
-	if owed := re.packed.owed(); owed != 0 {
-		t.Errorf("packed cursor still owes %d bytes after the file ended, want 0: "+
-			"the next header would be parsed from them", owed)
+	if e2.Header.Name != "sentinel.bin" {
+		t.Errorf("reached %q, want sentinel.bin: the packed block's trailing "+
+			"padding was not fully consumed, so the next header would be "+
+			"parsed from the wrong offset", e2.Header.Name)
 	}
 }
 
@@ -202,13 +214,14 @@ func TestPackedRemainder_NoReadAfterVolumeClose(t *testing.T) {
 	volumes <- vol
 	close(volumes)
 
-	sd := NewStreamDecompressor(volumes)
-	if _, err := sd.Next(); err != nil {
-		t.Fatalf("Next#1: %v", err)
+	r := NewReader(volumes)
+	e, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("NextEntry#1: %v", err)
 	}
-	_, _ = io.ReadAll(sd)
-	if _, err := sd.Next(); err == nil {
-		t.Fatal("Next#2 succeeded; want the archive to end")
+	_, _ = io.ReadAll(e)
+	if _, err := r.NextEntry(); err == nil {
+		t.Fatal("NextEntry#2 succeeded; want the archive to end")
 	}
 
 	// Asserted, not assumed. If the file no longer runs past the end of this
@@ -224,27 +237,31 @@ func TestPackedRemainder_NoReadAfterVolumeClose(t *testing.T) {
 }
 
 // TestPackedRemainder_NoJoinOnCleanArchiveEnd guards the error value a caller
-// actually sees when a multi-volume set simply runs out. Wrapping that in a
-// join would break identity comparisons against the sentinel, which is how
-// several loops in this repo decide the archive is over.
+// actually sees when a multi-volume set simply runs out: the bare io.EOF
+// sentinel, by identity. Wrapping it in a join would break the identity
+// comparisons callers use to decide the archive is over -- and reporting
+// anything else would mean a healthy set that reached its end is
+// indistinguishable from one that ended on damage, which is the whole
+// distinction Reader.damaged exists to keep.
 func TestPackedRemainder_NoJoinOnCleanArchiveEnd(t *testing.T) {
 	// Untrimmed: the archive is healthy and read to completion, so the only
 	// thing left to report is that no further volume exists.
-	sd := NewStreamDecompressor(multiVolumeChan(t, -1))
+	r := NewReader(multiVolumeChan(t, -1))
 
-	if _, err := sd.Next(); err != nil {
-		t.Fatalf("Next#1: %v", err)
+	e, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("NextEntry#1: %v", err)
 	}
-	if _, err := io.ReadAll(sd); err != nil {
+	if _, err := io.ReadAll(e); err != nil {
 		t.Fatalf("reading: %v", err)
 	}
 
-	_, err := sd.Next()
+	_, err = r.NextEntry()
 	//nolint:errorlint // identity is the property under test, not equivalence.
-	if err != ErrNoNextVolume {
-		t.Errorf("Next at the end of a healthy archive returned %v (%T); want "+
-			"the bare ErrNoNextVolume sentinel. Wrapping it in a join breaks "+
-			"the identity comparisons callers use to stop looping", err, err)
+	if err != io.EOF {
+		t.Errorf("NextEntry at the end of a healthy archive returned %v (%T); "+
+			"want the bare io.EOF sentinel. Wrapping it in a join breaks the "+
+			"identity comparisons callers use to stop looping", err, err)
 	}
 }
 
@@ -264,15 +281,19 @@ func TestRefusedFile_RarBombPayloadIsDropped(t *testing.T) {
 	arc.Write(rar5FileEntry("bomb.txt", 2_000_000, 0, evil))
 	arc.Write(rar5EndHeader())
 
-	sd := decompressorFor(arc.Bytes())
+	r := readerFor(arc.Bytes())
 
-	if _, err := sd.Next(); !errors.Is(err, ErrRarBombDetected) {
-		t.Fatalf("Next#1 = %v; want ErrRarBombDetected", err)
+	e1, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("NextEntry#1: %v", err)
 	}
-	fh, err := sd.Next()
+	if closeErr := e1.Close(); !errors.Is(closeErr, ErrRarBombDetected) {
+		t.Fatalf("Close#1 = %v; want ErrRarBombDetected", closeErr)
+	}
+	e2, err := r.NextEntry()
 	if err == nil {
-		t.Fatalf("Next#2 surfaced %q out of the refused file's payload; "+
-			"want an error", fh.Name)
+		t.Fatalf("NextEntry#2 surfaced %q out of the refused file's payload; "+
+			"want an error", e2.Header.Name)
 	}
 }
 
@@ -280,6 +301,12 @@ func TestRefusedFile_RarBombPayloadIsDropped(t *testing.T) {
 // than the one that already dropped its payload. Which field an archive
 // corrupts is the archive's choice, so keying the discard on a single named
 // error left the same fabrication reachable through every other one.
+//
+// A negative UnpackedSize is decoded well after the name, so it is now
+// refused BY NAME as a terminal Entry (identity-first validation) rather
+// than as a bare NextEntry error -- the fixture below already carries a
+// complete header through the name field, so the refusal happens at the
+// validation block in parseFileHeader rather than at the earlier decode.
 func TestRefusedFile_CorruptHeaderPayloadIsDropped(t *testing.T) {
 	evil := rar5FileEntry("EVIL.txt", 5, crc32.ChecksumIEEE([]byte("PWNED")), []byte("PWNED"))
 
@@ -307,52 +334,49 @@ func TestRefusedFile_CorruptHeaderPayloadIsDropped(t *testing.T) {
 	arc.Write(evil)
 	arc.Write(rar5EndHeader())
 
-	sd := decompressorFor(arc.Bytes())
+	r := readerFor(arc.Bytes())
 
-	if _, err := sd.Next(); err == nil {
-		t.Fatal("Next#1 accepted a header with a negative unpacked size")
+	e1, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("NextEntry#1: %v", err)
 	}
-	fh, err := sd.Next()
-	if err == nil {
-		t.Fatalf("Next#2 surfaced %q out of the refused file's payload; "+
-			"want an error", fh.Name)
+	if e1 == nil || e1.Header == nil || e1.Header.Name != "neg.txt" {
+		t.Fatalf("NextEntry#1 returned %+v, want the refused member reported by name (neg.txt)", e1)
+	}
+	if closeErr := e1.Close(); !errors.Is(closeErr, ErrCorruptFileHeader) {
+		t.Fatalf("Close#1 = %v; want ErrCorruptFileHeader", closeErr)
+	}
+
+	e2, err := r.NextEntry()
+	if e2 != nil {
+		t.Fatalf("NextEntry#2 surfaced %q out of the refused file's payload; "+
+			"want end of archive", e2.Header.Name)
+	}
+	if !errors.Is(err, io.EOF) {
+		t.Fatalf("NextEntry#2 error = %v, want io.EOF", err)
 	}
 }
 
-// TestPackedRemainder_TracksCurrentVolume pins the invariant that makes the
-// drain safe on multi-volume files: while any packed bytes are still owed,
-// the limiter holding that count must describe the volume actually being
-// read. It did not, because each volume advance installed a fresh limiter
-// that the engine never saw again -- so a drain would have consumed the
-// count from a later volume's legitimate header bytes.
-func TestPackedRemainder_TracksCurrentVolume(t *testing.T) {
-	// Healthy archive, stopped mid-file: the read is large enough to have
-	// crossed several volume boundaries and small enough that the file is
-	// still in progress, which is the only state where the cursor both owes
-	// bytes and has had to follow the stream onto another volume.
-	sd := NewStreamDecompressor(multiVolumeChan(t, -1))
-
-	if _, err := sd.Next(); err != nil {
-		t.Fatalf("Next: %v", err)
-	}
-	first := sd.currentVol
-	if _, err := io.ReadFull(sd, make([]byte, 4096)); err != nil {
-		t.Fatalf("reading the first half of the file: %v", err)
-	}
-
-	re, ok := sd.engine.(*rar5Engine)
-	if !ok {
-		t.Fatalf("engine is %T, want *rar5Engine", sd.engine)
-	}
-	// Asserted, not assumed. Everything below is about what happens when a
-	// file crosses a volume boundary, so a read that never crossed one would
-	// satisfy the check while proving nothing.
-	if sd.currentVol == first {
-		t.Fatal("the read never left the first volume, so this test would " +
-			"pass without exercising the invariant it names")
-	}
-	if re.packed.lr.R != sd.currentVol {
-		t.Error("the packed cursor points at a volume the stream has already " +
-			"left; draining it would consume bytes from the wrong one")
-	}
-}
+// TestPackedRemainder_TracksCurrentVolume is deleted, not translated.
+//
+// What it asserted: it read a healthy multi-volume archive far enough to
+// cross a volume boundary mid-file (sd.currentVol != first), then reached
+// into the engine's internals and compared re.packed.lr.R -- the
+// io.LimitedReader field packedCursor's payload draining reads through --
+// against sd.currentVol by pointer identity, failing if they had drifted
+// apart. Its subject was therefore packedCursor itself: a limiter object,
+// installed fresh on each volume advance, that the old engine had to
+// remember to re-fetch or it would drain a later volume's legitimate header
+// bytes as though they belonged to the file in progress. packedCursor does
+// not survive this rewrite (see CLAUDE.md and the task-12 brief, which name
+// it explicitly as deleted).
+//
+// The invariant it guarded is now structurally rather than procedurally
+// true: multiVolumePayloadReader.Read reassigns its src directly to
+// r.vol.payload() on every volume boundary (splice.go, nextVolumePayload),
+// and volume.body lives inside the volume itself rather than in a separate
+// object that can be constructed and then forgotten. There is no second
+// reference for a drain to read through by mistake, so the bug class this
+// test caught cannot occur by construction. Reading a real file across a
+// volume boundary is exercised end to end by TestIntegration_MultiVolume and
+// by TestPackedRemainder_NoReadAfterVolumeClose above.

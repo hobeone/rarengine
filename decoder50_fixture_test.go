@@ -22,14 +22,10 @@ func TestExeFixtureReachesFilterPath(t *testing.T) {
 	volumes <- f
 	close(volumes)
 
-	sd := NewStreamDecompressor(volumes)
-	if _, err := sd.Next(); err != nil {
-		t.Fatalf("Next: %v", err)
-	}
-
-	re, ok := sd.engine.(*rar5Engine)
-	if !ok {
-		t.Fatalf("engine is %T, want *rar5Engine", sd.engine)
+	r := NewReader(volumes)
+	e, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("NextEntry: %v", err)
 	}
 
 	// Filters are queued during decode and popped as their blocks are reached,
@@ -37,10 +33,10 @@ func TestExeFixtureReachesFilterPath(t *testing.T) {
 	var peak int
 	buf := make([]byte, 32*1024)
 	for {
-		if got := len(re.dec50.fl); got > peak {
+		if got := len(r.dec50.fl); got > peak {
 			peak = got
 		}
-		if _, err := sd.Read(buf); err != nil {
+		if _, err := e.Read(buf); err != nil {
 			if err == io.EOF {
 				break
 			}

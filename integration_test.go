@@ -23,19 +23,19 @@ func TestIntegration_Store(t *testing.T) {
 	volumes <- f
 	close(volumes)
 
-	sd := rarengine.NewStreamDecompressor(volumes)
+	r := rarengine.NewReader(volumes)
 
-	fh, err := sd.Next()
+	e, err := r.NextEntry()
 	if err != nil {
-		t.Fatalf("Next() failed: %v", err)
+		t.Fatalf("NextEntry() failed: %v", err)
 	}
 
-	if fh.Name != "hello.txt" {
-		t.Errorf("expected 'hello.txt', got '%s'", fh.Name)
+	if e.Header.Name != "hello.txt" {
+		t.Errorf("expected 'hello.txt', got '%s'", e.Header.Name)
 	}
 
-	data := make([]byte, fh.UnpackedSize)
-	_, err = io.ReadFull(sd, data)
+	data := make([]byte, e.Header.UnpackedSize)
+	_, err = io.ReadFull(e, data)
 	if err != nil {
 		t.Fatalf("failed to read file content: %v", err)
 	}
@@ -58,26 +58,27 @@ func TestIntegration_MultiVolume(t *testing.T) {
 	}
 	close(volumes)
 
-	sd := rarengine.NewStreamDecompressor(volumes)
+	r := rarengine.NewReader(volumes)
 
 	// Read all files
 	fileCount := 0
 	for {
-		fh, err := sd.Next()
+		e, err := r.NextEntry()
 		if err != nil {
-			if errors.Is(err, rarengine.ErrNoNextVolume) || err == io.EOF {
+			if errors.Is(err, io.EOF) {
 				break
 			}
-			t.Fatalf("Next() failed: %v", err)
+			t.Fatalf("NextEntry() failed: %v", err)
 		}
 
 		fileCount++
+		fh := e.Header
 		t.Logf("Read file: Name=%q Size=%d Packed=%d Method=%d First=%v Last=%v", fh.Name, fh.UnpackedSize, fh.PackedSize, fh.Method, fh.FirstBlock, fh.LastBlock)
 		// Discard/drain data
 		buf := make([]byte, 4096)
 		totalRead := 0
 		for {
-			n, err := sd.Read(buf)
+			n, err := e.Read(buf)
 			totalRead += n
 			if err != nil {
 				if err == io.EOF {
@@ -108,7 +109,7 @@ func TestIntegration_Compress(t *testing.T) {
 	volumes <- f
 	close(volumes)
 
-	sd := rarengine.NewStreamDecompressor(volumes)
+	r := rarengine.NewReader(volumes)
 
 	expected := map[string]string{
 		"hello.txt":  "hello rardecode",
@@ -116,24 +117,24 @@ func TestIntegration_Compress(t *testing.T) {
 	}
 
 	for i := range 2 {
-		fh, err := sd.Next()
+		e, err := r.NextEntry()
 		if err != nil {
-			t.Fatalf("[%d] Next() failed: %v", i, err)
+			t.Fatalf("[%d] NextEntry() failed: %v", i, err)
 		}
 
-		expContent, ok := expected[fh.Name]
+		expContent, ok := expected[e.Header.Name]
 		if !ok {
-			t.Fatalf("unexpected file inside archive: %s", fh.Name)
+			t.Fatalf("unexpected file inside archive: %s", e.Header.Name)
 		}
 
-		data := make([]byte, fh.UnpackedSize)
-		_, err = io.ReadFull(sd, data)
+		data := make([]byte, e.Header.UnpackedSize)
+		_, err = io.ReadFull(e, data)
 		if err != nil {
-			t.Fatalf("failed to read content of %s: %v", fh.Name, err)
+			t.Fatalf("failed to read content of %s: %v", e.Header.Name, err)
 		}
 
 		if string(data) != expContent {
-			t.Errorf("content mismatch for %s: expected %q, got %q", fh.Name, expContent, string(data))
+			t.Errorf("content mismatch for %s: expected %q, got %q", e.Header.Name, expContent, string(data))
 		}
 	}
 }
@@ -149,7 +150,7 @@ func TestIntegration_Solid(t *testing.T) {
 	volumes <- f
 	close(volumes)
 
-	sd := rarengine.NewStreamDecompressor(volumes)
+	r := rarengine.NewReader(volumes)
 
 	expected := map[string]string{
 		"hello.txt":  "hello rardecode",
@@ -157,24 +158,24 @@ func TestIntegration_Solid(t *testing.T) {
 	}
 
 	for i := range 2 {
-		fh, err := sd.Next()
+		e, err := r.NextEntry()
 		if err != nil {
-			t.Fatalf("[%d] Next() failed: %v", i, err)
+			t.Fatalf("[%d] NextEntry() failed: %v", i, err)
 		}
 
-		expContent, ok := expected[fh.Name]
+		expContent, ok := expected[e.Header.Name]
 		if !ok {
-			t.Fatalf("unexpected file inside archive: %s", fh.Name)
+			t.Fatalf("unexpected file inside archive: %s", e.Header.Name)
 		}
 
-		data := make([]byte, fh.UnpackedSize)
-		_, err = io.ReadFull(sd, data)
+		data := make([]byte, e.Header.UnpackedSize)
+		_, err = io.ReadFull(e, data)
 		if err != nil {
-			t.Fatalf("failed to read content of %s: %v", fh.Name, err)
+			t.Fatalf("failed to read content of %s: %v", e.Header.Name, err)
 		}
 
 		if string(data) != expContent {
-			t.Errorf("content mismatch for %s: expected %q, got %q", fh.Name, expContent, string(data))
+			t.Errorf("content mismatch for %s: expected %q, got %q", e.Header.Name, expContent, string(data))
 		}
 	}
 }
@@ -190,22 +191,22 @@ func TestIntegration_Encrypted(t *testing.T) {
 	volumes <- f
 	close(volumes)
 
-	sd := rarengine.NewStreamDecompressor(volumes)
-	sd.SetPassword("test")
+	r := rarengine.NewReader(volumes)
+	r.SetPasswords([]string{"test"})
 
-	fh, err := sd.Next()
+	e, err := r.NextEntry()
 	if err != nil {
-		t.Fatalf("Next() failed: %v", err)
+		t.Fatalf("NextEntry() failed: %v", err)
 	}
 
-	if fh.Name != "hello.txt" {
-		t.Errorf("expected file 'hello.txt', got '%s'", fh.Name)
+	if e.Header.Name != "hello.txt" {
+		t.Errorf("expected file 'hello.txt', got '%s'", e.Header.Name)
 	}
 
-	data := make([]byte, fh.UnpackedSize)
-	_, err = io.ReadFull(sd, data)
+	data := make([]byte, e.Header.UnpackedSize)
+	_, err = io.ReadFull(e, data)
 	if err != nil {
-		t.Fatalf("failed to read content of %s: %v", fh.Name, err)
+		t.Fatalf("failed to read content of %s: %v", e.Header.Name, err)
 	}
 
 	expectedContent := "hello rardecode"
@@ -275,6 +276,16 @@ func TestIntegration_Oracle(t *testing.T) {
 			"rar5_solid_multi_qo.part5.rar", "rar5_solid_multi_qo.part6.rar",
 			"rar5_solid_multi_qo.part7.rar", "rar5_solid_multi_qo.part8.rar",
 		}},
+		// A quick-open record and a recovery record after every volume's file
+		// block, so this is the fixture that actually exercises service
+		// records being skipped ACROSS a multi-volume split -- rar5_solid_multi_qo
+		// carries a quick-open record too, but only in its first volume.
+		// See testdata/generate.sh for why regenerating it must keep
+		// producing more than one volume.
+		{name: "rar5_multi_service", volumes: []string{
+			"rar5_multi_service.part01.rar", "rar5_multi_service.part02.rar",
+			"rar5_multi_service.part03.rar", "rar5_multi_service.part04.rar",
+		}},
 	}
 
 	for _, tc := range testArchives {
@@ -296,7 +307,7 @@ func TestIntegration_Oracle(t *testing.T) {
 				t.Fatalf("unrar command failed: %v, stderr: %s", err, stderr.String())
 			}
 
-			// Open archive using StreamDecompressor
+			// Open archive using Reader
 			volumes := make(chan io.ReadCloser, len(tc.volumes))
 			for _, name := range tc.volumes {
 				f, err := os.Open(filepath.Join("testdata", name))
@@ -308,30 +319,24 @@ func TestIntegration_Oracle(t *testing.T) {
 			}
 			close(volumes)
 
-			sd := rarengine.NewStreamDecompressor(volumes)
+			r := rarengine.NewReader(volumes)
 			if tc.password != "" {
-				sd.SetPassword(tc.password)
-				// Encrypted files record a key-derived digest in place of a
-				// CRC32, which this library cannot compute, so verification
-				// refuses them rather than skipping the check. Comparing the
-				// decoded bytes against unrar is still worth doing, and is
-				// what this test is for -- so opt out of the digest check
-				// here rather than dropping the fixture.
-				sd.SetVerifyCRC(false)
+				r.SetPasswords([]string{tc.password})
 			}
 
 			// Track files extracted by decompressor to match with oracle directory
 			extractedFiles := make(map[string]bool)
 
 			for {
-				fh, err := sd.Next()
+				e, err := r.NextEntry()
 				if err != nil {
-					if errors.Is(err, rarengine.ErrNoNextVolume) || err == io.EOF {
+					if errors.Is(err, io.EOF) {
 						break
 					}
-					t.Fatalf("Next() failed: %v", err)
+					t.Fatalf("NextEntry() failed: %v", err)
 				}
 
+				fh := e.Header
 				if fh.IsDir {
 					continue
 				}
@@ -349,8 +354,16 @@ func TestIntegration_Oracle(t *testing.T) {
 				// io.ReadAtLeast discards an error delivered alongside the
 				// final bytes, so io.ReadFull cannot observe a truncation or
 				// checksum verdict at all.
-				data, err := io.ReadAll(sd)
-				if err != nil {
+				//
+				// Encrypted files record a key-derived digest in place of a
+				// CRC32, which this library cannot compute, so verification is
+				// unconditional and reports ErrChecksumUnsupported rather than
+				// skipping the check. Comparing the decoded bytes against
+				// unrar is still worth doing, and is what this test is for --
+				// so that specific verdict is tolerated here rather than
+				// dropping the fixture.
+				data, err := io.ReadAll(e)
+				if err != nil && !errors.Is(err, rarengine.ErrChecksumUnsupported) {
 					t.Fatalf("failed to read content of %s: %v", fh.Name, err)
 				}
 				if int64(len(data)) != fh.UnpackedSize {

@@ -103,12 +103,12 @@ func newSingleVolumeChan(buf *bytes.Buffer) <-chan io.ReadCloser {
 	return volumes
 }
 
-// readAllAndEOFErr reads sd to completion, returning the first non-io.EOF
+// readAllAndEOFErr reads e to completion, returning the first non-io.EOF
 // error encountered (nil if the stream ended cleanly).
-func readAllAndEOFErr(sd *StreamDecompressor) error {
+func readAllAndEOFErr(e *Entry) error {
 	buf := make([]byte, 4096)
 	for {
-		_, err := sd.Read(buf)
+		_, err := e.Read(buf)
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				return nil
@@ -130,13 +130,13 @@ func TestCRCVerification_DefaultDetectsMismatch(t *testing.T) {
 	wrongCRC := crc32.ChecksumIEEE(content) ^ 0xFFFFFFFF // deliberately wrong
 	buf := buildSingleFileRAR5Archive(t, "hello.txt", content, wrongCRC)
 
-	sd := NewStreamDecompressor(newSingleVolumeChan(buf))
-	if _, err := sd.Next(); err != nil {
-		t.Fatalf("Next() failed: %v", err)
+	r := NewReader(newSingleVolumeChan(buf))
+	e, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("NextEntry() failed: %v", err)
 	}
 
-	err := readAllAndEOFErr(sd)
-	if !errors.Is(err, ErrCRCMismatch) {
+	if err := readAllAndEOFErr(e); !errors.Is(err, ErrCRCMismatch) {
 		t.Fatalf("expected ErrCRCMismatch, got %v", err)
 	}
 }
@@ -149,32 +149,122 @@ func TestCRCVerification_DefaultHappyPath(t *testing.T) {
 	correctCRC := crc32.ChecksumIEEE(content)
 	buf := buildSingleFileRAR5Archive(t, "hello.txt", content, correctCRC)
 
-	sd := NewStreamDecompressor(newSingleVolumeChan(buf))
-	if _, err := sd.Next(); err != nil {
-		t.Fatalf("Next() failed: %v", err)
+	r := NewReader(newSingleVolumeChan(buf))
+	e, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("NextEntry() failed: %v", err)
 	}
 
-	if err := readAllAndEOFErr(sd); err != nil {
+	if err := readAllAndEOFErr(e); err != nil {
 		t.Fatalf("expected clean EOF, got error: %v", err)
 	}
 }
 
-// TestCRCVerification_DisabledAllowsMismatch confirms SetVerifyCRC(false)
-// restores best-effort extraction: a caller that explicitly wants to extract
-// whatever it can from a corrupt archive must not be blocked by a CRC
-// mismatch.
-func TestCRCVerification_DisabledAllowsMismatch(t *testing.T) {
+// TestCRCVerification_UnconditionalOnMismatch confirms verification can no
+// longer be switched off by the caller: SetVerifyCRC does not exist on
+// Reader, so a mismatched CRC32 must surface ErrCRCMismatch even from a
+// caller that -- under the old API -- would have disabled the check.
+func TestCRCVerification_UnconditionalOnMismatch(t *testing.T) {
 	content := []byte("world")
 	wrongCRC := crc32.ChecksumIEEE(content) ^ 0xFFFFFFFF
 	buf := buildSingleFileRAR5Archive(t, "hello.txt", content, wrongCRC)
 
-	sd := NewStreamDecompressor(newSingleVolumeChan(buf))
-	sd.SetVerifyCRC(false)
-	if _, err := sd.Next(); err != nil {
-		t.Fatalf("Next() failed: %v", err)
+	r := NewReader(newSingleVolumeChan(buf))
+	e, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("NextEntry() failed: %v", err)
 	}
 
-	if err := readAllAndEOFErr(sd); err != nil {
-		t.Fatalf("expected clean EOF with verification disabled, got error: %v", err)
+	_, _ = io.Copy(io.Discard, e)
+	if closeErr := e.Close(); !errors.Is(closeErr, ErrCRCMismatch) {
+		t.Fatalf("Close() = %v, want ErrCRCMismatch", closeErr)
+	}
+}
+
+// rar5FileEntryUnknownSize builds a RAR5 file block declaring
+// FileFlagUnpSizeUnknown, the flag ParseFileHeader refuses because it makes
+// the declared size -- and so truncation detection -- meaningless.
+func rar5FileEntryUnknownSize(name string, content []byte, crc32Value uint32) []byte {
+	var fp bytes.Buffer
+	fp.Write(EncodeVint(FileFlagHasCRC32 | FileFlagUnpSizeUnknown))
+	fp.Write(EncodeVint(uint64(len(content))))
+	fp.Write(EncodeVint(0))
+	var crcBuf [4]byte
+	binary.LittleEndian.PutUint32(crcBuf[:], crc32Value)
+	fp.Write(crcBuf[:])
+	fp.Write(EncodeVint(0))
+	fp.Write(EncodeVint(1))
+	fp.Write(EncodeVint(uint64(len(name))))
+	fp.WriteString(name)
+
+	var hp bytes.Buffer
+	hp.Write(EncodeVint(HeaderTypeFile))
+	hp.Write(EncodeVint(HeaderFlagHasData))
+	hp.Write(EncodeVint(uint64(len(content))))
+	hp.Write(fp.Bytes())
+
+	var out bytes.Buffer
+	out.Write(rar5Block(hp.Bytes()))
+	out.Write(content)
+	return out.Bytes()
+}
+
+// TestUnknownUnpackedSizeIsRefusedByName checks that a member carrying
+// FileFlagUnpSizeUnknown is refused BY NAME (identity-first validation) --
+// the FIRST NextEntry call returns a non-nil Entry whose Header.Name is the
+// flagged member's name, reporting ErrUnpSizeUnknown from both Read and
+// Close -- and, separately, that the refused member's declared payload does
+// not leak into the next header read: the archive's genuine next member is
+// still reachable by name afterward. Asserting the FIRST entry, never
+// looping to find a name, is deliberate: a loop would pass even if a
+// fabricated entry preceded it.
+//
+// This used to assert the opposite -- that the flagged member vanished
+// invisibly and NextEntry's first call landed directly on "real.txt" --
+// before dispatch had a header identity to refuse by. That assertion
+// pinned the OLD (pre identity-first-validation) contract for this specific
+// flag and had to change with it; see TestParseFileHeader_RejectsUnknownUnpackedSize
+// in header_test.go for the sentinel pin at the parseFileHeader level.
+func TestUnknownUnpackedSizeIsRefusedByName(t *testing.T) {
+	// Distinctive so its presence in the unread remainder would be unambiguous.
+	content := []byte("PAYLOAD-MUST-BE-DISCARDED")
+	unknownSize := rar5FileEntryUnknownSize("streamed.txt", content, crc32.ChecksumIEEE(content))
+
+	var archive bytes.Buffer
+	archive.Write(rar5ArchiveHeader())
+	archive.Write(unknownSize)
+	archive.Write(rar5FileEntry("real.txt", 4, crc32.ChecksumIEEE([]byte("real")), []byte("real")))
+	archive.Write(rar5EndHeader())
+
+	r := NewReader(volumesOf(archive.Bytes()))
+
+	first, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("first NextEntry: %v", err)
+	}
+	if first == nil || first.Header == nil || first.Header.Name != "streamed.txt" {
+		t.Fatalf("first NextEntry returned %+v, want the refused member reported by name (streamed.txt)", first)
+	}
+	buf := make([]byte, 16)
+	if _, readErr := first.Read(buf); !errors.Is(readErr, ErrUnpSizeUnknown) {
+		t.Fatalf("first member Read error = %v, want ErrUnpSizeUnknown", readErr)
+	}
+	if closeErr := first.Close(); !errors.Is(closeErr, ErrUnpSizeUnknown) {
+		t.Fatalf("first member Close = %v, want ErrUnpSizeUnknown", closeErr)
+	}
+
+	second, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("second NextEntry: %v", err)
+	}
+	if second.Header == nil || second.Header.Name != "real.txt" {
+		t.Fatalf("second NextEntry returned %v, want real.txt -- the refused member's "+
+			"payload must not survive into the next header read", second.Header)
+	}
+	if got, err := io.ReadAll(second); err != nil || string(got) != "real" {
+		t.Fatalf("reading real.txt = %q, %v; want \"real\", nil", got, err)
+	}
+	if closeErr := second.Close(); closeErr != nil {
+		t.Fatalf("real.txt Close = %v, want nil", closeErr)
 	}
 }

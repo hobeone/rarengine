@@ -37,17 +37,22 @@ for i := range w.buf {
 **The Catch**: "should only reach back" is a property of the *encoder*, not of the decoder, and a crafted archive is under no obligation to honour it. While the buffer went uncleared and unchecked, a stream could name a back-reference distance larger than the bytes its own file had produced and read out the previous file's plaintext. `CopyBytes` now bounds every distance by `Window.historyLen()` — the history actually written since the last reset that discarded history — which is what makes the missing memclr a performance choice rather than an information leak. Treat that bound as part of this optimization, not as a separate feature: removing it re-introduces the leak.
 
 ### 2. Stream decompressor Reuse (33.5 MB to 1.7 KB Memory Reduction)
-Following the first optimization, a memory profile (`alloc_space`) showed that the memory allocator was still saturating because `NewStreamDecompressor` was instantiated inside the loop, allocating and zeroing 32MB of heap memory in *every iteration*.
-**The Fix**: We implemented a `Reset(volumes)` method on `StreamDecompressor` allowing developers to reuse a single pre-allocated engine instance:
+Following the first optimization, a memory profile (`alloc_space`) showed that the memory allocator was still saturating because the reader was instantiated inside the loop, allocating and zeroing 32MB of heap memory in *every iteration*.
+**The Fix**: `Reset(volumes)` lets a caller reuse a single pre-allocated instance:
 ```go
-func (sd *StreamDecompressor) Reset(volumes <-chan io.ReadCloser) {
-	if sd.currentVol != nil {
-		_ = sd.currentVol.Close()
-		sd.currentVol = nil
+func (r *Reader) Reset(volumes <-chan io.ReadCloser) {
+	if r.vol != nil {
+		_ = r.vol.Close()
+		r.vol = nil
 	}
-	sd.volumes = volumes
-	sd.file.clear()
-	sd.win.Reset(false)
+	r.volumes = volumes
+	r.entry = nil
+	r.staged = nil
+	r.resolved, r.hasResolved = "", false
+	r.solid = false
+	r.fatal = nil
+	// BeginFile(false) is the window's one entrance for discarding history.
+	_ = r.win.BeginFile(false)
 }
 ```
 Reusing the 32MB buffer dropped per-operation allocations from **33,500,000 bytes** to **under 1,700 bytes** (a 20,000x reduction), turning `rarengine` into a true zero-allocation stream decoder.
@@ -112,7 +117,7 @@ All five must pass. Do not commit with failing tests, vet errors, or lint warnin
 rarengine is a zero-allocation streaming library. The hot path processes compressed bytes at memory-bandwidth speeds. These rules are non-negotiable:
 
 - **Profile before optimizing.** Use `go test -bench -cpuprofile / -memprofile` and `go tool pprof`. Never guess.
-- **Preserve zero-allocation invariants.** The `StreamDecompressor` and sliding `window` are designed for reuse via `Reset()`. Do not introduce heap allocations inside `Next()` or `Read()` without a benchmark justifying it.
+- **Preserve zero-allocation invariants.** The `Reader` and sliding `window` are designed for reuse via `Reset()`. Do not introduce heap allocations inside `NextEntry()` or `Entry.Read()` without a benchmark justifying it.
 - **Do not zero large buffers unnecessarily.** The window's `Reset(false)` path exists precisely to avoid `memclrNoHeapPointers` on the 32 MB buffer. Never reintroduce a zeroing loop on the history buffer.
 - **Huffman decode uses a 10-bit direct-lookup table.** Do not replace it with a generic tree walk — the LUT was profiled to be significantly faster and must remain.
 - **Bit reader fetches up to 56 bits per call.** The MSB-first invariant is load-bearing; do not change the bit-order contract without updating all callers.
@@ -158,15 +163,17 @@ This repository is fully indexed by **Repowise** and supports MCP (Model Context
 
 | Layer | Description | Key Files |
 | :--- | :--- | :--- |
-| **Stream Decompression** | Public API, multi-volume sequential stitching, AES-256-CBC decryption, and reader orchestration. | [decompressor.go](file:///home/hobe/software/rarengine/decompressor.go) |
-| **Decoding & Decompression** | LZ77 sliding window history, 10-bit direct-lookup Huffman tables, MSB bit reader, and V5 dynamic state-machine. | [decoder50.go](file:///home/hobe/software/rarengine/decoder50.go), [huffman.go](file:///home/hobe/software/rarengine/huffman.go), [bit_reader.go](file:///home/hobe/software/rarengine/bit_reader.go), [window.go](file:///home/hobe/software/rarengine/window.go) |
-| **Post-Processing Filters** | SIMD/Assembly x86 relative E8 branch relocation, ARM relocations, and byte-striping delta filters. | [filters.go](file:///home/hobe/software/rarengine/filters.go), `filter_arm_amd64.s`, `filter_e8_amd64.s` |
-| **Header Parsing & Traversal Safe** | RAR5 block, file, and archive header parsers. OS-independent traversal sanitization. | [header.go](file:///home/hobe/software/rarengine/header.go), [vint.go](file:///home/hobe/software/rarengine/vint.go) |
+| **Traversal** | Public API, volume/block traversal, member admission, password resolution. | [reader.go](./reader.go), [volume.go](./volume.go), [entry.go](./entry.go), [splice.go](./splice.go) |
+| **Encryption** | AES-256-CBC decryption and PBKDF2-HMAC-SHA256 key derivation. | [crypto.go](./crypto.go) |
+| **Decoding & Decompression** | LZ77 sliding window history, 10-bit direct-lookup Huffman tables, MSB bit reader, and V5 dynamic state-machine. | [decoder50.go](./decoder50.go), [huffman.go](./huffman.go), [bit_reader.go](./bit_reader.go), [window.go](./window.go) |
+| **Post-Processing Filters** | SIMD/Assembly x86 relative E8 branch relocation, ARM relocations, and byte-striping delta filters. | [filters.go](./filters.go), `filter_arm_amd64.s`, `filter_e8_amd64.s` |
+| **Header Parsing & Traversal Safe** | RAR5 block, file, and archive header parsers. RAR3 header parsing only (no RAR3 decoding). OS-independent traversal sanitization. | [header.go](./header.go), [header_rar3.go](./header_rar3.go), [vint.go](./vint.go) |
 
 ### Churn Hotspots & Biomarkers
 
-- **`decompressor.go`**: Sequential volume orchestrator (High Churn).
+- **`reader.go`**: Traversal orchestrator (High Churn).
 - **`decoder50.go`**: Core decompression hot-path loop. Most complex engine logic.
+- **`entry.go`**: Per-member byte budget, running CRC, terminal verdict.
 - **`header.go`**: Complex block and file header parsing (`ParseFileHeader`, `ReadBlockHeader`).
 
 ### Repowise MCP Server Usage

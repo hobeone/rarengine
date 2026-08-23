@@ -108,11 +108,17 @@ type FileHeader struct {
 	// name -- reading the salt bit as encryption is how an encrypted member
 	// carrying no salt came to be decoded as though it were plaintext.
 	//
-	// A RAR3 member is refused before Next returns it, so a true value on
-	// that path is only ever observed through a FileError's Header. RAR5
-	// members are decrypted normally and returned with this set.
-	Encrypted        bool
-	KdfCount         int
+	// Reader.NextEntry only ever traverses RAR5 archives -- openVolume
+	// refuses a RAR3 signature outright, before any per-member parsing runs
+	// -- so a RAR3-flavoured Encrypted value is observed only by a caller
+	// that calls ParseRAR3FileHeader directly for inspection. RAR5 members
+	// are decrypted normally by NextEntry and returned with this set.
+	Encrypted bool
+	KdfCount  int
+	// Salt is the PBKDF2 salt for an encrypted member. For RAR3, LHD_SALT and
+	// LHD_PASSWORD are each independently a claim of encryption (see
+	// Encrypted's comment); a caller that wants full encryption-claim
+	// detection across both bits should check Encrypted || len(Salt) > 0.
 	Salt             []byte
 	IV               []byte
 	UseMac           bool
@@ -217,13 +223,13 @@ func parseBlockHeaderFields(buf []byte, n int) (*BlockHeader, error) {
 		Flags: flags,
 	}
 
-	var extraSize int
+	var extraSize uint64
 	if flags&HeaderFlagHasExtra > 0 {
 		exSizeV, nEx, err := DecodeVint(payload)
 		if err != nil {
 			return nil, err
 		}
-		extraSize = int(exSizeV)
+		extraSize = exSizeV
 		payload = payload[nEx:]
 	}
 
@@ -239,23 +245,30 @@ func parseBlockHeaderFields(buf []byte, n int) (*BlockHeader, error) {
 		payload = payload[nDt:]
 	}
 
-	if len(payload) < extraSize {
+	// Compared as uint64 against uint64, never by casting the vint to int.
+	// A vint carries 70 bits, so int(exSizeV) can wrap negative -- and a
+	// negative extraSize passes "len(payload) < extraSize", then panics the
+	// process at payload[:len(payload)-extraSize]. Keeping the declared
+	// length in the type it was decoded in is what makes the bound a bound;
+	// the cast below is safe only because this comparison already ran.
+	if uint64(len(payload)) < extraSize {
 		return nil, ErrCorruptBlockHeader
 	}
 
-	h.Payload = payload[:len(payload)-extraSize]
+	h.Payload = payload[:len(payload)-int(extraSize)]
 
-	extraPayload := payload[len(payload)-extraSize:]
+	extraPayload := payload[len(payload)-int(extraSize):]
 	for len(extraPayload) > 0 {
 		exRecSizeV, nExRecSize, err := DecodeVint(extraPayload)
 		if err != nil {
 			return nil, err
 		}
-		exRecSize := int(exRecSizeV)
 		extraPayload = extraPayload[nExRecSize:]
-		if len(extraPayload) < exRecSize {
+		// Same bound in the same type, for the same reason as extraSize above.
+		if uint64(len(extraPayload)) < exRecSizeV {
 			return nil, ErrCorruptBlockHeader
 		}
+		exRecSize := int(exRecSizeV)
 
 		recData := extraPayload[:exRecSize]
 		extraPayload = extraPayload[exRecSize:]
@@ -458,6 +471,22 @@ func parseExtraRecords(fh *FileHeader, extra []ExtraRecord) error {
 
 // ParseFileHeader decodes the file header details from a block header.
 func ParseFileHeader(h *BlockHeader) (*FileHeader, error) {
+	fh, err := parseFileHeader(h)
+	if err != nil {
+		return nil, err
+	}
+	return fh, nil
+}
+
+// parseFileHeader is ParseFileHeader's internal form. It is the ONLY function
+// in this package permitted to return a non-nil *FileHeader alongside a
+// non-nil error: every failure up through the name field means there is no
+// identity to report, so those paths return a nil header like any other
+// parse failure. Only a failure inside parseExtraRecords, the last step,
+// returns the header it built anyway -- by that point the member's name and
+// sizes are already decoded, so the caller (Reader.dispatch) can refuse the
+// member by name instead of dropping it from the listing with no trace.
+func parseFileHeader(h *BlockHeader) (*FileHeader, error) {
 	if h.Type != HeaderTypeFile && h.Type != HeaderTypeService {
 		return nil, ErrBadBlockHeader
 	}
@@ -469,12 +498,10 @@ func ParseFileHeader(h *BlockHeader) (*FileHeader, error) {
 	}
 	payload = payload[nFlags:]
 
-	// Refused at parse time rather than later: the flag says UnpackedSize is
-	// not a trustworthy value, which is a structural fact about the header
-	// rather than a policy judgment about the file.
-	if flags&FileFlagUnpSizeUnknown > 0 {
-		return nil, ErrUnpSizeUnknown
-	}
+	// Captured here, at the point the flag is decoded, but not acted on until
+	// the validation block below: the flag itself is decoded identity, not a
+	// failure to decode, and the name has not been read yet.
+	unpSizeUnknown := flags&FileFlagUnpSizeUnknown > 0
 
 	fh := &FileHeader{
 		IsDir:      flags&FileFlagIsDir > 0,
@@ -489,12 +516,11 @@ func ParseFileHeader(h *BlockHeader) (*FileHeader, error) {
 	}
 	// The vint carries up to 70 bits, so an attacker can set the sign bit of
 	// the int64. A negative size would sail past every "have we produced
-	// enough yet" comparison downstream, so it is rejected where it enters
-	// rather than defended against at each use.
+	// enough yet" comparison downstream, so decoding it here always happens,
+	// but rejecting it is deferred to the validation block below -- see that
+	// block for why, and for the guarantee that no return path between here
+	// and there can hand back an unvalidated size.
 	fh.UnpackedSize = int64(unpackedSize)
-	if fh.UnpackedSize < 0 {
-		return nil, ErrCorruptFileHeader
-	}
 	payload = payload[nUnp:]
 
 	attrs, nAttrs, err := DecodeVint(payload) // Attributes
@@ -543,14 +569,49 @@ func ParseFileHeader(h *BlockHeader) (*FileHeader, error) {
 	}
 	payload = payload[nName:]
 
-	if len(payload) < int(nameLen) {
+	// uint64 against uint64: int(nameLen) wraps negative for a name length
+	// with the sign bit set, which passes this check and then panics at
+	// payload[:nameLen] -- a crafted header killing the host process.
+	if uint64(len(payload)) < nameLen {
 		return nil, ErrCorruptFileHeader
 	}
 	fh.Name = sanitizePath(string(payload[:nameLen]))
 
-	// Parse optional extra records
+	// Identity-first validation: both checks below are policy judgments about
+	// already-decoded values, not failures to decode, and neither needs to
+	// fire before fh.Name exists. Placed here, immediately before
+	// parseExtraRecords, every return from this point on carries fh alongside
+	// its error so the caller (Reader.dispatch) can refuse the member by name
+	// instead of dropping it from the listing with no trace -- the same
+	// contract parseExtraRecords already relies on below.
+	//
+	// No return path between the flags/size decode above and here can hand
+	// back a header with an unvalidated size: every intermediate field
+	// (mtime, CRC32, comp flags, host OS, name) fails with a bare
+	// (nil, err) on a short or malformed payload, never exposing fh. So a
+	// negative UnpackedSize is always rejected before ever escaping this
+	// function, satisfying "sizes are validated where they are decoded" even
+	// though the reject site has moved.
+	//
+	// The header's own untrustworthy value -- a meaningless UnpSizeUnknown
+	// placeholder, or a negative size -- is deliberately left exactly as
+	// decoded on fh, not clamped or zeroed. terminalEntry's cause is itself
+	// the statement that nothing in the header is to be trusted; clamping
+	// would destroy that evidence. See terminalEntry's doc comment and
+	// ErrRarBombDetected's existing precedent for the same choice.
+	if unpSizeUnknown {
+		return fh, ErrUnpSizeUnknown
+	}
+	if fh.UnpackedSize < 0 {
+		return fh, ErrCorruptFileHeader
+	}
+
+	// Parse optional extra records. Unlike every earlier failure in this
+	// function, fh is returned alongside the error here: the name and every
+	// size/CRC field are already decoded, so the caller can refuse the
+	// member by name instead of dropping it silently.
 	if err := parseExtraRecords(fh, h.Extra); err != nil {
-		return nil, err
+		return fh, err
 	}
 
 	return fh, nil
