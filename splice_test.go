@@ -287,3 +287,47 @@ func TestCorruptContinuationHeaderCostsOneMember(t *testing.T) {
 		t.Fatalf("after.bin = %q, %v; want \"still here\", nil", got, err)
 	}
 }
+
+// erroringReader yields its bytes together with a non-EOF error on the same
+// call, the way a network read that fails mid-buffer does, and reports a clean
+// EOF afterwards -- so an implementation that drops the error sees a tidy end
+// of stream instead of the failure.
+type erroringReader struct {
+	data []byte
+	err  error
+	done bool
+}
+
+func (e *erroringReader) Read(p []byte) (int, error) {
+	if e.done {
+		return 0, io.EOF
+	}
+	e.done = true
+	n := copy(p, e.data)
+	return n, e.err
+}
+
+// TestSplicePreservesReadErrorAlongsideBytes pins that a read producing bytes
+// AND a non-EOF error reports both.
+//
+// io.Reader does not require an implementation to repeat an error on the next
+// call, so returning nil in its place lost the failure outright. io.EOF is the
+// deliberate exception: it may be a volume boundary rather than an end, and is
+// rediscovered on the following call once the bytes have been delivered.
+func TestSplicePreservesReadErrorAlongsideBytes(t *testing.T) {
+	wantErr := errors.New("network read failed mid-buffer")
+	src := &erroringReader{data: []byte("partial"), err: wantErr}
+
+	e := newEntry(&FileHeader{Name: "x.bin", UnpackedSize: 64, LastBlock: true}, nil)
+	s := &multiVolumePayloadReader{r: nil, e: e, src: src}
+
+	buf := make([]byte, 32)
+	n, err := s.Read(buf)
+	if n != len("partial") {
+		t.Fatalf("Read returned n=%d, want %d", n, len("partial"))
+	}
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("Read error = %v, want %v -- the failure was dropped and the "+
+			"caller would see a clean stream", err, wantErr)
+	}
+}

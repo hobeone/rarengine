@@ -28,6 +28,16 @@ func (s *multiVolumePayloadReader) Read(p []byte) (int, error) {
 	for {
 		n, err := s.src.Read(p)
 		if n > 0 {
+			// A read that produced bytes AND failed must report both. io.EOF
+			// is the exception: it may be a volume boundary rather than an
+			// end, and the loop below decides which -- so it is swallowed
+			// here and rediscovered on the next call, once these bytes have
+			// been delivered. Any other error is real, and returning nil in
+			// its place lost it entirely unless the underlying reader chose
+			// to repeat it, which io.Reader does not require.
+			if err != nil && !errors.Is(err, io.EOF) {
+				return n, err
+			}
 			return n, nil
 		}
 		if err == io.EOF {
