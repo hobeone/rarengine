@@ -391,6 +391,23 @@ func TestEveryBlockTypeAccountsForItsPayload_RAR5(t *testing.T) {
 						"returning %q; want the archive-level parse error", e.Header.Name)
 				}
 				return
+			case HeaderTypeEnd:
+				// Also not swept, and deliberately: the end header says this
+				// volume holds no further blocks, so the sentinel behind it
+				// is not part of the archive and must NOT be reached. The
+				// payload accounting this test is about still happens --
+				// volume.next() skips the declared bytes before dispatch
+				// sees the header -- it is simply no longer observable from
+				// out here, because the traversal stops rather than reading
+				// on. See reader.go's HeaderTypeEnd case.
+				if err == nil {
+					t.Fatalf("a member (%q) was returned from behind the end "+
+						"header; nothing after it belongs to the archive", e.Header.Name)
+				}
+				if !errors.Is(err, io.EOF) {
+					t.Fatalf("NextEntry after an end header = %v, want io.EOF", err)
+				}
+				return
 			case HeaderTypeFile:
 				// The stub payload cannot parse as a file header, so this row
 				// is refused and swept the same as every other unclaimed

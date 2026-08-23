@@ -132,6 +132,18 @@ func (r *Reader) nextVolumePayload(e *Entry) (io.Reader, error) {
 			return nil, r.latchArchive(err)
 		}
 		if h.Type != HeaderTypeFile {
+			if h.Type == HeaderTypeEnd {
+				// Same rule the scan follows: no block after this one belongs
+				// to the archive, so the continuation is not in this volume
+				// and reading further here would parse whatever padding
+				// follows.
+				_ = r.vol.Close()
+				r.vol = nil
+				if verr := r.nextVolume(); verr != nil {
+					return nil, r.latchArchive(verr)
+				}
+				continue
+			}
 			if h.Type == HeaderTypeEncryption {
 				// Every volume of a header-encrypted archive repeats its own
 				// HEAD_CRYPT in plaintext, and each volume is a fresh value

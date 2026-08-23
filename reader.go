@@ -423,6 +423,20 @@ func (r *Reader) dispatch(h *BlockHeader) (*Entry, error) {
 		}
 		return nil, nil
 
+	case HeaderTypeEnd:
+		// The end header is the archive saying this volume holds no further
+		// blocks, so nothing after it is part of the archive and this
+		// traversal has no business parsing it. Falling through to the
+		// default case left the volume open and read whatever followed:
+		// trailing padding or sector alignment failed its CRC and ended the
+		// archive with ErrBadHeaderCRC after every member had been delivered
+		// intact. Closing here leaves r.vol nil, which is nextEntry's signal
+		// to open the next volume -- or, if there is none, to report the
+		// archive over.
+		_ = r.vol.Close()
+		r.vol = nil
+		return nil, nil
+
 	default:
 		// Everything the caller never sees, including service records -- quick
 		// open, comment, recovery, ACL, stream. Those reuse the file-header

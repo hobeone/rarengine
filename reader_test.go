@@ -784,3 +784,40 @@ func TestResetSeversAMemberThatWouldReachForTheNextVolume(t *testing.T) {
 		t.Fatalf("first member of the new archive = %q, want next.bin", next.Header.Name)
 	}
 }
+
+// TestTrailingPaddingAfterTheEndHeaderIsNotParsed pins that the archive ends
+// where the archive says it ends.
+//
+// The end header fell through dispatch's default case, which leaves the
+// volume open and reads on. RAR volumes are routinely followed by padding or
+// sector alignment, and parsing that as a block failed its CRC -- so an
+// archive whose members had all been delivered intact reported
+// ErrBadHeaderCRC as its final word instead of io.EOF, and a caller looping
+// until io.EOF saw a corrupt archive.
+//
+// Mutation check: remove dispatch's HeaderTypeEnd case and this test fails
+// with ErrBadHeaderCRC.
+func TestTrailingPaddingAfterTheEndHeaderIsNotParsed(t *testing.T) {
+	arc := rar5Archive(t, false, rar5Member(t, memberSpec{
+		name: "only.bin", content: "content", withCRC: true,
+	}))
+	stream := append(append([]byte{}, arc...), rar5EndHeader()...)
+	stream = append(stream, make([]byte, 32)...)
+
+	r := NewReader(volumesOf(stream))
+
+	e, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("NextEntry: %v", err)
+	}
+	if _, err := io.ReadAll(e); err != nil {
+		t.Fatalf("reading only.bin: %v", err)
+	}
+	if err := e.Close(); err != nil {
+		t.Fatalf("only.bin Close = %v, want nil", err)
+	}
+
+	if _, err := r.NextEntry(); !errors.Is(err, io.EOF) {
+		t.Fatalf("NextEntry past the end header = %v, want io.EOF", err)
+	}
+}
