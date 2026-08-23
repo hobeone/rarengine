@@ -82,6 +82,15 @@ func newDecoder50() *decoder50 {
 func (d *decoder50) init(r io.Reader, reset bool) {
 	d.r = r
 	d.lastBlock = false
+	// Pointing the decoder at a new reader invalidates whatever bits the last
+	// one left buffered. A member larger than half the window is not decoded
+	// to the end of its block before the caller can abandon it, so d.br
+	// survives non-nil, and fill() reads d.br != nil as "still inside a
+	// block" -- resuming the next member from the previous member's bits,
+	// against the Huffman tables it left behind. It is not conditional on
+	// reset: a new source always means the buffered bits belong to a stream
+	// this decoder is no longer reading.
+	d.br = nil
 	d.offsetSize = offsetSize5
 	if reset {
 		for i := range d.offset {
