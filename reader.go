@@ -98,12 +98,18 @@ func NewReader(volumes <-chan io.ReadCloser) *Reader {
 // Nothing else survives: a verdict, a resolved password and a damaged window
 // all belong to the archive that produced them.
 func (r *Reader) Reset(volumes <-chan io.ReadCloser) {
+	// First, and without reading anything: a member left in progress holds
+	// the splicer, which asks the Reader for the next volume when it wants a
+	// continuation. Clearing r.entry alone left that entry live, so a caller
+	// reading or closing it after Reset -- a deferred Close is enough --
+	// pulled volumes off the NEW channel and consumed headers the new
+	// traversal had not seen.
+	r.severActive()
 	if r.vol != nil {
 		_ = r.vol.Close()
 		r.vol = nil
 	}
 	r.volumes = volumes
-	r.entry = nil
 	r.staged = nil
 	r.damaged = nil
 	r.resolved, r.hasResolved = "", false
@@ -282,32 +288,44 @@ func (r *Reader) nextEntry() (*Entry, error) {
 // history nobody wrote.
 func (r *Reader) finishActive() {
 	e := r.entry
-	r.entry = nil
 	if e == nil {
 		return
 	}
 	if r.solid {
+		r.entry = nil
 		_ = e.Close()
 	} else {
-		// Sever before anything can read through it. e.src bottoms out on the
-		// volume's aliased v.body, which the next v.next() call re-points to
-		// describe a following block; an abandoned Entry that still holds it
-		// would silently start serving that block's bytes with a nil error
-		// instead of reporting its own truncation. Cutting the source here,
-		// rather than decoding to completion, is what keeps a non-solid
-		// abandon cheap -- see the doc comment above.
-		e.src = nil
-		if e.done == nil {
-			if e.short() {
-				_ = e.finish(e.truncated())
-			} else {
-				_ = e.finish(nil)
-			}
-		}
+		r.severActive()
 	}
 	if e.short() || (e.done != nil && !errors.Is(e.done, io.EOF) &&
 		!errors.Is(e.done, ErrChecksumUnsupported)) {
 		r.win.MarkIncomplete()
+	}
+}
+
+// severActive terminates the member in progress without reading anything.
+//
+// e.src bottoms out on the volume's aliased v.body, which the next v.next()
+// call re-points to describe a following block, and on the splicer, which
+// pulls volumes off the channel when it wants a continuation. An abandoned
+// Entry holding either would serve a later block's bytes with a nil error
+// instead of reporting its own truncation -- and after Reset it would do
+// that against a DIFFERENT archive, consuming volumes the new traversal has
+// not seen yet. Cutting the source, rather than decoding to completion, is
+// also what keeps a non-solid abandon cheap.
+func (r *Reader) severActive() {
+	e := r.entry
+	r.entry = nil
+	if e == nil {
+		return
+	}
+	e.src = nil
+	if e.done == nil {
+		if e.short() {
+			_ = e.finish(e.truncated())
+		} else {
+			_ = e.finish(nil)
+		}
 	}
 }
 

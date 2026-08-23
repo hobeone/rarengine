@@ -641,12 +641,14 @@ func TestSolidMemberAfterNamelessSkipIsRefused(t *testing.T) {
 // TestResetSeversARetainedEntry pins that an Entry the caller still holds
 // after Reset cannot read anything.
 //
-// It is severed structurally rather than by a check: e.src bottoms out on the
-// volume's aliased v.body, and volume.Close sets that field to the zero
-// LimitedReader, so every alias reads EOF immediately. Reset therefore needs
-// no finishActive call to make the old Entry safe -- but that safety lives in
-// volume.Close, one file away from Reset, which is exactly the kind of
-// invariant that gets broken by a well-meaning edit. Hence this test.
+// volume.Close severs the bottom of a single-volume member's chain by
+// itself: e.src bottoms out on the volume's aliased v.body, which Close sets
+// to the zero LimitedReader, so every alias reads EOF immediately. That is
+// not enough on its own -- see
+// TestResetSeversAMemberThatWouldReachForTheNextVolume, where the chain
+// bottoms out on the splicer instead and reaches PAST the closed volume --
+// and it lives one file away from Reset either way, which is exactly the
+// kind of invariant a well-meaning edit breaks. Hence both tests.
 func TestResetSeversARetainedEntry(t *testing.T) {
 	arc := rar5Archive(t, false, rar5Member(t, memberSpec{
 		name: "a.txt", content: "AAAAAAAAAAAAAAAA", withCRC: true,
@@ -725,5 +727,60 @@ func TestFatalLatchedMidCallOutrunsNoEntry(t *testing.T) {
 	// And it stays fatal.
 	if _, err := r.NextEntry(); !errors.Is(err, ErrCorruptArchiveHeader) {
 		t.Fatalf("third NextEntry error = %v, want the latched error again", err)
+	}
+}
+
+// TestResetSeversAMemberThatWouldReachForTheNextVolume is the case
+// volume.Close cannot cover.
+//
+// A member that spans volumes bottoms out on multiVolumePayloadReader, which
+// does not stop at the closed volume: it asks the Reader for the next one.
+// Reset only cleared r.entry, so an entry the caller still held -- a
+// deferred Close is enough -- pulled a volume off the NEW channel and
+// consumed the header at the front of it, before the new traversal had read
+// a single byte.
+//
+// The assertion is on r.vol rather than on what the stale entry returned:
+// the damage is the volume consumed, and staging happened to hide it in the
+// one archive shape where the header consumed was a member's first block.
+//
+// Mutation check: drop the severActive call from Reset and r.vol is a live
+// volume from the second archive.
+func TestResetSeversAMemberThatWouldReachForTheNextVolume(t *testing.T) {
+	v1 := rar5Archive(t, false, rar5Member(t, memberSpec{
+		name: "split.bin", content: "aaaa", unpackedSz: 8, packedSz: 4, notLast: true,
+	}))
+	v2 := rar5Archive(t, false, rar5Member(t, memberSpec{
+		name: "split.bin", content: "bbbb", notFirst: true, withCRC: true, crcOf: "aaaabbbb",
+	}))
+	r := NewReader(volumesOf(v1, v2))
+
+	e, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("NextEntry: %v", err)
+	}
+	if _, err := e.Read(make([]byte, 4)); err != nil {
+		t.Fatalf("first Read: %v", err)
+	}
+
+	fresh := rar5Archive(t, false, rar5Member(t, memberSpec{
+		name: "next.bin", content: "NNNN", withCRC: true,
+	}))
+	r.Reset(volumesOf(fresh))
+
+	// The caller still holds e, and closing it is the ordinary thing to do.
+	_ = e.Close()
+
+	if r.vol != nil {
+		t.Fatal("a retained entry opened a volume from the archive Reset " +
+			"installed; the new traversal starts with a header already eaten")
+	}
+
+	next, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("NextEntry after Reset: %v", err)
+	}
+	if next.Header.Name != "next.bin" {
+		t.Fatalf("first member of the new archive = %q, want next.bin", next.Header.Name)
 	}
 }

@@ -53,7 +53,11 @@ func (s *multiVolumePayloadReader) Read(p []byte) (int, error) {
 			// continuation and the member completed -- reporting success for
 			// content it never received, or a CRC mismatch that names the
 			// wrong cause.
-			if s.r.vol.bodyShort() {
+			// r.vol is nil only if the Reader was reset out from under this
+			// member, which severs it before it can read -- the check is
+			// here because "not short" is the right answer for a volume that
+			// no longer exists, not because the state is reachable.
+			if s.r.vol != nil && s.r.vol.bodyShort() {
 				return 0, fmt.Errorf("%w: file %q: volume ended inside its payload",
 					io.ErrUnexpectedEOF, s.e.Header.Name)
 			}
