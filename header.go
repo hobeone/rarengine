@@ -223,13 +223,13 @@ func parseBlockHeaderFields(buf []byte, n int) (*BlockHeader, error) {
 		Flags: flags,
 	}
 
-	var extraSize int
+	var extraSize uint64
 	if flags&HeaderFlagHasExtra > 0 {
 		exSizeV, nEx, err := DecodeVint(payload)
 		if err != nil {
 			return nil, err
 		}
-		extraSize = int(exSizeV)
+		extraSize = exSizeV
 		payload = payload[nEx:]
 	}
 
@@ -245,23 +245,30 @@ func parseBlockHeaderFields(buf []byte, n int) (*BlockHeader, error) {
 		payload = payload[nDt:]
 	}
 
-	if len(payload) < extraSize {
+	// Compared as uint64 against uint64, never by casting the vint to int.
+	// A vint carries 70 bits, so int(exSizeV) can wrap negative -- and a
+	// negative extraSize passes "len(payload) < extraSize", then panics the
+	// process at payload[:len(payload)-extraSize]. Keeping the declared
+	// length in the type it was decoded in is what makes the bound a bound;
+	// the cast below is safe only because this comparison already ran.
+	if uint64(len(payload)) < extraSize {
 		return nil, ErrCorruptBlockHeader
 	}
 
-	h.Payload = payload[:len(payload)-extraSize]
+	h.Payload = payload[:len(payload)-int(extraSize)]
 
-	extraPayload := payload[len(payload)-extraSize:]
+	extraPayload := payload[len(payload)-int(extraSize):]
 	for len(extraPayload) > 0 {
 		exRecSizeV, nExRecSize, err := DecodeVint(extraPayload)
 		if err != nil {
 			return nil, err
 		}
-		exRecSize := int(exRecSizeV)
 		extraPayload = extraPayload[nExRecSize:]
-		if len(extraPayload) < exRecSize {
+		// Same bound in the same type, for the same reason as extraSize above.
+		if uint64(len(extraPayload)) < exRecSizeV {
 			return nil, ErrCorruptBlockHeader
 		}
+		exRecSize := int(exRecSizeV)
 
 		recData := extraPayload[:exRecSize]
 		extraPayload = extraPayload[exRecSize:]
@@ -562,7 +569,10 @@ func parseFileHeader(h *BlockHeader) (*FileHeader, error) {
 	}
 	payload = payload[nName:]
 
-	if len(payload) < int(nameLen) {
+	// uint64 against uint64: int(nameLen) wraps negative for a name length
+	// with the sign bit set, which passes this check and then panics at
+	// payload[:nameLen] -- a crafted header killing the host process.
+	if uint64(len(payload)) < nameLen {
 		return nil, ErrCorruptFileHeader
 	}
 	fh.Name = sanitizePath(string(payload[:nameLen]))
