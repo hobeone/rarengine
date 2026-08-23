@@ -97,7 +97,6 @@ type FileHeader struct {
 	FirstBlock   bool // true if this is the first block/volume-part of the file
 	LastBlock    bool // true if this is the last block/volume-part of the file
 	Method       int  // compression method: 0 = store, 1..5 = compress
-	DictSize     int64
 	CRC32        uint32
 	HasCRC32     bool
 	HasBlake2sp  bool

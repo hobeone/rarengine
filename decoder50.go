@@ -47,7 +47,6 @@ type decoder50 struct {
 	payloadBuf []byte     // reusable scratch buffer for compressed block payload
 	codeLength [tableSize5]byte
 	lastBlock  bool
-	offsetSize int
 
 	mainDecoder      HuffmanDecoder
 	offsetDecoder    HuffmanDecoder
@@ -73,8 +72,7 @@ type decoder50 struct {
 
 func newDecoder50() *decoder50 {
 	return &decoder50{
-		offsetSize: offsetSize5,
-		fl:         make([]FilterBlock, 0, maxQueuedFilters),
+		fl: make([]FilterBlock, 0, maxQueuedFilters),
 	}
 }
 
@@ -91,7 +89,6 @@ func (d *decoder50) init(r io.Reader, reset bool) {
 	// reset: a new source always means the buffered bits belong to a stream
 	// this decoder is no longer reading.
 	d.br = nil
-	d.offsetSize = offsetSize5
 	if reset {
 		for i := range d.offset {
 			d.offset[i] = 0
@@ -161,7 +158,7 @@ func (d *decoder50) readBlockHeader() error {
 	d.lastBlock = flags&0x40 > 0
 
 	if flags&0x80 > 0 {
-		err = ReadCodeLengthTable(d.br, d.codeLength[:], false, &d.bitlenDecoder)
+		err = ReadCodeLengthTable(d.br, d.codeLength[:], &d.bitlenDecoder)
 		if err != nil {
 			return err
 		}
@@ -170,10 +167,10 @@ func (d *decoder50) readBlockHeader() error {
 			return err
 		}
 		cl = cl[mainSize5:]
-		if err = d.offsetDecoder.Init(cl[:d.offsetSize]); err != nil {
+		if err = d.offsetDecoder.Init(cl[:offsetSize5]); err != nil {
 			return err
 		}
-		cl = cl[d.offsetSize:]
+		cl = cl[offsetSize5:]
 		if err = d.lowoffsetDecoder.Init(cl[:lowoffsetSize5]); err != nil {
 			return err
 		}
@@ -542,9 +539,9 @@ func (d *decoder50) Read(win *Window, p []byte) (int, error) {
 		}
 		out = FilterDelta(int(f.param), d.filterBuf, d.filterOutBuf)
 	case 1:
-		out = FilterE8(0xe8, true, d.filterBuf, d.tot)
+		out = FilterE8(0xe8, d.filterBuf, d.tot)
 	case 2:
-		out = FilterE8(0xe9, true, d.filterBuf, d.tot)
+		out = FilterE8(0xe9, d.filterBuf, d.tot)
 	case 3:
 		out = FilterArm(d.filterBuf, d.tot)
 	default:
