@@ -32,6 +32,22 @@ type Reader struct {
 	resolved    string
 	hasResolved bool
 
+	// staged holds a block header that was read while scanning for something
+	// else and must not be lost. nextVolumePayload (splice.go) reads headers
+	// looking for a member's continuation; when it finds a NEW member instead,
+	// that member's header has already been consumed from the volume and the
+	// volume cannot rewind. Without staging it here, the next nextEntry call
+	// would ask the volume for a header, volume.next() would skip the staged
+	// member's declared payload on its way to the following block, and the
+	// member would be lost from the traversal entirely with the archive
+	// reporting a clean end.
+	//
+	// The invariant that makes this safe: staged is only ever set immediately
+	// after the volume.next() call that produced it, so r.vol.payload() still
+	// describes exactly that header's body. Nothing may advance the volume
+	// between setting staged and consuming it.
+	staged *BlockHeader
+
 	// solid reports whether the archive header declared a solid archive. It
 	// decides whether abandoning a member must decode its remainder to keep
 	// the window valid for a successor -- see NextEntry.
@@ -77,6 +93,7 @@ func (r *Reader) Reset(volumes <-chan io.ReadCloser) {
 	}
 	r.volumes = volumes
 	r.entry = nil
+	r.staged = nil
 	r.resolved, r.hasResolved = "", false
 	r.solid = false
 	r.fatal = nil
@@ -142,19 +159,28 @@ func (r *Reader) nextEntry() (*Entry, error) {
 		return nil, err
 	}
 	for {
-		if r.vol == nil {
-			if err := r.nextVolume(); err != nil {
+		var h *BlockHeader
+		if r.staged != nil {
+			// Consumed before the volume is touched: volume.next() would skip
+			// this header's payload on the way to the next block. See
+			// Reader.staged.
+			h, r.staged = r.staged, nil
+		} else {
+			if r.vol == nil {
+				if err := r.nextVolume(); err != nil {
+					return nil, err
+				}
+			}
+			var err error
+			h, err = r.vol.next()
+			if err != nil {
+				if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+					_ = r.vol.Close()
+					r.vol = nil
+					continue
+				}
 				return nil, err
 			}
-		}
-		h, err := r.vol.next()
-		if err != nil {
-			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-				_ = r.vol.Close()
-				r.vol = nil
-				continue
-			}
-			return nil, err
 		}
 		e, err := r.dispatch(h)
 		if err != nil {

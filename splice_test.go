@@ -171,3 +171,74 @@ func readFixtureVolume(t testing.TB, name string) []byte {
 	}
 	return b
 }
+
+// splitMemberThenMissingContinuation returns a first volume whose member
+// declares it continues, and a second volume that carries no continuation at
+// all -- only a brand-new member.
+//
+// This is the shape a Usenet download produces when one segment of a
+// multi-volume archive is lost: the member in progress can never be completed,
+// but every member after it is still intact and independently readable.
+func splitMemberThenMissingContinuation(t testing.TB, splitName, survivorName, survivorContent string) (v1, v2 []byte) {
+	t.Helper()
+	v1 = rar5Archive(t, false, rar5Member(t, memberSpec{
+		name: splitName, content: "aaaa", unpackedSz: 8, packedSz: 4, notLast: true,
+	}))
+	v2 = rar5Archive(t, false, rar5Member(t, memberSpec{
+		name: survivorName, content: survivorContent, withCRC: true,
+	}))
+	return v1, v2
+}
+
+// TestMissingContinuationDoesNotConsumeNextMember pins that a member whose
+// continuation never arrives costs exactly itself.
+//
+// nextVolumePayload reads headers looking for the continuation, so on finding
+// a new member instead it has already consumed that member's header from a
+// volume that cannot rewind. Returning io.EOF without staging the header let
+// the following nextEntry call ask volume.next() for a header, which skips the
+// unclaimed payload of the block just read -- so the survivor vanished and the
+// archive reported a clean end with a file silently missing.
+//
+// Asserting the SECOND entry by name is the whole point: a test that merely
+// checked the first member reports ErrTruncatedFile passed against the bug.
+func TestMissingContinuationDoesNotConsumeNextMember(t *testing.T) {
+	const survivor = "I MUST BE REACHABLE"
+	v1, v2 := splitMemberThenMissingContinuation(t, "big.bin", "survivor.bin", survivor)
+
+	r := NewReader(volumesOf(v1, v2))
+
+	first, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("first NextEntry: %v", err)
+	}
+	if first.Header.Name != "big.bin" {
+		t.Fatalf("first entry = %q, want big.bin", first.Header.Name)
+	}
+	// Reading it out is what drives nextVolumePayload into the new-member branch.
+	if _, err := io.Copy(io.Discard, first); !errors.Is(err, ErrTruncatedFile) {
+		t.Fatalf("reading the split member = %v, want ErrTruncatedFile", err)
+	}
+	if err := first.Close(); !errors.Is(err, ErrTruncatedFile) {
+		t.Fatalf("Close on the split member = %v, want ErrTruncatedFile", err)
+	}
+
+	second, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("second NextEntry: %v -- the member after a missing "+
+			"continuation was consumed by the scan that looked for it", err)
+	}
+	if second.Header.Name != "survivor.bin" {
+		t.Fatalf("second entry = %q, want survivor.bin", second.Header.Name)
+	}
+	got, err := io.ReadAll(second)
+	if err != nil {
+		t.Fatalf("reading survivor.bin: %v", err)
+	}
+	if string(got) != survivor {
+		t.Fatalf("survivor.bin content = %q, want %q", got, survivor)
+	}
+	if err := second.Close(); err != nil {
+		t.Fatalf("survivor.bin Close = %v, want nil", err)
+	}
+}

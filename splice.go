@@ -120,6 +120,14 @@ func (r *Reader) nextVolumePayload(e *Entry) (io.Reader, error) {
 		if fh.FirstBlock {
 			// A new member where a continuation was expected: the member in
 			// progress has no more parts, so it ended short.
+			//
+			// This header has already been consumed from the volume, which
+			// cannot rewind, so it is staged for the next nextEntry call.
+			// Returning io.EOF without staging it dropped the new member
+			// entirely: nextEntry would call volume.next(), which skips the
+			// unclaimed payload of the block just read, and the archive
+			// reported a clean end with a file silently missing.
+			r.staged = h
 			return nil, io.EOF
 		}
 		// A per-file header flag must be re-checked on every volume advance,
