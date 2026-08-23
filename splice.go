@@ -91,13 +91,17 @@ func (r *Reader) nextVolumePayload(e *Entry) (io.Reader, error) {
 				r.vol = nil
 				if verr := r.nextVolume(); verr != nil {
 					// Do not translate to io.EOF: reaching here means a read
-					// already in progress could not find its continuation,
-					// so the member is unfinished. Entry.Read turns this
-					// into the member's verdict (ErrTruncatedFile), the same
-					// as it would for any other short read -- reporting a
-					// clean end of stream here would be exactly the
-					// truncation-as-success decay that sentinel exists to
-					// prevent.
+					// already in progress could not find its continuation, so
+					// the member is unfinished. Entry.Read records this as the
+					// member's terminal verdict verbatim -- ErrNoNextVolume,
+					// NOT ErrTruncatedFile -- and that distinction is the
+					// point: it says the archive is missing a volume rather
+					// than that this member ran short within one, which is
+					// more than a truncation verdict can say. Reporting a
+					// clean end of stream here would be the
+					// truncation-as-success decay ErrTruncatedFile exists to
+					// prevent; translating to ErrTruncatedFile would instead
+					// discard which of the two happened.
 					return nil, r.latchArchive(verr)
 				}
 				continue

@@ -608,3 +608,45 @@ func TestSolidMemberAfterNamelessSkipIsRefused(t *testing.T) {
 			"the skipped member did not mark the window incomplete", err)
 	}
 }
+
+// TestResetSeversARetainedEntry pins that an Entry the caller still holds
+// after Reset cannot read anything.
+//
+// It is severed structurally rather than by a check: e.src bottoms out on the
+// volume's aliased v.body, and volume.Close sets that field to the zero
+// LimitedReader, so every alias reads EOF immediately. Reset therefore needs
+// no finishActive call to make the old Entry safe -- but that safety lives in
+// volume.Close, one file away from Reset, which is exactly the kind of
+// invariant that gets broken by a well-meaning edit. Hence this test.
+func TestResetSeversARetainedEntry(t *testing.T) {
+	arc := rar5Archive(t, false, rar5Member(t, memberSpec{
+		name: "a.txt", content: "AAAAAAAAAAAAAAAA", withCRC: true,
+	}))
+	r := readerFor(arc)
+
+	e, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("NextEntry: %v", err)
+	}
+	buf := make([]byte, 4)
+	if n, err := e.Read(buf); n != 4 || err != nil {
+		t.Fatalf("first Read = %d, %v; want 4, nil", n, err)
+	}
+
+	r.Reset(volumesOf(rar5Archive(t, false, rar5Member(t, memberSpec{
+		name: "b.txt", content: "BBBBBBBBBBBBBBBB", withCRC: true,
+	}))))
+
+	// The caller still holds e. It must not produce bytes -- neither its own
+	// remaining content nor anything from the archive Reset installed.
+	n, err := e.Read(buf)
+	if n != 0 {
+		t.Fatalf("retained Entry produced %d bytes (%q) after Reset", n, buf[:n])
+	}
+	if err == nil {
+		t.Fatal("retained Entry reported success after Reset")
+	}
+	if !errors.Is(err, ErrTruncatedFile) {
+		t.Fatalf("retained Entry error = %v, want ErrTruncatedFile", err)
+	}
+}
