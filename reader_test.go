@@ -575,3 +575,36 @@ func TestCRCVerificationIgnoresIsDir(t *testing.T) {
 		t.Fatalf("Close() on an IsDir entry with a wrong CRC32 = %v, want ErrCRCMismatch", closeErr)
 	}
 }
+
+// TestSolidMemberAfterNamelessSkipIsRefused pins that a member skipped before
+// its name was decoded still damages the window.
+//
+// dispatch refuses a member whose identity survived the parse failure by name,
+// and marks the window incomplete on the way out. A member whose header failed
+// earlier than that has nothing to report and is skipped silently -- but it
+// contributed no bytes either, so a solid successor's back-references reach
+// into history it never wrote. Marking only the reportable path left exactly
+// the unreportable failures decoding against a window nobody filled.
+func TestSolidMemberAfterNamelessSkipIsRefused(t *testing.T) {
+	// badName makes ParseFileHeader fail its name bounds check, which happens
+	// before fh.Name is set -- so this is the nameless path, not the
+	// refused-by-name one. TestFixtureBuildersRoundTrip pins that shape.
+	arc := rar5Archive(t, true,
+		rar5Member(t, memberSpec{name: "bad.bin", content: "junkjunk", badName: true}),
+		rar5Member(t, memberSpec{name: "solid.bin", content: "solid content", solid: true, withCRC: true}),
+	)
+
+	r := NewReader(volumesOf(arc))
+	e, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("NextEntry: %v", err)
+	}
+	if e.Header.Name != "solid.bin" {
+		t.Fatalf("first returned entry = %q, want solid.bin -- the nameless "+
+			"member should have been skipped without being reported", e.Header.Name)
+	}
+	if err := e.Close(); !errors.Is(err, ErrSolidStreamBroken) {
+		t.Fatalf("solid successor verdict = %v, want ErrSolidStreamBroken -- "+
+			"the skipped member did not mark the window incomplete", err)
+	}
+}

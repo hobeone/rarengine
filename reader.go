@@ -273,6 +273,16 @@ func (r *Reader) dispatch(h *BlockHeader) (*Entry, error) {
 				r.win.MarkIncomplete()
 				return terminalEntry(fh, err), nil
 			}
+			// Damage is recorded from what happened to the file, never from
+			// what the caller is told about it. A member skipped here is one
+			// whose name was never decoded, so nothing can be reported -- but
+			// it still contributed no bytes, and a solid successor's
+			// back-references assume otherwise. Marking only the named path
+			// left exactly the unreportable failures decoding a successor
+			// against history nobody wrote.
+			if fh == nil || fh.FirstBlock {
+				r.win.MarkIncomplete()
+			}
 			return nil, nil
 		}
 		// A continuation block belongs to a member already announced. Reaching
