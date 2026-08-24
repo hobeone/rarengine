@@ -1,6 +1,7 @@
 package rarengine
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -167,4 +168,89 @@ func TestFixturesDeclareRAR5UnpackVersion(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRealRAR7ArchiveIsRefused is the fixture-backed half: an archive produced
+// by rar 7.11 itself, not a hand-built header with a version field set.
+//
+// It matters that this is real. Every other test here builds the member with
+// rar5Member, which writes whatever version it is told and therefore cannot
+// show that RAR actually uses this field, that the signature is genuinely
+// identical, or that the value is where the spec says it is.
+//
+// What this fixture does NOT show: removing the guard makes it decode to the
+// correct 15 bytes, not to garbage. The member is too small to reach anything
+// RAR7 codes differently, so the RAR5 decoder happens to be right about it.
+// That is a limitation of a 106-byte fixture, not evidence the guard is
+// unnecessary -- a version field cannot be checked lazily on the chance that a
+// particular member survives being decoded by the wrong algorithm, and the
+// archives where it would not survive are the multi-gigabyte ones this
+// fixture exists to avoid committing.
+//
+// testdata/rar5_dict4g.rar is the same archive one step below the boundary and
+// must still decode. Together they pin both sides: RAR5 records the dictionary
+// as a 4-bit exponent, so 128KB<<15 = 4 GB is the largest it can express;
+// asking for 5 GB is what raises the version. Refusing version 1 while
+// accepting the 4 GB archive is exactly the line this guard has to draw, and
+// a guard keyed on the dictionary rather than the version would fail it --
+// rar5_dict4g.rar declares 128 times this library's window and decodes fine.
+func TestRealRAR7ArchiveIsRefused(t *testing.T) {
+	t.Run("rar7 is refused", func(t *testing.T) {
+		r := readerFor(fixtureBytes(t, "rar7_unpack_version.rar"))
+		e, err := r.NextEntry()
+		if err != nil {
+			t.Fatalf("NextEntry: %v", err)
+		}
+		if e.Header.UnpackVersion == unpackVersionRAR5 {
+			t.Fatal("fixture declares version 0; it no longer exercises this path")
+		}
+		got, readErr := io.ReadAll(e)
+		if len(got) != 0 {
+			t.Fatalf("refused member produced %d bytes: %q", len(got), got)
+		}
+		if !errors.Is(readErr, ErrUnsupportedFormat) {
+			t.Fatalf("Read = %v, want ErrUnsupportedFormat", readErr)
+		}
+		if err := e.Close(); !errors.Is(err, ErrUnsupportedFormat) {
+			t.Fatalf("Close = %v, want ErrUnsupportedFormat", err)
+		}
+	})
+
+	// The signature is what makes the version check necessary rather than
+	// merely tidy: it is byte-identical to every RAR5 archive, so nothing
+	// before the file header can tell the two formats apart.
+	t.Run("signature is indistinguishable from RAR5", func(t *testing.T) {
+		rar7 := fixtureBytes(t, "rar7_unpack_version.rar")
+		rar5 := fixtureBytes(t, "rar5_store.rar")
+		if !bytes.Equal(rar7[:8], rar5[:8]) {
+			t.Fatalf("signatures differ: rar7=%x rar5=%x -- if these ever "+
+				"diverge, the format could be rejected at the signature",
+				rar7[:8], rar5[:8])
+		}
+	})
+
+	// One step below the boundary: the largest dictionary RAR5 can express.
+	// It must decode, and it must not be refused for declaring a dictionary
+	// far larger than this library's 32 MB window.
+	t.Run("rar5 at the 4GB dictionary ceiling still decodes", func(t *testing.T) {
+		r := readerFor(fixtureBytes(t, "rar5_dict4g.rar"))
+		e, err := r.NextEntry()
+		if err != nil {
+			t.Fatalf("NextEntry: %v", err)
+		}
+		if e.Header.UnpackVersion != unpackVersionRAR5 {
+			t.Fatalf("UnpackVersion = %d, want %d", e.Header.UnpackVersion, unpackVersionRAR5)
+		}
+		got, err := io.ReadAll(e)
+		if err != nil {
+			t.Fatalf("ReadAll = %v; a 4 GB declared dictionary is not a "+
+				"reason to refuse a RAR5 member", err)
+		}
+		if string(got) != "hello rardecode" {
+			t.Fatalf("content = %q", got)
+		}
+		if err := e.Close(); err != nil {
+			t.Fatalf("Close = %v, want nil", err)
+		}
+	})
 }
