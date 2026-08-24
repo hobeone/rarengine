@@ -640,7 +640,14 @@ func TestFinishActive_DamageOnNonCleanOutcome(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := NewReader(nil)
-			fh := &FileHeader{Name: "x.bin", UnpackedSize: int64(len(content))}
+			// LastBlock is what a parsed single-block header carries, and
+			// saying so matters: the zero value is false, which claims the
+			// member continues into another part -- and a member that
+			// reaches its declared size while that claim stands is refused
+			// as malformed, which would make every case here damage.
+			fh := &FileHeader{
+				Name: "x.bin", UnpackedSize: int64(len(content)), LastBlock: true,
+			}
 			e := newEntry(fh, &errWithFinalBytes{data: content, err: tc.err})
 			r.entry = e
 
