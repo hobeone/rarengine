@@ -83,6 +83,26 @@ A member whose *continuation* block claims encryption its first block did not
 costs only that member (`ErrCorruptFileHeader`) — the stream is still standing
 on a real block boundary, so the archive stays readable past it.
 
+### Unverifiable checksums
+
+Every member that produces bytes is verified against the CRC32 its header
+records. Three archive classes carry no CRC32 to compare against — an
+encrypted file whose digest is a key-derived MAC (`UseMac`), an archive
+written with `rar -htb` (BLAKE2sp only), and a header recording no digest at
+all — and all three report `ErrChecksumUnsupported` from `Read`/`Close`.
+
+The content is still delivered; the error says a check could not be made, not
+that the bytes are wrong. A caller whose policy accepts unverifiable content
+treats it as success:
+
+```go
+if err := e.Close(); err != nil && !errors.Is(err, rarengine.ErrChecksumUnsupported) {
+	log.Printf("%s: %v", e.Header.Name, err)
+}
+```
+
+There is no way to switch verification off and get the content regardless.
+
 ### RAR3 archives
 
 `rarengine` is RAR5 only. A RAR3 signature is recognised so it can be refused

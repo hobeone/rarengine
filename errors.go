@@ -47,16 +47,28 @@ var (
 	// exactly the defect it exists to prevent, and callers loop until io.EOF.
 	ErrTruncatedFile = errors.New("rarengine: archive ended before the file's declared size was produced")
 
-	// ErrChecksumUnsupported is returned once a file has been fully decoded when
-	// its header records a digest this library cannot check -- the key-derived
-	// MAC selected by UseMac, rather than a CRC32 of the plaintext. RAR sets that
-	// flag on the header carrying the digest, which for a multi-volume file is
-	// the last part's.
+	// ErrChecksumUnsupported is returned once a file has produced bytes that
+	// this library could not compare against any digest. Three archive classes
+	// reach it, and they are one verdict because a caller can do only one thing
+	// about them:
+	//
+	//   - UseMac: the header's digest field holds a key-derived MAC rather than
+	//     a CRC32 of the plaintext. RAR sets that flag on the header carrying
+	//     the digest, which for a multi-volume file is the last part's.
+	//   - BLAKE2sp only: written by rar -htb, which records a BLAKE2sp hash and
+	//     no CRC32 at all. This library does not compute BLAKE2sp.
+	//   - No digest recorded at all.
 	//
 	// Completing such a file without an error would report unverified content as
 	// extracted successfully, and a RAR archive's per-file digest is the only
 	// signal that the decoded bytes are the intended ones. There is no method
 	// to disable verification and get the content regardless.
+	//
+	// The bytes are still delivered: this reports that a check could not be
+	// made, not that the content is bad. A caller whose policy accepts
+	// unverifiable content treats it as success; one that does not, does not.
+	// A member that produced no bytes -- a directory, an empty file -- never
+	// reaches this, because it has nothing to verify.
 	ErrChecksumUnsupported = errors.New("rarengine: file records a checksum this library cannot verify")
 
 	// ErrCorruptArchiveHeader reports that the archive-level header (the
