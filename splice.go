@@ -236,11 +236,14 @@ func (r *Reader) nextVolumePayload(e *Entry) (io.Reader, error) {
 		// payload delivered as this one's content -- and a method mismatch
 		// fed compressed bytes to the store reader that the first block
 		// selected, or the reverse.
-		if fh.Name != e.Header.Name || fh.Method != e.Header.Method {
+		if fh.Name != e.Header.Name || fh.Method != e.Header.Method ||
+			fh.UnpackVersion != e.Header.UnpackVersion {
 			return nil, fmt.Errorf("%w: file %q: continuation declares name %q "+
-				"method %d, first block declared name %q method %d",
+				"method %d version %d, first block declared name %q method %d "+
+				"version %d",
 				ErrCorruptFileHeader, e.Header.Name, fh.Name, fh.Method,
-				e.Header.Name, e.Header.Method)
+				fh.UnpackVersion, e.Header.Name, e.Header.Method,
+				e.Header.UnpackVersion)
 		}
 		// Captures the whole-file CRC32, LastBlock and UseMac, all of which
 		// RAR records on the LAST part rather than the first.

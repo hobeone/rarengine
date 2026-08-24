@@ -36,9 +36,19 @@ var (
 	// check for either with errors.Is.
 	ErrPasswordRequired = errors.New("rarengine: password required for encrypted file")
 
-	// ErrUnsupportedFormat reports an archive this library cannot decode.
-	// A RAR3 signature reaches this: it is recognised so it can be refused
-	// by name, and nothing beyond the signature is parsed.
+	// ErrUnsupportedFormat reports content this library cannot decode. Two
+	// things reach it, at different scopes:
+	//
+	//   - A RAR3 signature, which ends the traversal: it is recognised so it
+	//     can be refused by name, and nothing beyond the signature is parsed.
+	//   - A member whose file header declares an unpack version other than 0
+	//     (RAR 5.0) -- RAR 7.0 raised it. That is a per-member verdict
+	//     delivered by the Entry, and the archive stays readable past it,
+	//     because the field is per-member and other members may be decodable.
+	//
+	// One sentinel for both because a caller can do nothing different about
+	// them: the content is in a format this library does not implement. The
+	// message names which.
 	ErrUnsupportedFormat = errors.New("rarengine: unsupported archive format")
 
 	// ErrTruncatedFile is returned when the archive stream ends before a file's

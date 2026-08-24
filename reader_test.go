@@ -224,6 +224,11 @@ type memberSpec struct {
 	isDir   bool
 	withCRC bool
 
+	// unpackVersion sets the compression-algorithm version field. Zero is
+	// RAR 5.0, the only version this library decodes; a nonzero value builds
+	// the RAR7-shaped member Reader.dispatch must refuse.
+	unpackVersion uint64
+
 	// crcOf overrides what withCRC checksums, defaulting to content. A
 	// multi-volume member's last part carries the WHOLE file's CRC32, not
 	// just that part's own bytes, so a split fixture must set this to the
@@ -282,11 +287,15 @@ func rar5Member(t testing.TB, s memberSpec) []byte {
 		f.Write(crcBuf[:])
 	}
 	// Compression flags: method lives in bits 7..9, so zero is store (method
-	// 0). FileCompSolid is bit 6.
+	// 0). FileCompSolid is bit 6, and the unpack version is bits 0..5.
 	var compFlags uint64
 	if s.solid {
 		compFlags |= FileCompSolid
 	}
+	// Masked with a literal, not FileCompVersion: a test that builds its
+	// input with the same constant the parser reads it with moves whenever
+	// that constant is wrong, and agrees with it either way.
+	compFlags |= s.unpackVersion & 0x3f
 	f.Write(EncodeVint(compFlags))
 	f.Write(EncodeVint(0)) // host OS
 

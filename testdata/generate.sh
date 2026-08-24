@@ -82,6 +82,37 @@ echo "  rar5_blake2.rar"
 rar a -ma5 -htb -p'test' -ep rar5_blake2_encrypted.rar "$TMPDIR/hello.txt"
 echo "  rar5_blake2_encrypted.rar"
 
+# 5c. RAR7 format, and the RAR5 archive one step below the boundary.
+#
+# RAR 7.0 is not selected by a switch -- there is no -ma7. It is selected by
+# needing a dictionary larger than RAR5 can express. RAR5 records the
+# dictionary as a 4-bit exponent (128KB << n), so n=15 is 4 GB and that is the
+# ceiling; asking for more raises the file header's unpack-version field to 1
+# and puts the excess in bits above 14. Measured, so the boundary is not
+# folklore:
+#
+#   -md4g -> VERSION=0 dictbits=15 extra=0x00   <- rar5_dict4g.rar
+#   -md5g -> VERSION=1 dictbits=15 extra=0x10   <- rar7_unpack_version.rar
+#
+# The content is piped through stdin (-si) rather than given as a file, and
+# that is load-bearing: when rar knows the input size it shrinks the dictionary
+# to fit, so `rar a -md5g small.txt` writes a 128 KB dictionary and VERSION=0.
+# Reading from a pipe it cannot know the size, so it keeps what -md asked for.
+# This is what makes a genuine RAR7 archive 106 bytes instead of 5 GB.
+#
+# Both signatures are byte-identical to every other RAR5 archive here -- that
+# is the whole point of the pair. Nothing outside a file header separates the
+# formats, which is why the version field has to be checked.
+#
+# Note unrar will not EXTRACT rar7_unpack_version.rar without -md5g: it
+# declines to allocate a dictionary that large by default. It lists it fine,
+# and rarengine refuses it on the version before any window work, so neither
+# needs the switch.
+printf 'hello rardecode' | rar a -si"hello.txt" -md5g -m1 -inul rar7_unpack_version.rar
+echo "  rar7_unpack_version.rar"
+printf 'hello rardecode' | rar a -si"hello.txt" -md4g -m1 -inul rar5_dict4g.rar
+echo "  rar5_dict4g.rar"
+
 # 6. RAR5, file encryption (password: "test")
 rar a -ma5 -p'test' -ep rar5_encrypted.rar "$TMPDIR/hello.txt"
 echo "  rar5_encrypted.rar"
