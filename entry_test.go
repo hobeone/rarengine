@@ -229,3 +229,81 @@ func TestEntryReadBeforeSourceIsSetReportsNoActiveFile(t *testing.T) {
 		t.Fatalf("Read with no source = %v, want ErrNoActiveFile", err)
 	}
 }
+
+// TestMemberCompletingOnANonFinalHeaderIsRefused pins that a member cannot
+// complete while a header saying it continues is still in force.
+//
+// Reaching the declared UnpackedSize means every byte has been produced;
+// LastBlock false means the archive says more parts follow. Both cannot be
+// true of a well-formed archive, and the disagreement is what made the digest
+// uncomparable: the CRC32 field of a non-final part covers that part's packed
+// bytes, not the file's plaintext.
+//
+// The old outcome was ErrCRCMismatch on content that had decoded perfectly --
+// the library telling a caller its data was corrupt when every byte was
+// intact. That is why this is refused rather than skipped: returning nil
+// would let a malformed entry complete silently, and ErrChecksumUnsupported
+// would tell a caller whose policy is "accept unverifiable" that this is an
+// archive class we cannot check, rather than an archive contradicting itself.
+//
+// Mutation check: remove the LastBlock test from verifyChecksum and this
+// fails with ErrCRCMismatch -- the false accusation, restored.
+func TestMemberCompletingOnANonFinalHeaderIsRefused(t *testing.T) {
+	const content = "0123456789"
+	// notLast clears LastBlock. The declared size equals what this part
+	// carries, so the byte budget is met while the header still claims a
+	// further part. crcOf makes the recorded digest something other than the
+	// plaintext CRC32, standing in for the per-part pack CRC a real
+	// intermediate part records there.
+	member := rar5Member(t, memberSpec{
+		name: "victim.bin", content: content, withCRC: true,
+		crcOf: "not the plaintext", notLast: true,
+	})
+
+	r := NewReader(volumesOf(rar5Archive(t, false, member)))
+	e, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("NextEntry: %v", err)
+	}
+
+	got, readErr := io.ReadAll(e)
+	closeErr := e.Close()
+
+	// Every byte was delivered: the archive is malformed, not the content.
+	if string(got) != content {
+		t.Fatalf("content = %q, want %q", got, content)
+	}
+	verdict := readErr
+	if verdict == nil {
+		verdict = closeErr
+	}
+	if errors.Is(verdict, ErrCRCMismatch) {
+		t.Fatalf("verdict = %v -- correct content reported as corrupt because "+
+			"a non-final part's digest was compared as the file's", verdict)
+	}
+	if !errors.Is(verdict, ErrCorruptFileHeader) {
+		t.Fatalf("verdict = %v (read=%v close=%v), want ErrCorruptFileHeader",
+			verdict, readErr, closeErr)
+	}
+}
+
+// A member whose LAST part is in force at completion is unaffected: that is
+// every well-formed archive, single- and multi-volume alike, and the check
+// above must not cost them their checksum verification.
+func TestMemberCompletingOnTheFinalHeaderStillVerifies(t *testing.T) {
+	const content = "0123456789"
+	member := rar5Member(t, memberSpec{
+		name: "honest.bin", content: content, withCRC: true, crcOf: "wrong",
+	})
+
+	r := NewReader(volumesOf(rar5Archive(t, false, member)))
+	e, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("NextEntry: %v", err)
+	}
+	_, _ = io.ReadAll(e)
+	if err := e.Close(); !errors.Is(err, ErrCRCMismatch) {
+		t.Fatalf("Close = %v, want ErrCRCMismatch; a final-part digest is "+
+			"still the file's and is still compared", err)
+	}
+}

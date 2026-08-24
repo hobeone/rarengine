@@ -185,6 +185,28 @@ func (e *Entry) finish(err error) error {
 // completion, which for a multi-volume member is the LAST part's -- that is
 // where the whole-file CRC32 is recorded.
 func (e *Entry) verifyChecksum() error {
+	// A member cannot honestly complete while a header saying it continues is
+	// still in force. Reaching the declared UnpackedSize means every byte has
+	// been produced; LastBlock false means the archive says more parts follow.
+	// Both cannot be true of a well-formed archive, and the disagreement is
+	// what makes the digest below uncomparable: the CRC32 field of a
+	// non-final part covers that part's packed bytes, not the file's
+	// plaintext, so comparing it reported ErrCRCMismatch on content that had
+	// decoded perfectly -- the false accusation this library treats as worse
+	// than a missed check.
+	//
+	// Refused rather than skipped. Returning nil would let a malformed entry
+	// complete silently, which is what the checksum machinery exists to
+	// prevent; ErrChecksumUnsupported would be a lie of a different kind,
+	// telling a caller whose policy is "accept unverifiable" that this is an
+	// archive class we cannot check, when it is an archive that contradicts
+	// itself. ErrCorruptFileHeader says what is actually wrong, and matches
+	// what a continuation whose identity does not match the member gets.
+	if !e.cur.LastBlock {
+		return fmt.Errorf("%w: file %q: produced its declared %d bytes while a "+
+			"header marking a further part was in force",
+			ErrCorruptFileHeader, e.Header.Name, e.size)
+	}
 	// UseMac is read from the header that records the digest, which RAR sets
 	// only on the last part. Reading it at admission saw the first part's
 	// cleared copy and then compared a plaintext CRC32 against a key-derived

@@ -146,7 +146,7 @@ func TestEntry_RejectsOverReachingBackReference(t *testing.T) {
 	dec := newDecoder50()
 	dec.init(bytes.NewReader(nil), true)
 	lz := &lz50Reader{dec: dec, win: win}
-	e := newEntry(&FileHeader{Name: "current.bin", UnpackedSize: 16}, lz)
+	e := newEntry(&FileHeader{Name: "current.bin", UnpackedSize: 16, LastBlock: true}, lz)
 
 	// The file's first token is a match reaching 1000 bytes back, before it has
 	// produced anything at all.
