@@ -13,7 +13,7 @@ func BenchmarkFilterExecution(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		for j := range 100 {
 			fl[j] = filterBlock{
 				start:  int64(j),

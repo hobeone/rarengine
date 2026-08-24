@@ -218,3 +218,66 @@ func (b *byteAtATime) Read(p []byte) (int, error) {
 	b.off++
 	return 1, nil
 }
+
+// TestVerifyPasswordScansPastUnencryptedMembers pins that an unencrypted
+// member is not an answer for the whole archive.
+//
+// RAR5 encrypts per member, so an archive can hold both kinds:
+//
+//	rar a       x.rar plain.txt
+//	rar a -ptest x.rar secret.txt
+//
+// produces one of each, and unrar lists the second with a leading '*'.
+// Returning at the first file header reported hasCheckValue=false -- "this
+// archive cannot be tested" -- for an archive whose very next member carried
+// the check value. That is a wrong answer, not a missing one: a caller acting
+// on it would conclude no password was needed.
+//
+// Mutation check: restore the early return on !fh.Encrypted and this reports
+// verified=false hasCheckValue=false for the correct password.
+func TestVerifyPasswordScansPastUnencryptedMembers(t *testing.T) {
+	data := fixtureBytes(t, "rar5_mixed_encryption.rar")
+
+	verified, hasCheck, err := VerifyPassword(bytes.NewReader(data), "test")
+	if err != nil {
+		t.Fatalf("VerifyPassword: %v", err)
+	}
+	if !hasCheck {
+		t.Fatal("hasCheckValue = false; the archive's second member is " +
+			"encrypted and carries a check value")
+	}
+	if !verified {
+		t.Fatal("verified = false for the correct password")
+	}
+
+	verified, hasCheck, err = VerifyPassword(bytes.NewReader(data), "wrong")
+	if err != nil {
+		t.Fatalf("VerifyPassword: %v", err)
+	}
+	if !hasCheck {
+		t.Fatal("hasCheckValue = false for the wrong password too; the check " +
+			"value is present either way")
+	}
+	if verified {
+		t.Fatal("verified = true for the wrong password")
+	}
+}
+
+// A volume number that does not fit in an int must be refused, not wrapped.
+// Negative is this field's encoding for "the archive omitted it", which
+// VolumeNumber reports as index 0 -- so a wrapped value lets a crafted archive
+// claim to be the head of a set.
+func TestVolumeNumberRejectsAnOutOfRangeDeclaration(t *testing.T) {
+	var payload bytes.Buffer
+	payload.Write(encodeVint(arcFlagMultiVol | arcFlagVolNum))
+	payload.Write(encodeVint(1 << 63)) // far past MaxInt
+
+	h := &blockHeader{Type: headerTypeArchive, Payload: payload.Bytes()}
+	ah, err := parseArchiveHeader(h)
+	if err == nil {
+		t.Fatalf("parseArchiveHeader accepted volume number 1<<63 as %d", ah.VolumeNumber)
+	}
+	if !errors.Is(err, ErrCorruptBlockHeader) {
+		t.Fatalf("err = %v, want ErrCorruptBlockHeader", err)
+	}
+}

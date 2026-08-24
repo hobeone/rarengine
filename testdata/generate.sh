@@ -113,6 +113,16 @@ echo "  rar7_unpack_version.rar"
 printf 'hello rardecode' | rar a -si"hello.txt" -md4g -m1 -inul rar5_dict4g.rar
 echo "  rar5_dict4g.rar"
 
+# 5d. RAR5, MIXED encryption: one unencrypted member, then an encrypted one.
+# Two separate `rar a` invocations -- a single one applies one policy to every
+# file. unrar lists the second with a leading '*'. This is the archive that
+# showed VerifyPassword must not answer from the first member alone.
+printf 'plain content' > "$TMPDIR/plain.txt"
+printf 'secret content' > "$TMPDIR/secret.txt"
+rar a -ep -inul rar5_mixed_encryption.rar "$TMPDIR/plain.txt"
+rar a -ep -p'test' -inul rar5_mixed_encryption.rar "$TMPDIR/secret.txt"
+echo "  rar5_mixed_encryption.rar"
+
 # 6. RAR5, file encryption (password: "test")
 rar a -ma5 -p'test' -ep rar5_encrypted.rar "$TMPDIR/hello.txt"
 echo "  rar5_encrypted.rar"

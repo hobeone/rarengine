@@ -37,8 +37,13 @@ import (
 //
 // The scan stops at the first thing that can answer: an archive-level
 // encryption header (whole-archive encryption, headers included), or the
-// first file or service header (per-file encryption). Payloads are skipped,
-// never read.
+// first ENCRYPTED file or service header. Payloads are skipped, never read.
+//
+// Unencrypted members do not end the scan. RAR5 encrypts per member, so an
+// archive can hold both kinds, and the first member being unencrypted says
+// nothing about the rest. That means a fully unencrypted archive is scanned
+// to its end header before reporting there is nothing to verify -- paying a
+// walk over block headers to avoid answering from the first member alone.
 func VerifyPassword(r io.Reader, password string) (verified, hasCheckValue bool, err error) {
 	if err := readSignature(r); err != nil {
 		return false, false, err
@@ -73,10 +78,19 @@ func VerifyPassword(r io.Reader, password string) (verified, hasCheckValue bool,
 			if err != nil {
 				return false, false, err
 			}
-			if !fh.Encrypted {
-				return false, false, nil
+			if fh.Encrypted {
+				return verifyFileHeaderPassword(fh, password)
 			}
-			return verifyFileHeaderPassword(fh, password)
+			// An unencrypted member is not the answer, only this member's
+			// answer. RAR5 encrypts per member, so an archive can hold both
+			// -- `rar a x.rar plain` then `rar a -p x.rar secret` produces
+			// exactly that, and unrar lists the second with a leading '*'.
+			// Stopping here reported "nothing to verify" for an archive
+			// whose next member carried the check value, which is a wrong
+			// answer rather than a missing one.
+			if err := skipPayload(r, h); err != nil {
+				return false, false, err
+			}
 
 		case headerTypeEnd:
 			// Nothing behind the end header belongs to the archive.

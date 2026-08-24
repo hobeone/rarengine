@@ -4,9 +4,11 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"hash/crc32"
 	"io"
 	"io/fs"
+	"math"
 	"math/bits"
 	"path"
 	"strings"
@@ -311,6 +313,16 @@ func parseArchiveHeader(h *blockHeader) (*archiveHeader, error) {
 		volNum, _, err := decodeVint(payload)
 		if err != nil {
 			return nil, err
+		}
+		// Bounded in the type it was decoded in, like every other declared
+		// length here. A vint carries 70 bits, so int(volNum) can wrap
+		// negative -- and negative is this field's encoding for "the archive
+		// omitted it", which VolumeNumber reports as index 0. A crafted
+		// archive could therefore claim to be the first volume of a set by
+		// declaring an enormous volume number.
+		if volNum > math.MaxInt {
+			return nil, fmt.Errorf("%w: volume number %d does not fit in an int",
+				ErrCorruptBlockHeader, volNum)
 		}
 		ah.VolumeNumber = int(volNum)
 	}
