@@ -53,9 +53,24 @@ func filterArm(buf []byte, offset int64) []byte {
 	return buf
 }
 
-// filterE8 relocates relative CALL/JMP offset addresses to absolute offsets in x86 executables.
+// filterE8 relocates relative CALL/JMP offsets to absolute ones.
+//
+// The running position is uint32, not int32, and that is the whole of what
+// this function gets right. unrar narrows the same 64-bit value the same way
+// -- `uint FileOffset=(uint)WrittenFileSize` -- and the narrowing is exact,
+// because fileSize is 2^24 and 2^24 divides 2^32, so (x mod 2^32) mod 2^24
+// equals x mod 2^24. Width is not the hazard.
+//
+// Signedness is. With an int32 running position, Go's % returns a NEGATIVE
+// remainder for a negative operand, so past 2 GB of output the offset came
+// out 2^24 too small -- except when it landed exactly on a multiple of 2^24,
+// where it agreed by accident. That intermittency is why nothing caught it.
+//
+// The sign tests below are written against the raw bits the way unrar writes
+// them, for the same reason unrar gives: they must not depend on a signed
+// type being present or on its width.
 func filterE8(c byte, buf []byte, offset int64) []byte {
-	off := int32(offset)
+	off := uint32(offset)
 	for b := buf; len(b) >= 5; {
 		if filterE8ScanSIMD != nil && len(b) >= 32 {
 			idx := filterE8ScanSIMD(b, c)
@@ -63,7 +78,7 @@ func filterE8(c byte, buf []byte, offset int64) []byte {
 				if idx > len(b)-5 {
 					idx = len(b)
 				}
-				off += int32(idx)
+				off += uint32(idx)
 				b = b[idx:]
 				if len(b) < 5 {
 					break
@@ -77,14 +92,18 @@ func filterE8(c byte, buf []byte, offset int64) []byte {
 		if ch != 0xe8 && ch != c {
 			continue
 		}
-		off %= fileSize
-		addr := int32(binary.LittleEndian.Uint32(b))
-		if addr < 0 {
-			if addr+off >= 0 {
-				binary.LittleEndian.PutUint32(b, uint32(addr+fileSize))
+		// Computed fresh rather than folded back into off, matching
+		// unrar's `Offset=(CurPos+FileOffset)%FileSize`. Both are congruent
+		// mod 2^24 and only that matters, but keeping off unreduced makes it
+		// the position rather than a residue.
+		cur := off % fileSize
+		addr := binary.LittleEndian.Uint32(b)
+		if addr&0x80000000 != 0 { // addr would be negative as int32
+			if (addr+cur)&0x80000000 == 0 { // addr+cur >= 0
+				binary.LittleEndian.PutUint32(b, addr+fileSize)
 			}
 		} else if addr < fileSize {
-			binary.LittleEndian.PutUint32(b, uint32(addr-off))
+			binary.LittleEndian.PutUint32(b, addr-cur)
 		}
 		off += 4
 		b = b[4:]
