@@ -496,6 +496,18 @@ func parseExtraRecords(fh *FileHeader, extra []extraRecord) error {
 //   - ErrUnpSizeUnknown, from the declared-size check
 //   - a failure inside parseExtraRecords, the last step
 //
+// Those two headers are NOT equally complete, and the difference is a trap.
+// The declared-size check runs BEFORE parseExtraRecords, so a header carrying
+// ErrUnpSizeUnknown has its name, sizes and compression fields decoded and
+// every extra-record field still at its zero value -- Encrypted false,
+// EncCheck nil, Salt nil, KdfCount 0 -- however encrypted the member actually
+// is. Only "name and sizes" may be read from it. A caller that treats
+// Encrypted as meaningful there decides an encrypted member is plaintext,
+// which is a silent wrong answer rather than an error. See issue #62: the fix
+// is to move the check below parseExtraRecords so both paths mean the same
+// thing, which changes this function's contract and Reader.dispatch's
+// refusal path and so is not done here.
+//
 // An exported wrapper used to stand in front of this and flatten both to a
 // nil header, which is why callers could not tell those two apart from a
 // header that never parsed. It had no callers outside tests once the
