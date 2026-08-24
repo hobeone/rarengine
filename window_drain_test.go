@@ -2,6 +2,7 @@ package rarengine
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"testing"
 	"time"
@@ -21,6 +22,11 @@ import (
 //
 // leaving w=0, r=k, full=true. Available() then reports the whole buffer,
 // which is what sends Read looking for bytes that are not there.
+// staleK is the read-pointer offset staleFullWindow is built with. The short
+// read the two tests below assert is size-staleK, so it lives here rather than
+// being repeated as a literal in three places.
+const staleK = 100
+
 func staleFullWindow(t *testing.T, size, k int) *Window {
 	t.Helper()
 
@@ -58,8 +64,14 @@ func staleFullWindow(t *testing.T, size, k int) *Window {
 //
 // Run in a goroutine because the failure mode under test is non-termination:
 // asserting on it directly would hang the suite instead of failing it.
+//
+// On failure that goroutine is left spinning for the rest of the run, which is
+// accepted rather than fixed: the loop it is stuck in has no cancellation
+// point, and giving Window.Read one so a test can interrupt it would put
+// production machinery in the hot path to serve a case that only occurs when
+// the code is already broken. A failing run is not expected to be a long one.
 func TestWindowReadDoesNotSpinOnStaleFull(t *testing.T) {
-	w := staleFullWindow(t, 0x40000, 100)
+	w := staleFullWindow(t, 0x40000, staleK)
 
 	done := make(chan int, 1)
 	go func() {
@@ -69,9 +81,16 @@ func TestWindowReadDoesNotSpinOnStaleFull(t *testing.T) {
 
 	select {
 	case n := <-done:
-		// The contract is that it returns, and returns only what it moved.
-		if n <= 0 || n > w.size {
-			t.Fatalf("Read returned %d bytes, want a positive short count", n)
+		// Asserted exactly, not as a range. Read can never exceed len(p),
+		// so "n > w.size" is a bound that cannot fail -- and n == w.size is
+		// precisely the regression to catch: a Read that returned the
+		// over-reported Available() instead of what it moved. The ring holds
+		// size-k readable bytes from r to the end of the buffer, and the
+		// second iteration finds nothing, so that is the whole answer.
+		if want := w.size - staleK; n != want {
+			t.Fatalf("Read returned %d bytes, want exactly %d -- the short "+
+				"count is the assertion, and %d would mean Available()'s "+
+				"over-report was passed straight through", n, want, w.size)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Window.Read did not return: the copy loop made no progress " +
@@ -83,13 +102,20 @@ func TestWindowReadDoesNotSpinOnStaleFull(t *testing.T) {
 // only useful if the count is honest. A loop that gave up but still returned
 // Available() would report bytes it never wrote into p.
 func TestWindowReadReportsWhatItActuallyMoved(t *testing.T) {
-	w := staleFullWindow(t, 0x40000, 100)
+	w := staleFullWindow(t, 0x40000, staleK)
 
 	p := make([]byte, w.size)
 	for i := range p {
 		p[i] = 0xff
 	}
 	n, _ := w.Read(p)
+
+	// Asserted before the loop below, which iterates from n: if Read
+	// over-reported n as len(p), that loop would run zero times and the test
+	// would pass having verified nothing.
+	if want := w.size - staleK; n != want {
+		t.Fatalf("Read returned %d bytes, want %d", n, want)
+	}
 
 	for i := n; i < len(p); i++ {
 		if p[i] != 0xff {
@@ -127,6 +153,12 @@ func TestStoreReaderLeavesWindowPointersConsistent(t *testing.T) {
 		n, err := s.Read(buf)
 		got = append(got, buf[:n]...)
 		if err != nil {
+			// Only io.EOF ends this loop. Breaking on any error let a
+			// mid-stream failure end the read silently and surface as a
+			// content-length mismatch below, naming the wrong cause.
+			if !errors.Is(err, io.EOF) {
+				t.Fatalf("storeReader.Read after %d bytes: %v", len(got), err)
+			}
 			break
 		}
 	}
@@ -205,7 +237,7 @@ func TestSolidSuccessorReachesStoredHistory(t *testing.T) {
 // next to the fix, not in a commit message.
 func TestMemberBoundaryClearsStaleFull(t *testing.T) {
 	for _, solid := range []bool{false, true} {
-		w := staleFullWindow(t, 0x40000, 100)
+		w := staleFullWindow(t, 0x40000, staleK)
 		if err := w.BeginFile(solid); err != nil {
 			t.Fatalf("BeginFile(%v): %v", solid, err)
 		}
