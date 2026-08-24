@@ -586,10 +586,18 @@ type storeReader struct {
 	win *Window
 }
 
+// Read delivers the stored member's bytes from the source and records them as
+// window history, so a solid successor can back-reference them.
+//
+// recordHistory rather than writeBytes: these bytes are not staged for anyone
+// to read back -- they went to the caller from s.r -- and writeBytes would
+// leave them counted as unread with no drain step to clear them. A stored
+// member larger than the window then lapped the read pointer and left full
+// and Available describing a buffer that no longer existed.
 func (s *storeReader) Read(p []byte) (int, error) {
 	n, err := s.r.Read(p)
 	if n > 0 {
-		s.win.writeBytes(p[:n])
+		s.win.recordHistory(p[:n])
 	}
 	return n, err
 }
