@@ -2,6 +2,7 @@ package rarengine
 
 import (
 	"bytes"
+	"io"
 	"testing"
 	"time"
 )
@@ -163,7 +164,7 @@ func TestSolidSuccessorReachesStoredHistory(t *testing.T) {
 	content := bytes.Repeat([]byte("stored member payload. "), 60000)
 
 	s := &storeReader{r: bytes.NewReader(content), win: win}
-	if _, err := readAllThrough(s); err != nil {
+	if _, err := io.Copy(io.Discard, s); err != nil {
 		t.Fatalf("store pass: %v", err)
 	}
 
@@ -183,21 +184,6 @@ func TestSolidSuccessorReachesStoredHistory(t *testing.T) {
 	if bytes.Equal(out, make([]byte, 64)) {
 		t.Fatal("solid successor read zeroes: the stored member's history " +
 			"was not recorded")
-	}
-}
-
-func readAllThrough(s *storeReader) (int, error) {
-	buf := make([]byte, 7919)
-	total := 0
-	for {
-		n, err := s.Read(buf)
-		total += n
-		if err != nil {
-			if err.Error() == "EOF" {
-				return total, nil
-			}
-			return total, err
-		}
 	}
 }
 
