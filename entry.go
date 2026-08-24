@@ -207,23 +207,49 @@ func (e *Entry) verifyChecksum() error {
 			"header marking a further part was in force",
 			ErrCorruptFileHeader, e.Header.Name, e.size)
 	}
-	// UseMac is read from the header that records the digest, which RAR sets
-	// only on the last part. Reading it at admission saw the first part's
-	// cleared copy and then compared a plaintext CRC32 against a key-derived
-	// MAC -- a guaranteed false mismatch on every encrypted multi-volume file.
-	//
-	// The gate is UseMac and not Encrypted: encryption alone does not make a
-	// digest uncheckable, and RAR says so by setting this flag. Gating on
-	// Encrypted would hand the archive a bit that switches verification off.
-	if e.cur.UseMac {
-		return fmt.Errorf("%w: file %q", ErrChecksumUnsupported, e.Header.Name)
-	}
 	// Gated on the produced size, which this type enforces, rather than on
 	// IsDir, which the archive asserts and nothing cross-checks. An entry that
 	// produced bytes is verified whatever it calls itself; one that produced
 	// none has nothing to verify.
-	if e.size == 0 || !e.cur.HasCRC32 {
+	//
+	// This precedes every uncheckable-digest arm below, and must: a zero-byte
+	// member is not a member whose digest we failed to check, it is a member
+	// with nothing to check. While UseMac was tested first, an empty file or a
+	// directory inside an encrypted archive reported ErrChecksumUnsupported
+	// having produced no bytes at all.
+	if e.size == 0 {
 		return nil
+	}
+	// The member produced bytes and there is nothing to compare them against.
+	//
+	// Three archive classes reach here and they are deliberately one verdict,
+	// tested in one place so the ordering above cannot drift back apart:
+	//
+	//   - UseMac: the digest field holds a key-derived MAC rather than a CRC32
+	//     of the plaintext. The gate is UseMac and not Encrypted -- encryption
+	//     alone does not make a digest uncheckable, and RAR says which it is by
+	//     setting this flag; gating on Encrypted would hand the archive a bit
+	//     that switches verification off. It is read from e.cur because RAR
+	//     records it on the header carrying the digest, which for a
+	//     multi-volume member is the LAST part's. Reading it at admission saw
+	//     the first part's cleared copy and compared a plaintext CRC32 against
+	//     a MAC -- a guaranteed false mismatch on every encrypted multi-volume
+	//     file.
+	//   - A BLAKE2sp-only header, written by rar -htb, which records no CRC32.
+	//   - A header recording no digest at all.
+	//
+	// The last two returned nil here, so they delivered their bytes and
+	// completed as though verified -- indistinguishable, to a caller, from a
+	// digest that matched. Which digest is uncheckable is a distinction for
+	// the message, not for the verdict: a caller can only accept unverifiable
+	// content or reject it, and that decision is the same for all three.
+	//
+	// Implementing BLAKE2sp would move that class from unverifiable to
+	// verified and is the better answer; nothing here depends on it, and until
+	// then the class is at least observable.
+	if e.cur.UseMac || !e.cur.HasCRC32 {
+		return fmt.Errorf("%w: file %q: %s", ErrChecksumUnsupported,
+			e.Header.Name, uncheckableDigest(e.cur))
 	}
 	if e.crc != e.cur.CRC32 {
 		return fmt.Errorf("%w: file %q: computed=%08x header=%08x",
@@ -241,4 +267,32 @@ func (e *Entry) verifyChecksum() error {
 func (e *Entry) truncated() error {
 	return fmt.Errorf("%w: file %q: got %d of %d bytes",
 		ErrTruncatedFile, e.Header.Name, e.size-e.remaining, e.size)
+}
+
+// uncheckableDigest describes what the member recorded in place of a
+// comparable CRC32, for the error message only. The verdict does not depend on
+// it -- all of these mean the same thing to a caller -- but "records only a
+// BLAKE2sp digest" tells someone reading a log that their archive was written
+// with -htb, which "could not be verified" alone does not.
+//
+// UseMac is composed with the digest kind rather than short-circuiting it.
+// The flag says the recorded value is a key-derived MAC; it does not say WHICH
+// field holds it, and rar -ma5 -htb -p sets UseMac with HasCRC32 false and
+// HasBlake2sp true. Reporting "not a CRC32 of the plaintext" there named a
+// field the header does not carry, and testing HasCRC32 first would have
+// dropped the MAC instead. Both facts are true of that archive, so the message
+// carries both.
+func uncheckableDigest(fh *FileHeader) string {
+	switch {
+	case fh.UseMac && fh.HasCRC32:
+		return "records a key-derived MAC in place of a CRC32 of the plaintext"
+	case fh.UseMac && fh.HasBlake2sp:
+		return "records a key-derived MAC over a BLAKE2sp digest"
+	case fh.UseMac:
+		return "records a key-derived MAC"
+	case fh.HasBlake2sp:
+		return "records only a BLAKE2sp digest, which this library cannot compute"
+	default:
+		return "records no checksum"
+	}
 }

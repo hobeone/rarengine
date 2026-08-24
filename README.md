@@ -47,12 +47,24 @@ for {
 		_ = e.Close()
 		continue
 	}
-	if _, err := io.Copy(dst, e); err != nil {
+	// This example's policy accepts content the library could not verify --
+	// see "Unverifiable checksums" below. It has to be filtered at both sites:
+	// io.Copy surfaces the verdict from Read, so without the first filter a
+	// fully delivered member is logged as skipped.
+	//
+	// Note what "skipping" can and cannot mean here. Read returns its verdict
+	// alongside the final bytes, and io.Copy writes those bytes before it
+	// returns the error -- so by the time you see ErrCRCMismatch or
+	// ErrChecksumUnsupported, dst already holds the whole member. Rejecting it
+	// means truncating, deleting, or otherwise rolling back dst yourself.
+	if _, err := io.Copy(dst, e); err != nil &&
+		!errors.Is(err, rarengine.ErrChecksumUnsupported) {
 		log.Printf("skipping %s: %v", e.Header.Name, err)
 	}
 	// Close reports the member's verdict. A member that failed does not end
 	// the archive: call NextEntry again.
-	if err := e.Close(); err != nil {
+	if err := e.Close(); err != nil &&
+		!errors.Is(err, rarengine.ErrChecksumUnsupported) {
 		log.Printf("%s: %v", e.Header.Name, err)
 	}
 }
@@ -82,6 +94,42 @@ name the remaining members are ciphertext, so there is nothing to continue to.
 A member whose *continuation* block claims encryption its first block did not
 costs only that member (`ErrCorruptFileHeader`) — the stream is still standing
 on a real block boundary, so the archive stays readable past it.
+
+### Unverifiable checksums
+
+Every member that produces bytes is verified against the CRC32 its header
+records. Three archive classes carry no CRC32 to compare against — an
+encrypted file whose digest is a key-derived MAC (`UseMac`), an archive
+written with `rar -htb` (BLAKE2sp only), and a header recording no digest at
+all — and all three report `ErrChecksumUnsupported` from `Read`/`Close`.
+
+The content is still delivered; the error says a check could not be made, not
+that the bytes are wrong. The error message names which of the three it was, so
+a log line distinguishes `rar -htb` from a header with no digest at all.
+
+A caller whose policy accepts unverifiable content filters the sentinel at
+**both** call sites. `Entry.Read` returns the verdict alongside the member's
+final bytes, so `io.Copy` and `io.ReadAll` surface it too — filtering only at
+`Close` fails the copy instead:
+
+```go
+if _, err := io.Copy(dst, e); err != nil &&
+	!errors.Is(err, rarengine.ErrChecksumUnsupported) {
+	return err
+}
+if err := e.Close(); err != nil &&
+	!errors.Is(err, rarengine.ErrChecksumUnsupported) {
+	return err
+}
+```
+
+A caller that *rejects* unverifiable content drops both filters — and must
+then roll `dst` back. `io.Copy` writes the bytes it was given before returning
+the error that came with them, so `dst` holds the complete member by the time
+any verification failure is visible. This is true of `ErrCRCMismatch` as well:
+no verdict in this library can be delivered before the content it describes.
+
+There is no way to switch verification off and get the content regardless.
 
 ### RAR3 archives
 

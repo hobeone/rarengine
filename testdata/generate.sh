@@ -75,6 +75,13 @@ echo "  rar5_directory.rar"
 rar a -ma5 -htb -ep rar5_blake2.rar "$TMPDIR/hello.txt"
 echo "  rar5_blake2.rar"
 
+# 5b. RAR5, BLAKE2sp hash AND file encryption (password: "test").
+# Sets UseMac over a BLAKE2sp digest with no CRC32 field present, which is the
+# combination that proved uncheckableDigest was naming a field the header does
+# not carry. See TestUncheckableDigestNamesWhatTheHeaderActuallyRecords.
+rar a -ma5 -htb -p'test' -ep rar5_blake2_encrypted.rar "$TMPDIR/hello.txt"
+echo "  rar5_blake2_encrypted.rar"
+
 # 6. RAR5, file encryption (password: "test")
 rar a -ma5 -p'test' -ep rar5_encrypted.rar "$TMPDIR/hello.txt"
 echo "  rar5_encrypted.rar"
