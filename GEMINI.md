@@ -34,7 +34,7 @@ for i := range w.buf {
 **The Insight**: In LZ77 decompression, a back-reference should only reach back as far as the current write pointer, so the unwritten window history need never be read.
 **The Fix**: We eliminated the zeroing loop completely, making `Reset()` a simple $O(1)$ pointer reset. This immediately slashed CPU latency by up to 60%.
 
-**The Catch**: "should only reach back" is a property of the *encoder*, not of the decoder, and a crafted archive is under no obligation to honour it. While the buffer went uncleared and unchecked, a stream could name a back-reference distance larger than the bytes its own file had produced and read out the previous file's plaintext. `CopyBytes` now bounds every distance by `Window.historyLen()` — the history actually written since the last reset that discarded history — which is what makes the missing memclr a performance choice rather than an information leak. Treat that bound as part of this optimization, not as a separate feature: removing it re-introduces the leak.
+**The Catch**: "should only reach back" is a property of the *encoder*, not of the decoder, and a crafted archive is under no obligation to honour it. While the buffer went uncleared and unchecked, a stream could name a back-reference distance larger than the bytes its own file had produced and read out the previous file's plaintext. `CopyBytes` now bounds every distance by `window.historyLen()` — the history actually written since the last reset that discarded history — which is what makes the missing memclr a performance choice rather than an information leak. Treat that bound as part of this optimization, not as a separate feature: removing it re-introduces the leak.
 
 ### 2. Stream decompressor Reuse (33.5 MB to 1.7 KB Memory Reduction)
 Following the first optimization, a memory profile (`alloc_space`) showed that the memory allocator was still saturating because the reader was instantiated inside the loop, allocating and zeroing 32MB of heap memory in *every iteration*.
@@ -174,7 +174,7 @@ This repository is fully indexed by **Repowise** and supports MCP (Model Context
 - **`reader.go`**: Traversal orchestrator (High Churn).
 - **`decoder50.go`**: Core decompression hot-path loop. Most complex engine logic.
 - **`entry.go`**: Per-member byte budget, running CRC, terminal verdict.
-- **`header.go`**: Complex block and file header parsing (`ParseFileHeader`, `ReadBlockHeader`).
+- **`header.go`**: Complex block and file header parsing (`parseFileHeader`, `readBlockHeader`).
 
 ### Repowise MCP Server Usage
 

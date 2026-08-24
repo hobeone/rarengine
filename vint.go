@@ -7,10 +7,10 @@ import (
 // ErrTruncatedVint is returned when a vint is incomplete or exceeds the maximum length of 10 bytes.
 var ErrTruncatedVint = errors.New("rarengine: truncated vint")
 
-// DecodeVint decodes a RAR5 variable-length integer from a byte slice,
+// decodeVint decodes a RAR5 variable-length integer from a byte slice,
 // returning the decoded uint64 and the number of bytes consumed.
 // A valid vint is at most 10 bytes long.
-func DecodeVint(b []byte) (uint64, int, error) {
+func decodeVint(b []byte) (uint64, int, error) {
 	const maxVintBytes = 10
 	var x uint64
 	var s uint
@@ -28,9 +28,9 @@ func DecodeVint(b []byte) (uint64, int, error) {
 	return 0, 0, ErrTruncatedVint
 }
 
-// EncodeVint encodes a uint64 into a RAR5 variable-length integer,
+// encodeVint encodes a uint64 into a RAR5 variable-length integer,
 // returning the encoded bytes.
-func EncodeVint(v uint64) []byte {
+func encodeVint(v uint64) []byte {
 	var buf [10]byte
 	i := 0
 	for v >= 0x80 {

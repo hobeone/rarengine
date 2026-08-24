@@ -61,7 +61,7 @@ func TestDamagedSetDoesNotEndAsACleanArchive(t *testing.T) {
 	vol.Write(rar5Archive(t, false, rar5Member(t, memberSpec{
 		name: "present.bin", content: "here", withCRC: true,
 	})))
-	vol.Write(rar5BlockDeclaring(HeaderTypeEnd, 32, nil, true))
+	vol.Write(rar5BlockDeclaring(headerTypeEnd, 32, nil, true))
 
 	r := NewReader(volumesOf(vol.Bytes()))
 

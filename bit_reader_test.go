@@ -9,7 +9,7 @@ import (
 func TestBitReader_Basic(t *testing.T) {
 	// 0b10110011 0b01101101 -> 0xb3, 0x6d
 	buf := []byte{0xb3, 0x6d}
-	r := NewBitReader(buf, 16)
+	r := newBitReader(buf, 16)
 
 	// Read 3 bits (should extract 0b101 -> 5)
 	val, err := r.ReadBits(3)
@@ -41,7 +41,7 @@ func TestBitReader_Basic(t *testing.T) {
 
 func TestBitReader_PeekAndAdvance(t *testing.T) {
 	buf := []byte{0xf0, 0x00}
-	r := NewBitReader(buf, 16)
+	r := newBitReader(buf, 16)
 
 	// Peek 4 bits (should be 0b1111 -> 15)
 	val := r.PeekBits(4)
@@ -70,7 +70,7 @@ func TestBitReader_PeekAndAdvance(t *testing.T) {
 
 func TestBitReader_Limits(t *testing.T) {
 	buf := []byte{0xff}
-	r := NewBitReader(buf, 4)
+	r := newBitReader(buf, 4)
 
 	_, err := r.ReadBits(3)
 	if err != nil {

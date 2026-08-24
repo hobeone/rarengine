@@ -7,8 +7,8 @@ import (
 // ErrWindowOffsetBounds is returned when copying bytes from an invalid history distance.
 var ErrWindowOffsetBounds = errors.New("rarengine: window offset out of bounds")
 
-// Window implements a zero-allocation, circular sliding window ring buffer for LZ77 decompression.
-type Window struct {
+// window implements a zero-allocation, circular sliding window ring buffer for LZ77 decompression.
+type window struct {
 	buf  []byte // Circular buffer slice
 	size int    // Capacity of the circular buffer
 	r    int    // Read index (beginning of unread data)
@@ -46,20 +46,20 @@ type Window struct {
 // historyLen returns the number of bytes of valid LZ77 history behind the write
 // pointer. It is derived from w and wrapped rather than counted separately; see
 // the wrapped field for why that is sound.
-func (w *Window) historyLen() int {
+func (w *window) historyLen() int {
 	if w.wrapped {
 		return w.size
 	}
 	return w.w
 }
 
-// NewWindow creates a new sliding window of the specified size.
-func NewWindow(size int) *Window {
+// newWindow creates a new sliding window of the specified size.
+func newWindow(size int) *window {
 	// Minimum window size is 256KB (0x40000) per RAR spec.
 	if size < 0x40000 {
 		size = 0x40000
 	}
-	return &Window{
+	return &window{
 		buf:  make([]byte, size),
 		size: size,
 	}
@@ -74,7 +74,7 @@ func NewWindow(size int) *Window {
 // the previous file's bytes, which are still physically present in buf.
 // A keepHistory reset leaves wrapped alone, so a solid group continues the
 // preceding file's dictionary.
-func (w *Window) Reset(keepHistory bool) {
+func (w *window) Reset(keepHistory bool) {
 	if !keepHistory {
 		w.w = 0
 		w.r = 0
@@ -86,7 +86,7 @@ func (w *Window) Reset(keepHistory bool) {
 }
 
 // writeByte writes a single byte to the window.
-func (w *Window) writeByte(c byte) {
+func (w *window) writeByte(c byte) {
 	w.buf[w.w] = c
 	w.w++
 	if w.w >= w.size {
@@ -101,7 +101,7 @@ func (w *Window) writeByte(c byte) {
 // writeBytes writes p to the window using bulk copy, handling ring wraparound.
 // Semantics match repeated writeByte calls: full is set when w lands on r at a
 // chunk boundary. Callers must drain via Read before w overruns r.
-func (w *Window) writeBytes(p []byte) {
+func (w *window) writeBytes(p []byte) {
 	for len(p) > 0 {
 		n := min(w.size-w.w, len(p))
 		copy(w.buf[w.w:w.w+n], p[:n])
@@ -134,7 +134,7 @@ func (w *Window) writeBytes(p []byte) {
 //
 // The history itself is unaffected: historyLen and CopyBytes are derived from
 // w and wrapped, neither of which r participates in.
-func (w *Window) recordHistory(p []byte) {
+func (w *window) recordHistory(p []byte) {
 	w.writeBytes(p)
 	w.r = w.w
 	w.full = false
@@ -161,7 +161,7 @@ func (w *Window) recordHistory(p []byte) {
 // file's plaintext. Out-of-range distances return ErrWindowOffsetBounds and
 // copy nothing. Callers driving the window directly should note this contract
 // is narrower than a plain buffer-size bound.
-func (w *Window) CopyBytes(length int, distance int) error {
+func (w *window) CopyBytes(length int, distance int) error {
 	// distance is attacker-controlled: it comes straight off the compressed
 	// stream. historyLen never exceeds size, so this also keeps srcIdx in range.
 	if distance <= 0 || distance > w.historyLen() {
@@ -195,7 +195,7 @@ func (w *Window) CopyBytes(length int, distance int) error {
 }
 
 // Available returns the number of unread bytes in the window.
-func (w *Window) Available() int {
+func (w *window) Available() int {
 	if w.full {
 		return w.size
 	}
@@ -206,7 +206,7 @@ func (w *Window) Available() int {
 }
 
 // Read copies unread bytes from the window into p, advancing the read pointer.
-func (w *Window) Read(p []byte) (int, error) {
+func (w *window) Read(p []byte) (int, error) {
 	avail := w.Available()
 	if avail == 0 {
 		return 0, nil
@@ -262,7 +262,7 @@ func (w *Window) Read(p []byte) (int, error) {
 //
 // It returns an error rather than a bool so that errcheck makes handling the
 // refusal compulsory rather than customary.
-func (w *Window) BeginFile(solid bool) error {
+func (w *window) BeginFile(solid bool) error {
 	if solid {
 		if w.incomplete {
 			return ErrSolidStreamBroken
@@ -284,4 +284,4 @@ func (w *Window) BeginFile(solid bool) error {
 // "may traversal continue?", this asks "is the window intact?", and deriving
 // one from the other left every non-continuable short member recorded as
 // undamaged.
-func (w *Window) MarkIncomplete() { w.incomplete = true }
+func (w *window) MarkIncomplete() { w.incomplete = true }

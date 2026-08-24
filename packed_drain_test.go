@@ -16,7 +16,7 @@ import (
 // entry whose packed block outlives its decompressed content.
 
 func rar5Block(payload []byte) []byte {
-	sizeV := EncodeVint(uint64(len(payload)))
+	sizeV := encodeVint(uint64(len(payload)))
 	var hashed bytes.Buffer
 	hashed.Write(sizeV)
 	hashed.Write(payload)
@@ -28,9 +28,9 @@ func rar5Block(payload []byte) []byte {
 
 func rar5ArchiveHeader() []byte {
 	var p bytes.Buffer
-	p.Write(EncodeVint(HeaderTypeArchive))
-	p.Write(EncodeVint(0))
-	p.Write(EncodeVint(ArcFlagMultiVol))
+	p.Write(encodeVint(headerTypeArchive))
+	p.Write(encodeVint(0))
+	p.Write(encodeVint(arcFlagMultiVol))
 	var out bytes.Buffer
 	out.Write([]byte{0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x01, 0x00})
 	out.Write(rar5Block(p.Bytes()))
@@ -39,8 +39,8 @@ func rar5ArchiveHeader() []byte {
 
 func rar5EndHeader() []byte {
 	var p bytes.Buffer
-	p.Write(EncodeVint(HeaderTypeEnd))
-	p.Write(EncodeVint(0))
+	p.Write(encodeVint(headerTypeEnd))
+	p.Write(encodeVint(0))
 	return rar5Block(p.Bytes())
 }
 
@@ -53,32 +53,32 @@ func rar5FileEntry(name string, unpackedSize uint64, declaredCRC uint32, payload
 }
 
 // rar5EntryComp is rar5FileEntry with the compression-info vint exposed, so a
-// test can set FileCompSolid (0x40) or a method without rebuilding the block.
+// test can set fileCompSolid (0x40) or a method without rebuilding the block.
 // Method lives in bits 7-9 of the same vint, so 0 is store either way.
 func rar5EntryComp(name string, compFlags uint64, unpackedSize uint64, declaredCRC uint32, payload []byte) []byte {
-	return rar5EntryFlags(name, compFlags, HeaderFlagHasData, unpackedSize, declaredCRC, payload)
+	return rar5EntryFlags(name, compFlags, headerFlagHasData, unpackedSize, declaredCRC, payload)
 }
 
 // rar5EntryFlags is rar5EntryComp with the BLOCK header flags exposed as well,
 // so a test can mark an entry as continuing into the next volume
-// (HeaderFlagDataNotLast) without restating the header layout.
+// (headerFlagDataNotLast) without restating the header layout.
 func rar5EntryFlags(name string, compFlags uint64, blockFlags uint64, unpackedSize uint64, declaredCRC uint32, payload []byte) []byte {
 	var fp bytes.Buffer
-	fp.Write(EncodeVint(FileFlagHasCRC32))
-	fp.Write(EncodeVint(unpackedSize))
-	fp.Write(EncodeVint(0))
+	fp.Write(encodeVint(fileFlagHasCRC32))
+	fp.Write(encodeVint(unpackedSize))
+	fp.Write(encodeVint(0))
 	var crcBuf [4]byte
 	binary.LittleEndian.PutUint32(crcBuf[:], declaredCRC)
 	fp.Write(crcBuf[:])
-	fp.Write(EncodeVint(compFlags))
-	fp.Write(EncodeVint(1))
-	fp.Write(EncodeVint(uint64(len(name))))
+	fp.Write(encodeVint(compFlags))
+	fp.Write(encodeVint(1))
+	fp.Write(encodeVint(uint64(len(name))))
 	fp.WriteString(name)
 
 	var hp bytes.Buffer
-	hp.Write(EncodeVint(HeaderTypeFile))
-	hp.Write(EncodeVint(blockFlags))
-	hp.Write(EncodeVint(uint64(len(payload))))
+	hp.Write(encodeVint(headerTypeFile))
+	hp.Write(encodeVint(blockFlags))
+	hp.Write(encodeVint(uint64(len(payload))))
 	hp.Write(fp.Bytes())
 
 	var out bytes.Buffer
@@ -313,19 +313,19 @@ func TestRefusedFile_CorruptHeaderPayloadIsDropped(t *testing.T) {
 	// An UnpackedSize vint with the int64 sign bit set is refused by the
 	// parser as a corrupt header.
 	var fp bytes.Buffer
-	fp.Write(EncodeVint(FileFlagHasCRC32))
-	fp.Write(EncodeVint(1 << 63))
-	fp.Write(EncodeVint(0))
+	fp.Write(encodeVint(fileFlagHasCRC32))
+	fp.Write(encodeVint(1 << 63))
+	fp.Write(encodeVint(0))
 	fp.Write([]byte{0, 0, 0, 0})
-	fp.Write(EncodeVint(0))
-	fp.Write(EncodeVint(1))
-	fp.Write(EncodeVint(uint64(len("neg.txt"))))
+	fp.Write(encodeVint(0))
+	fp.Write(encodeVint(1))
+	fp.Write(encodeVint(uint64(len("neg.txt"))))
 	fp.WriteString("neg.txt")
 
 	var hp bytes.Buffer
-	hp.Write(EncodeVint(HeaderTypeFile))
-	hp.Write(EncodeVint(HeaderFlagHasData))
-	hp.Write(EncodeVint(uint64(len(evil))))
+	hp.Write(encodeVint(headerTypeFile))
+	hp.Write(encodeVint(headerFlagHasData))
+	hp.Write(encodeVint(uint64(len(evil))))
 	hp.Write(fp.Bytes())
 
 	var arc bytes.Buffer

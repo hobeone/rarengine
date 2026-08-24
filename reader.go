@@ -22,7 +22,7 @@ type Reader struct {
 	// failed advance cannot leave a partially consumed volume reachable.
 	vol *volume
 
-	win   *Window
+	win   *window
 	entry *Entry
 	dec50 *decoder50
 
@@ -47,7 +47,7 @@ type Reader struct {
 	// after the volume.next() call that produced it, so r.vol.payload() still
 	// describes exactly that header's body. Nothing may advance the volume
 	// between setting staged and consuming it.
-	staged *BlockHeader
+	staged *blockHeader
 
 	// damaged remembers a volume that ended somewhere this traversal cannot
 	// vouch for -- inside a block's declared payload, or partway through a
@@ -89,7 +89,7 @@ type Reader struct {
 func NewReader(volumes <-chan io.ReadCloser) *Reader {
 	return &Reader{
 		volumes: volumes,
-		win:     NewWindow(32 * 1024 * 1024),
+		win:     newWindow(32 * 1024 * 1024),
 		dec50:   newDecoder50(),
 	}
 }
@@ -118,7 +118,7 @@ func (r *Reader) Reset(volumes <-chan io.ReadCloser) {
 	// BeginFile(false) is the window's one entrance for discarding history: it
 	// resets the pointers and clears incomplete together. Poking r.win.incomplete
 	// directly here would reintroduce a second writer of that flag, which is
-	// exactly what Window.BeginFile/MarkIncomplete exist to prevent.
+	// exactly what window.BeginFile/MarkIncomplete exist to prevent.
 	_ = r.win.BeginFile(false)
 }
 
@@ -169,8 +169,8 @@ func (r *Reader) NextEntry() (*Entry, error) {
 // Every failure here is archive-level: once a HEAD_CRYPT is present, every
 // header after it is ciphertext this library cannot read, so there is no
 // member to name and nothing to continue to. Callers latch what this returns.
-func (r *Reader) armHeaderDecryption(h *BlockHeader) error {
-	ch, err := ParseCryptHeader(h)
+func (r *Reader) armHeaderDecryption(h *blockHeader) error {
+	ch, err := parseCryptHeader(h)
 	if err != nil {
 		// Classified so a caller can tell "this archive uses an encryption
 		// version this library does not implement" -- the archive need not be
@@ -227,7 +227,7 @@ func (r *Reader) latchArchive(err error) error {
 func (r *Reader) nextEntry() (*Entry, error) {
 	r.finishActive()
 	for {
-		var h *BlockHeader
+		var h *blockHeader
 		if r.staged != nil {
 			// Consumed before the volume is touched: volume.next() would skip
 			// this header's payload on the way to the next block. See
@@ -335,10 +335,10 @@ func (r *Reader) severActive() {
 // and scanning continues. Nothing here discards payload: volume.next() does
 // that on the way to the following header, unconditionally, whether or not any
 // case below looked at the block.
-func (r *Reader) dispatch(h *BlockHeader) (*Entry, error) {
+func (r *Reader) dispatch(h *blockHeader) (*Entry, error) {
 	switch h.Type {
-	case HeaderTypeArchive:
-		ah, err := ParseArchiveHeader(h)
+	case headerTypeArchive:
+		ah, err := parseArchiveHeader(h)
 		if err != nil {
 			// Fatal, not skipped. The archive header occurs once per volume
 			// and defines archive-wide semantics, including whether the
@@ -355,7 +355,7 @@ func (r *Reader) dispatch(h *BlockHeader) (*Entry, error) {
 		r.solid = r.solid || ah.Solid
 		return nil, nil
 
-	case HeaderTypeFile:
+	case headerTypeFile:
 		fh, err := parseFileHeader(h)
 		if err != nil {
 			// A member whose identity survived the failure is refused by NAME,
@@ -440,13 +440,13 @@ func (r *Reader) dispatch(h *BlockHeader) (*Entry, error) {
 		r.entry = e
 		return e, nil
 
-	case HeaderTypeEncryption:
+	case headerTypeEncryption:
 		if err := r.armHeaderDecryption(h); err != nil {
 			return nil, err
 		}
 		return nil, nil
 
-	case HeaderTypeEnd:
+	case headerTypeEnd:
 		// The end header is the archive saying this volume holds no further
 		// blocks, so nothing after it is part of the archive and this
 		// traversal has no business parsing it. Falling through to the
@@ -493,11 +493,14 @@ func (r *Reader) resolvePassword(fh *FileHeader) (string, error) {
 	if len(r.passwords) == 0 {
 		return "", ErrPasswordRequired
 	}
+	// This early return is also what makes hasCheck below always true:
+	// verifyFileHeaderPassword reports hasCheckValue=false only when EncCheck
+	// is nil, and that case never reaches the loop.
 	if fh.EncCheck == nil {
 		return r.passwords[0], nil
 	}
 	for _, candidate := range r.passwords {
-		ok, hasCheck, err := VerifyFilePassword(fh, candidate)
+		ok, _, err := verifyFileHeaderPassword(fh, candidate)
 		if err != nil {
 			// An empty candidate cannot be checked against anything, which
 			// is a fact about that candidate and not about the archive. It
@@ -509,9 +512,6 @@ func (r *Reader) resolvePassword(fh *FileHeader) (string, error) {
 			}
 			return "", err
 		}
-		if !hasCheck {
-			return candidate, nil
-		}
 		if ok {
 			r.resolved, r.hasResolved = candidate, true
 			return r.resolved, nil
@@ -521,9 +521,9 @@ func (r *Reader) resolvePassword(fh *FileHeader) (string, error) {
 }
 
 // resolveHeaderPassword is resolvePassword for archive-level header
-// encryption, whose check value lives on the CryptHeader rather than on a file
+// encryption, whose check value lives on the cryptHeader rather than on a file
 // header.
-func (r *Reader) resolveHeaderPassword(ch *CryptHeader) (string, error) {
+func (r *Reader) resolveHeaderPassword(ch *cryptHeader) (string, error) {
 	if r.hasResolved {
 		return r.resolved, nil
 	}
@@ -535,19 +535,18 @@ func (r *Reader) resolveHeaderPassword(ch *CryptHeader) (string, error) {
 	// header, so scanning them is pointless -- and latching the first as
 	// though it were knowledge would suppress the scan for a later header
 	// that DOES carry a check value.
+	// As above: verifyCryptHeaderPassword reports hasCheckValue=false only
+	// for a nil CheckValue, so the loop below never sees it.
 	if ch.CheckValue == nil {
 		return r.passwords[0], nil
 	}
 	for _, candidate := range r.passwords {
-		ok, hasCheck, err := VerifyPassword(ch, candidate)
+		ok, _, err := verifyCryptHeaderPassword(ch, candidate)
 		if err != nil {
 			if errors.Is(err, ErrPasswordRequired) {
 				continue
 			}
 			return "", err
-		}
-		if !hasCheck {
-			return candidate, nil
 		}
 		if ok {
 			r.resolved, r.hasResolved = candidate, true
@@ -603,7 +602,7 @@ func (r *Reader) buildChain(fh *FileHeader, src io.Reader) (io.Reader, error) {
 
 type lz50Reader struct {
 	dec *decoder50
-	win *Window
+	win *window
 }
 
 func (l *lz50Reader) Read(p []byte) (int, error) {
@@ -612,7 +611,7 @@ func (l *lz50Reader) Read(p []byte) (int, error) {
 
 type storeReader struct {
 	r   io.Reader
-	win *Window
+	win *window
 }
 
 // Read delivers the stored member's bytes from the source and records them as

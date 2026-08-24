@@ -178,7 +178,7 @@ func BenchmarkReaderResetReusesWindow(b *testing.B) {
 	r := rarengine.NewReader(volumesOf(stream))
 	b.ReportAllocs()
 	b.ResetTimer()
-	for range b.N {
+	for b.Loop() {
 		r.Reset(volumesOf(stream))
 		for {
 			e, err := r.NextEntry()

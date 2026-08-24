@@ -210,7 +210,7 @@ func TestEncryptedHeaderMultiVolume(t *testing.T) {
 // TestEmptyCandidateDoesNotEndThePasswordScan pins that an unusable
 // candidate costs itself and nothing else.
 //
-// VerifyFilePassword reports ErrPasswordRequired for an empty password,
+// verifyFileHeaderPassword reports ErrPasswordRequired for an empty password,
 // which says that candidate cannot be checked -- a fact about the
 // candidate, not about the archive. Treated as fatal, it ended the scan, so
 // a caller passing "" alongside real guesses (the natural way to say "try
@@ -251,7 +251,7 @@ func TestHeaderPasswordIsNotLatchedUnverified(t *testing.T) {
 
 	// A crypt header carrying no check value: nothing here can verify a
 	// candidate, so the first is used and must NOT be recorded as resolved.
-	if _, err := r.resolveHeaderPassword(&CryptHeader{}); err != nil {
+	if _, err := r.resolveHeaderPassword(&cryptHeader{}); err != nil {
 		t.Fatalf("resolveHeaderPassword with no check value: %v", err)
 	}
 	if r.hasResolved {

@@ -29,7 +29,7 @@ func badCRCEntry(name string, content []byte) []byte {
 // rar5SplitEntry emits a file block marked as continuing into the next volume,
 // so reading it drives the multi-volume advance path.
 func rar5SplitEntry(name string, unpackedSize uint64, payload []byte) []byte {
-	return rar5EntryFlags(name, 0, HeaderFlagHasData|HeaderFlagDataNotLast,
+	return rar5EntryFlags(name, 0, headerFlagHasData|headerFlagDataNotLast,
 		unpackedSize, 0, payload)
 }
 
@@ -108,8 +108,8 @@ func TestSkipDamagedFile_SolidSuccessorRefused(t *testing.T) {
 	var archive bytes.Buffer
 	archive.Write(rar5ArchiveHeader())
 	archive.Write(shortEntry("truncated.bin"))
-	// FileCompSolid: this file's back-references reach into the damaged one.
-	archive.Write(rar5EntryComp("solid.bin", FileCompSolid, 20, 0x1234,
+	// fileCompSolid: this file's back-references reach into the damaged one.
+	archive.Write(rar5EntryComp("solid.bin", fileCompSolid, 20, 0x1234,
 		[]byte("twenty bytes exactly")))
 	archive.Write(rar5EndHeader())
 
@@ -138,7 +138,7 @@ func TestSkipDamagedFile_NonSolidSuccessorClearsDamage(t *testing.T) {
 	archive.Write(rar5ArchiveHeader())
 	archive.Write(shortEntry("truncated.bin"))
 	archive.Write(goodEntry("independent.bin", first))
-	archive.Write(rar5EntryComp("solid.bin", FileCompSolid, uint64(len(second)),
+	archive.Write(rar5EntryComp("solid.bin", fileCompSolid, uint64(len(second)),
 		crc32.ChecksumIEEE(second), second))
 	archive.Write(rar5EndHeader())
 
@@ -187,7 +187,7 @@ func TestSkipDamagedFile_ResetClearsDamage(t *testing.T) {
 	content := []byte("a fresh archive, solid from the start")
 	var fresh bytes.Buffer
 	fresh.Write(rar5ArchiveHeader())
-	fresh.Write(rar5EntryComp("solid.bin", FileCompSolid, uint64(len(content)),
+	fresh.Write(rar5EntryComp("solid.bin", fileCompSolid, uint64(len(content)),
 		crc32.ChecksumIEEE(content), content))
 	fresh.Write(rar5EndHeader())
 
@@ -310,7 +310,7 @@ func TestSkipDamagedFile_SolidRefusedAcrossVolumeAfterTruncation(t *testing.T) {
 	content := []byte("solid content depending on history")
 	var vol2 bytes.Buffer
 	vol2.Write(rar5ArchiveHeader())
-	vol2.Write(rar5EntryComp("solid.bin", FileCompSolid, uint64(len(content)),
+	vol2.Write(rar5EntryComp("solid.bin", fileCompSolid, uint64(len(content)),
 		crc32.ChecksumIEEE(content), content))
 	vol2.Write(rar5EndHeader())
 
@@ -375,7 +375,7 @@ func TestSkipDamagedFile_AbandonedAdvanceNeverFabricates(t *testing.T) {
 	var vol2 bytes.Buffer
 	vol2.Write([]byte{0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x01, 0x00})
 	// Sized so the parser consumes exactly these 8 bytes and stops ON the
-	// planted entry: ReadBlockHeader reads 7, decodes a 1-byte size vint of 3,
+	// planted entry: readBlockHeader reads 7, decodes a 1-byte size vint of 3,
 	// then reads bufSize-3 = 1 more. The CRC then fails. An oversized vint
 	// here would make it swallow the rest of the volume instead, and the
 	// planted entry would be unreachable.
@@ -420,7 +420,7 @@ func TestSkipDamagedFile_SolidRefusalDropsPayload(t *testing.T) {
 	var archive bytes.Buffer
 	archive.Write(rar5ArchiveHeader())
 	archive.Write(shortEntry("truncated.bin"))
-	archive.Write(rar5EntryComp("solid.bin", FileCompSolid,
+	archive.Write(rar5EntryComp("solid.bin", fileCompSolid,
 		uint64(len(smuggled)), 0x1234, smuggled))
 	archive.Write(goodEntry("legit.bin", tail))
 	archive.Write(rar5EndHeader())
@@ -509,7 +509,7 @@ func TestSkipDamagedFile_ChecksumFailureDamagesWindow(t *testing.T) {
 	var archive bytes.Buffer
 	archive.Write(rar5ArchiveHeader())
 	archive.Write(badCRCEntry("bad.bin", []byte("content whose CRC will not match")))
-	archive.Write(rar5EntryComp("solid.bin", FileCompSolid, 20, 0x1234,
+	archive.Write(rar5EntryComp("solid.bin", fileCompSolid, 20, 0x1234,
 		[]byte("twenty bytes exactly")))
 	archive.Write(rar5EndHeader())
 
@@ -543,7 +543,7 @@ func TestSkipDamagedFile_ChecksumFailureDamagesWindow(t *testing.T) {
 //
 // A refusal drops the payload and never begins the entry, so it never writes
 // anything to the shared window. That is nonetheless absent history a solid
-// successor's back-references assume is there. Window.CopyBytes bounds
+// successor's back-references assume is there. window.CopyBytes bounds
 // distances by the history actually written, but the shortfall here sits
 // INSIDE that bound -- the successor would read an earlier file's bytes
 // rather than reading past the end -- so nothing else catches it.
@@ -555,7 +555,7 @@ func TestSkipDamagedFile_RefusedFileDamagesWindow(t *testing.T) {
 	var archive bytes.Buffer
 	archive.Write(rar5ArchiveHeader())
 	archive.Write(bomb)
-	archive.Write(rar5EntryComp("solid.bin", FileCompSolid, 20, 0x1234,
+	archive.Write(rar5EntryComp("solid.bin", fileCompSolid, 20, 0x1234,
 		[]byte("twenty bytes exactly")))
 	archive.Write(rar5EndHeader())
 
@@ -634,7 +634,7 @@ func (e *errWithFinalBytes) Read(p []byte) (int, error) {
 // with no natural home in a round-tripped archive (a decode error exactly at
 // the final byte is not reproducible through a legitimate fixture in any
 // reasonable way), so it is pinned as a unit, observing its effect the same
-// way production code does -- through Window.BeginFile.
+// way production code does -- through window.BeginFile.
 func TestFinishActive_DamageOnNonCleanOutcome(t *testing.T) {
 	content := []byte("bytes the decoder produced before it gave up")
 	errDecode := errors.New("invalid huffman code")

@@ -12,7 +12,7 @@ import (
 // buildSingleFileRAR5Archive constructs a minimal single-volume, single-file,
 // store-method (uncompressed) RAR5 archive in memory, mirroring the
 // hand-rolled construction in TestStreamDecompressor_TarStyle. The file
-// header's CRC32 field is set to crc32Value with the FileFlagHasCRC32 flag,
+// header's CRC32 field is set to crc32Value with the fileFlagHasCRC32 flag,
 // letting callers deliberately mismatch it against content to exercise the
 // verification path without needing a corrupted binary fixture.
 func buildSingleFileRAR5Archive(t *testing.T, name string, content []byte, crc32Value uint32) *bytes.Buffer {
@@ -22,18 +22,18 @@ func buildSingleFileRAR5Archive(t *testing.T, name string, content []byte, crc32
 
 // buildSingleFileRAR5ArchiveFlags is buildSingleFileRAR5Archive with extra
 // file-header flags OR'd in, for exercising flags whose handling is what is
-// under test (e.g. FileFlagUnpSizeUnknown).
+// under test (e.g. fileFlagUnpSizeUnknown).
 func buildSingleFileRAR5ArchiveFlags(t *testing.T, name string, content []byte, crc32Value uint32, extraFileFlags uint64) *bytes.Buffer {
 	t.Helper()
 
 	// 1. Archive Header
-	arcFlagsV := EncodeVint(ArcFlagMultiVol)
+	arcFlagsV := encodeVint(arcFlagMultiVol)
 	var arcPayload bytes.Buffer
-	arcPayload.Write(EncodeVint(HeaderTypeArchive))
-	arcPayload.Write(EncodeVint(0))
+	arcPayload.Write(encodeVint(headerTypeArchive))
+	arcPayload.Write(encodeVint(0))
 	arcPayload.Write(arcFlagsV)
 
-	arcSizeV := EncodeVint(uint64(arcPayload.Len()))
+	arcSizeV := encodeVint(uint64(arcPayload.Len()))
 	var arcHashed bytes.Buffer
 	arcHashed.Write(arcSizeV)
 	arcHashed.Write(arcPayload.Bytes())
@@ -46,27 +46,27 @@ func buildSingleFileRAR5ArchiveFlags(t *testing.T, name string, content []byte, 
 	}
 	volBuf.Write(arcHashed.Bytes())
 
-	// 2. File Header, with FileFlagHasCRC32 set and an explicit (possibly
+	// 2. File Header, with fileFlagHasCRC32 set and an explicit (possibly
 	// wrong) CRC32 value, store method (compFlags=0 → Method=0).
 	var filePayload bytes.Buffer
-	filePayload.Write(EncodeVint(FileFlagHasCRC32 | extraFileFlags)) // flags
-	filePayload.Write(EncodeVint(uint64(len(content))))              // unpacked size
-	filePayload.Write(EncodeVint(0))                                 // attributes
+	filePayload.Write(encodeVint(fileFlagHasCRC32 | extraFileFlags)) // flags
+	filePayload.Write(encodeVint(uint64(len(content))))              // unpacked size
+	filePayload.Write(encodeVint(0))                                 // attributes
 	var crcBuf [4]byte
 	binary.LittleEndian.PutUint32(crcBuf[:], crc32Value)
 	filePayload.Write(crcBuf[:])     // CRC32 (gated by FileFlagHasCRC32)
-	filePayload.Write(EncodeVint(0)) // compFlags (Method=0, not solid)
-	filePayload.Write(EncodeVint(1)) // hostOS
-	filePayload.Write(EncodeVint(uint64(len(name))))
+	filePayload.Write(encodeVint(0)) // compFlags (Method=0, not solid)
+	filePayload.Write(encodeVint(1)) // hostOS
+	filePayload.Write(encodeVint(uint64(len(name))))
 	filePayload.WriteString(name)
 
 	var headerPayload bytes.Buffer
-	headerPayload.Write(EncodeVint(HeaderTypeFile))
-	headerPayload.Write(EncodeVint(HeaderFlagHasData))
-	headerPayload.Write(EncodeVint(uint64(len(content))))
+	headerPayload.Write(encodeVint(headerTypeFile))
+	headerPayload.Write(encodeVint(headerFlagHasData))
+	headerPayload.Write(encodeVint(uint64(len(content))))
 	headerPayload.Write(filePayload.Bytes())
 
-	fileSizeV := EncodeVint(uint64(headerPayload.Len()))
+	fileSizeV := encodeVint(uint64(headerPayload.Len()))
 	var fileHashed bytes.Buffer
 	fileHashed.Write(fileSizeV)
 	fileHashed.Write(headerPayload.Bytes())
@@ -80,9 +80,9 @@ func buildSingleFileRAR5ArchiveFlags(t *testing.T, name string, content []byte, 
 
 	// 3. End Header
 	var endPayload bytes.Buffer
-	endPayload.Write(EncodeVint(HeaderTypeEnd))
-	endPayload.Write(EncodeVint(0))
-	endSizeV := EncodeVint(uint64(endPayload.Len()))
+	endPayload.Write(encodeVint(headerTypeEnd))
+	endPayload.Write(encodeVint(0))
+	endSizeV := encodeVint(uint64(endPayload.Len()))
 	var endHashed bytes.Buffer
 	endHashed.Write(endSizeV)
 	endHashed.Write(endPayload.Bytes())
@@ -182,25 +182,25 @@ func TestCRCVerification_UnconditionalOnMismatch(t *testing.T) {
 }
 
 // rar5FileEntryUnknownSize builds a RAR5 file block declaring
-// FileFlagUnpSizeUnknown, the flag ParseFileHeader refuses because it makes
+// fileFlagUnpSizeUnknown, the flag parseFileHeader refuses because it makes
 // the declared size -- and so truncation detection -- meaningless.
 func rar5FileEntryUnknownSize(name string, content []byte, crc32Value uint32) []byte {
 	var fp bytes.Buffer
-	fp.Write(EncodeVint(FileFlagHasCRC32 | FileFlagUnpSizeUnknown))
-	fp.Write(EncodeVint(uint64(len(content))))
-	fp.Write(EncodeVint(0))
+	fp.Write(encodeVint(fileFlagHasCRC32 | fileFlagUnpSizeUnknown))
+	fp.Write(encodeVint(uint64(len(content))))
+	fp.Write(encodeVint(0))
 	var crcBuf [4]byte
 	binary.LittleEndian.PutUint32(crcBuf[:], crc32Value)
 	fp.Write(crcBuf[:])
-	fp.Write(EncodeVint(0))
-	fp.Write(EncodeVint(1))
-	fp.Write(EncodeVint(uint64(len(name))))
+	fp.Write(encodeVint(0))
+	fp.Write(encodeVint(1))
+	fp.Write(encodeVint(uint64(len(name))))
 	fp.WriteString(name)
 
 	var hp bytes.Buffer
-	hp.Write(EncodeVint(HeaderTypeFile))
-	hp.Write(EncodeVint(HeaderFlagHasData))
-	hp.Write(EncodeVint(uint64(len(content))))
+	hp.Write(encodeVint(headerTypeFile))
+	hp.Write(encodeVint(headerFlagHasData))
+	hp.Write(encodeVint(uint64(len(content))))
 	hp.Write(fp.Bytes())
 
 	var out bytes.Buffer
@@ -210,7 +210,7 @@ func rar5FileEntryUnknownSize(name string, content []byte, crc32Value uint32) []
 }
 
 // TestUnknownUnpackedSizeIsRefusedByName checks that a member carrying
-// FileFlagUnpSizeUnknown is refused BY NAME (identity-first validation) --
+// fileFlagUnpSizeUnknown is refused BY NAME (identity-first validation) --
 // the FIRST NextEntry call returns a non-nil Entry whose Header.Name is the
 // flagged member's name, reporting ErrUnpSizeUnknown from both Read and
 // Close -- and, separately, that the refused member's declared payload does

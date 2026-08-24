@@ -10,8 +10,8 @@ import (
 // cryptHeaderFromFixture opens a header-encrypted RAR5 fixture and reads
 // block headers, in the same order Reader.dispatch does, until it finds the
 // HEAD_CRYPT (archive header encryption) block, then returns its parsed
-// CryptHeader.
-func cryptHeaderFromFixture(t *testing.T, name string) *CryptHeader {
+// cryptHeader.
+func cryptHeaderFromFixture(t *testing.T, name string) *cryptHeader {
 	t.Helper()
 
 	f, err := os.Open(filepath.Join("testdata", name))
@@ -25,15 +25,15 @@ func cryptHeaderFromFixture(t *testing.T, name string) *CryptHeader {
 	}
 
 	for {
-		h, err := ReadBlockHeader(f)
+		h, err := readBlockHeader(f)
 		if err != nil {
 			if err == io.EOF { //nolint:errorlint // sentinel from ReadBlockHeader
 				t.Fatalf("no HEAD_CRYPT block found in %s", name)
 			}
 			t.Fatalf("ReadBlockHeader: %v", err)
 		}
-		if h.Type == HeaderTypeEncryption {
-			ch, err := ParseCryptHeader(h)
+		if h.Type == headerTypeEncryption {
+			ch, err := parseCryptHeader(h)
 			if err != nil {
 				t.Fatalf("ParseCryptHeader: %v", err)
 			}
@@ -88,7 +88,7 @@ func TestVerifyPassword_HeaderEncrypted(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			verified, hasCheckValue, err := VerifyPassword(ch, tc.password)
+			verified, hasCheckValue, err := verifyCryptHeaderPassword(ch, tc.password)
 			if err != nil {
 				t.Fatalf("VerifyPassword() unexpected error: %v", err)
 			}
@@ -103,9 +103,9 @@ func TestVerifyPassword_HeaderEncrypted(t *testing.T) {
 }
 
 func TestVerifyPassword_NoCheckValue(t *testing.T) {
-	ch := &CryptHeader{KdfCount: 0, Salt: make([]byte, 16)}
+	ch := &cryptHeader{KdfCount: 0, Salt: make([]byte, 16)}
 
-	verified, hasCheckValue, err := VerifyPassword(ch, "anything")
+	verified, hasCheckValue, err := verifyCryptHeaderPassword(ch, "anything")
 	if err != nil {
 		t.Fatalf("VerifyPassword() unexpected error: %v", err)
 	}
@@ -131,7 +131,7 @@ func TestVerifyFilePassword_ContentEncrypted(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			verified, hasCheckValue, err := VerifyFilePassword(fh, tc.password)
+			verified, hasCheckValue, err := verifyFileHeaderPassword(fh, tc.password)
 			if err != nil {
 				t.Fatalf("VerifyFilePassword() unexpected error: %v", err)
 			}
@@ -148,7 +148,7 @@ func TestVerifyFilePassword_ContentEncrypted(t *testing.T) {
 func TestVerifyFilePassword_NoCheckValue(t *testing.T) {
 	fh := &FileHeader{KdfCount: 0, Salt: make([]byte, 16)}
 
-	verified, hasCheckValue, err := VerifyFilePassword(fh, "anything")
+	verified, hasCheckValue, err := verifyFileHeaderPassword(fh, "anything")
 	if err != nil {
 		t.Fatalf("VerifyFilePassword() unexpected error: %v", err)
 	}

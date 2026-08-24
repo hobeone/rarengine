@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// staleFullWindow builds the exact state Window.Read used to hang on: full set
+// staleFullWindow builds the exact state window.Read used to hang on: full set
 // while w and r do not describe a full buffer, with w landed on 0.
 //
 // The sequence matters, so it is spelled out rather than assigned directly --
@@ -27,10 +27,10 @@ import (
 // being repeated as a literal in three places.
 const staleK = 100
 
-func staleFullWindow(t *testing.T, size, k int) *Window {
+func staleFullWindow(t *testing.T, size, k int) *window {
 	t.Helper()
 
-	w := NewWindow(size)
+	w := newWindow(size)
 	size = w.size // NewWindow enforces a minimum
 
 	w.writeBytes(bytes.Repeat([]byte{'a'}, k))
@@ -50,7 +50,7 @@ func staleFullWindow(t *testing.T, size, k int) *Window {
 	return w
 }
 
-// TestWindowReadDoesNotSpinOnStaleFull pins that a Window whose full flag no
+// TestWindowReadDoesNotSpinOnStaleFull pins that a window whose full flag no
 // longer matches its pointers produces a short read rather than hanging.
 //
 // The loop copied until it had moved Available() bytes and had no exit for a
@@ -67,7 +67,7 @@ func staleFullWindow(t *testing.T, size, k int) *Window {
 //
 // On failure that goroutine is left spinning for the rest of the run, which is
 // accepted rather than fixed: the loop it is stuck in has no cancellation
-// point, and giving Window.Read one so a test can interrupt it would put
+// point, and giving window.Read one so a test can interrupt it would put
 // production machinery in the hot path to serve a case that only occurs when
 // the code is already broken. A failing run is not expected to be a long one.
 func TestWindowReadDoesNotSpinOnStaleFull(t *testing.T) {
@@ -137,7 +137,7 @@ func TestWindowReadReportsWhatItActuallyMoved(t *testing.T) {
 // Mutation check: change storeReader.Read back to win.writeBytes and this
 // fails on the pointer assertions.
 func TestStoreReaderLeavesWindowPointersConsistent(t *testing.T) {
-	win := NewWindow(0x40000)
+	win := newWindow(0x40000)
 	// Three and a bit laps, in chunks that do not divide the window, so a
 	// chunk boundary lands on r at some point rather than by construction.
 	content := bytes.Repeat([]byte("stored member payload. "), 60000)
@@ -192,7 +192,7 @@ func TestStoreReaderLeavesWindowPointersConsistent(t *testing.T) {
 // back-reference the stored bytes. This is the property the window write
 // exists for, asserted end to end so the fix cannot quietly drop it.
 func TestSolidSuccessorReachesStoredHistory(t *testing.T) {
-	win := NewWindow(0x40000)
+	win := newWindow(0x40000)
 	content := bytes.Repeat([]byte("stored member payload. "), 60000)
 
 	s := &storeReader{r: bytes.NewReader(content), win: win}

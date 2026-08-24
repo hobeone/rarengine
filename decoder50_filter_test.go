@@ -67,8 +67,8 @@ func encodeFilter(rawOffset, length int64, ftype, param int) []byte {
 
 // queueOne parses a single filter record into d's queue from a synthesized
 // stream, returning readFilter's error.
-func queueOne(d *decoder50, win *Window, rawOffset, length int64, ftype, param int) error {
-	d.br = NewBitReader(encodeFilter(rawOffset, length, ftype, param), 96)
+func queueOne(d *decoder50, win *window, rawOffset, length int64, ftype, param int) error {
+	d.br = newBitReader(encodeFilter(rawOffset, length, ftype, param), 96)
 	return d.readFilter(win)
 }
 
@@ -89,14 +89,14 @@ func TestFilterDrain(t *testing.T) {
 	tests := []struct {
 		name      string
 		payload   int
-		filters   []FilterBlock
+		filters   []filterBlock
 		wantReads []int
 		wantFired []int
 	}{
 		{
 			name:    "three filters telescoping",
 			payload: 70,
-			filters: []FilterBlock{
+			filters: []filterBlock{
 				{start: 10, length: 20, ftype: 0, param: 1},
 				{start: 45, length: 5, ftype: 0, param: 1},
 				{start: 60, length: 10, ftype: 0, param: 1},
@@ -107,7 +107,7 @@ func TestFilterDrain(t *testing.T) {
 		{
 			name:    "two filters",
 			payload: 80,
-			filters: []FilterBlock{
+			filters: []filterBlock{
 				{start: 10, length: 20, ftype: 0, param: 1},
 				{start: 45, length: 5, ftype: 0, param: 1},
 			},
@@ -119,7 +119,7 @@ func TestFilterDrain(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			d := drainedDecoder()
-			win := NewWindow(0x40000)
+			win := newWindow(0x40000)
 
 			payload := make([]byte, tc.payload)
 			for i := range payload {
@@ -162,9 +162,9 @@ func TestFilterDrain(t *testing.T) {
 // passthrough terminates and the filter actually fires.
 func TestFilterPassthroughOffsetPersists(t *testing.T) {
 	d := drainedDecoder()
-	win := NewWindow(0x40000)
+	win := newWindow(0x40000)
 	win.writeBytes([]byte{1, 2, 3, 4, 5, 6, 7, 8})
-	d.fl = append(d.fl, FilterBlock{start: 4, length: 4, ftype: 0, param: 1})
+	d.fl = append(d.fl, filterBlock{start: 4, length: 4, ftype: 0, param: 1})
 
 	var got []byte
 	for range 8 {
@@ -196,7 +196,7 @@ func TestFilterPassthroughOffsetPersists(t *testing.T) {
 // index difference and had to correct for the wrap.
 func TestReadFilterAbsoluteStart(t *testing.T) {
 	d := newDecoder50()
-	win := NewWindow(0x40000)
+	win := newWindow(0x40000)
 	win.r = win.size - 44
 	win.w = 44
 	d.decoded = 1000
@@ -226,7 +226,7 @@ func TestReadFilterAbsoluteStart(t *testing.T) {
 // already in the queue.
 func TestReadFilterRejectsOutOfOrderStart(t *testing.T) {
 	d := newDecoder50()
-	win := NewWindow(0x40000)
+	win := newWindow(0x40000)
 	d.decoded = 1000
 
 	if err := queueOne(d, win, 50, 10, 0, 1); err != nil {
@@ -243,12 +243,12 @@ func TestReadFilterRejectsOutOfOrderStart(t *testing.T) {
 // previous block's output rather than to fresh window data.
 func TestFilterRejectsOverlap(t *testing.T) {
 	d := drainedDecoder()
-	win := NewWindow(0x40000)
+	win := newWindow(0x40000)
 	win.writeBytes(make([]byte, 64))
 
 	d.fl = append(d.fl,
-		FilterBlock{start: 0, length: 20, ftype: 0, param: 1},
-		FilterBlock{start: 10, length: 20, ftype: 0, param: 1},
+		filterBlock{start: 0, length: 20, ftype: 0, param: 1},
+		filterBlock{start: 10, length: 20, ftype: 0, param: 1},
 	)
 
 	p := make([]byte, 128)
@@ -262,12 +262,12 @@ func TestFilterRejectsOverlap(t *testing.T) {
 // and must not surface a clean EOF.
 func TestStageFilterInputTruncated(t *testing.T) {
 	d := drainedDecoder()
-	win := NewWindow(0x40000)
+	win := newWindow(0x40000)
 	win.writeBytes(bytes.Repeat([]byte{0xBB}, 8))
 
 	// Pre-dirty the staging buffer the way a previous larger block would.
 	d.filterBuf = bytes.Repeat([]byte{0xAA}, 64)
-	d.fl = append(d.fl, FilterBlock{start: 0, length: 64, ftype: 1})
+	d.fl = append(d.fl, filterBlock{start: 0, length: 64, ftype: 1})
 
 	p := make([]byte, 128)
 	n, err := d.Read(win, p)
@@ -292,7 +292,7 @@ func TestStageFilterInputTruncated(t *testing.T) {
 // TestReadFilterRejectsOversize covers the block-length cap.
 func TestReadFilterRejectsOversize(t *testing.T) {
 	d := newDecoder50()
-	win := NewWindow(0x40000)
+	win := newWindow(0x40000)
 
 	err := queueOne(d, win, 0, int64(maxFilterBlockSize)+1, 0, 1)
 	if !errors.Is(err, ErrInvalidFilter) {
@@ -308,7 +308,7 @@ func TestReadFilterRejectsOversize(t *testing.T) {
 // from the decode head is malformed.
 func TestReadFilterRejectsOversizeOffset(t *testing.T) {
 	d := newDecoder50()
-	win := NewWindow(0x40000)
+	win := newWindow(0x40000)
 
 	err := queueOne(d, win, int64(win.size)+1, 8, 0, 1)
 	if !errors.Is(err, ErrInvalidFilter) {
@@ -367,7 +367,7 @@ func TestReadFilter5DataStaysPositive(t *testing.T) {
 	writeVarBytes(&bw, 0xF0332211)
 	bw.flush()
 
-	val, err := readFilter5Data(NewBitReader(bw.buf, len(bw.buf)*8))
+	val, err := readFilter5Data(newBitReader(bw.buf, len(bw.buf)*8))
 	if err != nil {
 		t.Fatalf("readFilter5Data: %v", err)
 	}
@@ -380,7 +380,7 @@ func TestReadFilter5DataStaysPositive(t *testing.T) {
 // readFilter, where it must be rejected rather than queued.
 func TestReadFilterRejectsHugeValues(t *testing.T) {
 	d := newDecoder50()
-	win := NewWindow(0x40000)
+	win := newWindow(0x40000)
 
 	if err := queueOne(d, win, 0, 0xF0332211, 0, 1); !errors.Is(err, ErrInvalidFilter) {
 		t.Errorf("huge length: err = %v, want ErrInvalidFilter", err)
@@ -398,7 +398,7 @@ func TestReadFilterRejectsHugeValues(t *testing.T) {
 // buffer, violating io.Reader.
 func TestReadFilterDropsZeroLength(t *testing.T) {
 	d := newDecoder50()
-	win := NewWindow(0x40000)
+	win := newWindow(0x40000)
 
 	if err := queueOne(d, win, 0, 0, 0, 1); err != nil {
 		t.Fatalf("readFilter: %v", err)

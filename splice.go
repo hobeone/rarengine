@@ -92,7 +92,7 @@ func (r *Reader) nextVolumePayload(e *Entry) (io.Reader, error) {
 			// advancing to volume 3. NextEntry treats io.EOF/
 			// io.ErrUnexpectedEOF from vol.next() as "this volume is spent,
 			// open the next one and keep scanning" -- so this must too. The
-			// old engine got this for free from an explicit HeaderTypeEnd
+			// old engine got this for free from an explicit headerTypeEnd
 			// case in processVolumePayloadHeader that called nextVolume()
 			// itself; that case does not exist here, because end headers
 			// now fall through the same generic "not a file header, keep
@@ -131,8 +131,8 @@ func (r *Reader) nextVolumePayload(e *Entry) (io.Reader, error) {
 			}
 			return nil, r.latchArchive(err)
 		}
-		if h.Type != HeaderTypeFile {
-			if h.Type == HeaderTypeEnd {
+		if h.Type != headerTypeFile {
+			if h.Type == headerTypeEnd {
 				// Same rule the scan follows: no block after this one belongs
 				// to the archive, so the continuation is not in this volume
 				// and reading further here would parse whatever padding
@@ -144,7 +144,7 @@ func (r *Reader) nextVolumePayload(e *Entry) (io.Reader, error) {
 				}
 				continue
 			}
-			if h.Type == HeaderTypeEncryption {
+			if h.Type == headerTypeEncryption {
 				// Every volume of a header-encrypted archive repeats its own
 				// HEAD_CRYPT in plaintext, and each volume is a fresh value
 				// whose header decryptor starts nil. Skipping this block left
@@ -159,8 +159,8 @@ func (r *Reader) nextVolumePayload(e *Entry) (io.Reader, error) {
 				}
 				continue
 			}
-			if h.Type == HeaderTypeArchive {
-				ah, aerr := ParseArchiveHeader(h)
+			if h.Type == headerTypeArchive {
+				ah, aerr := parseArchiveHeader(h)
 				if aerr != nil {
 					// Consistent with the identical failure reached
 					// through NextEntry's own dispatch (reader.go): a
@@ -184,7 +184,8 @@ func (r *Reader) nextVolumePayload(e *Entry) (io.Reader, error) {
 				// not this member's continuation, so the member in progress
 				// ended short -- and the new member is staged rather than
 				// dropped, exactly as an intact new member is below. The
-				// exported ParseFileHeader stood here and discards the
+				// exported wrapper over parseFileHeader stood here and
+				// discarded the
 				// header it built, so this branch could not exist: the new
 				// member's failure was reported as the spliced member's, and
 				// nextEntry then skipped the block entirely, losing a member
