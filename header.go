@@ -58,6 +58,12 @@ const (
 	FileFlagUnpSizeUnknown = 0x0008
 
 	// File Compression Flags
+	// FileCompVersion masks the unpack-version field of a file header's
+	// compression-information vint. Zero is RAR 5.0; RAR 7.0 raised it, and
+	// the two formats are otherwise indistinguishable from outside a file
+	// header -- same signature, same block framing, same vint encoding.
+	FileCompVersion = 0x0000003f
+
 	FileCompSolid = 0x00000040
 
 	// File Encryption Extra Flags
@@ -97,10 +103,19 @@ type FileHeader struct {
 	FirstBlock   bool // true if this is the first block/volume-part of the file
 	LastBlock    bool // true if this is the last block/volume-part of the file
 	Method       int  // compression method: 0 = store, 1..5 = compress
-	CRC32        uint32
-	HasCRC32     bool
-	HasBlake2sp  bool
-	Blake2sp     []byte // 32-byte BLAKE2sp hash
+
+	// UnpackVersion is the compression algorithm version this member's header
+	// declares: 0 is RAR 5.0, and it is the only value this library can
+	// decode. RAR 7.0 raised it, and nothing outside a file header
+	// distinguishes the two formats -- same signature, same block framing,
+	// same vint encoding -- so this field is the only place the difference is
+	// visible. Reader.dispatch refuses anything else; see unpackVersionRAR5.
+	UnpackVersion int
+
+	CRC32       uint32
+	HasCRC32    bool
+	HasBlake2sp bool
+	Blake2sp    []byte // 32-byte BLAKE2sp hash
 	// Encrypted reports that the member's content is encrypted, from RAR5's
 	// encryption extra record.
 	Encrypted bool
@@ -539,6 +554,7 @@ func parseFileHeader(h *BlockHeader) (*FileHeader, error) {
 	if err != nil {
 		return nil, err
 	}
+	fh.UnpackVersion = int(compFlags & FileCompVersion)
 	fh.Solid = compFlags&FileCompSolid > 0
 	fh.Method = int((compFlags >> 7) & 7)
 	payload = payload[nComp:]

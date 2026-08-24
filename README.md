@@ -131,6 +131,16 @@ no verdict in this library can be delivered before the content it describes.
 
 There is no way to switch verification off and get the content regardless.
 
+### RAR7 archives
+
+RAR 7.0 raised the unpack-version field in each file header and changed nothing
+else a reader can see from outside it — the signature, block framing and vint
+encoding are identical to RAR5. A member declaring any version other than 0
+(RAR 5.0) is refused with `ErrUnsupportedFormat`, naming the version.
+
+That refusal is per-member, not archive-level: it arrives through the `Entry`,
+and `NextEntry` is still safe to call again for the members behind it.
+
 ### RAR3 archives
 
 `rarengine` is RAR5 only. A RAR3 signature is recognised so it can be refused

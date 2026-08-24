@@ -385,6 +385,29 @@ func (r *Reader) dispatch(h *BlockHeader) (*Entry, error) {
 		if !fh.FirstBlock {
 			return nil, nil
 		}
+		// Refused before the bomb ratio and before BeginFile: a member whose
+		// compression algorithm this library does not implement cannot be
+		// reasoned about at all, so nothing downstream should touch the
+		// window on its behalf.
+		//
+		// RAR 7.0 raised this field and changed nothing a traversal can see
+		// from outside a file header -- the signature, block framing and vint
+		// encoding are identical -- so detectVersion cannot separate them and
+		// every member with a nonzero method was handed to the RAR5 decoder.
+		// That produced garbage rather than an error, and the CRC32 caught it
+		// only after the whole member had been decompressed and delivered.
+		//
+		// ErrUnsupportedFormat rather than a new sentinel: it already means
+		// "an archive this library cannot decode", which is exactly this, and
+		// a caller can do nothing different for a RAR7 member than for a RAR3
+		// signature. The version is named in the message.
+		if fh.UnpackVersion != unpackVersionRAR5 {
+			r.win.MarkIncomplete()
+			return terminalEntry(fh, fmt.Errorf(
+				"%w: file %q declares unpack version %d, this library decodes "+
+					"version %d (RAR 5.0)", ErrUnsupportedFormat, fh.Name,
+				fh.UnpackVersion, unpackVersionRAR5)), nil
+		}
 		// The multiplication is guarded, not replaced by a division: a
 		// division floors, so it would let a member declaring exactly one
 		// byte past the ratio through, and this guard must not be weakened.
@@ -533,6 +556,12 @@ func (r *Reader) resolveHeaderPassword(ch *CryptHeader) (string, error) {
 	}
 	return "", ErrWrongPassword
 }
+
+// unpackVersionRAR5 is the only compression algorithm version this library
+// implements. The field it is compared against is attacker-supplied like every
+// other, but there is nothing to cross-check it against: a RAR7 member is a
+// well-formed header for a format we do not decode, not a malformed one.
+const unpackVersionRAR5 = 0
 
 // buildChain assembles the decode chain for a member:
 //
