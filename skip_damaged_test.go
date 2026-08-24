@@ -620,6 +620,15 @@ func (e *errWithFinalBytes) Read(p []byte) (int, error) {
 // non-nil outcome as damage would refuse the solid successors of every
 // encrypted file recording a MAC, which decode correctly.
 //
+// Each case asserts the verdict it actually produced, not only the damage
+// decision it drove. Two of the three outcomes here are undamaged, so a case
+// that silently stops reaching its intended branch still passes -- and one
+// did: while fh carried no CRC32, "clean completion" completed as
+// ErrChecksumUnsupported once an unverifiable member stopped returning nil,
+// leaving io.EOF -- the branch that case exists for -- unexercised. The
+// header now records a real digest, and wantDone pins which branch each case
+// reaches so the convergence cannot happen again unnoticed.
+//
 // This drives Reader.finishActive directly, as the old per-site test drove
 // fileReader.endFile directly: the decision is a three-way classification
 // with no natural home in a round-tripped archive (a decode error exactly at
@@ -628,15 +637,19 @@ func (e *errWithFinalBytes) Read(p []byte) (int, error) {
 // way production code does -- through Window.BeginFile.
 func TestFinishActive_DamageOnNonCleanOutcome(t *testing.T) {
 	content := []byte("bytes the decoder produced before it gave up")
+	errDecode := errors.New("invalid huffman code")
 
 	for _, tc := range []struct {
 		name string
 		err  error
 		want bool
+		// wantDone is the verdict the member must reach. Without it the two
+		// undamaged cases are indistinguishable from each other.
+		wantDone error
 	}{
-		{"decode error on the final block", errors.New("invalid huffman code"), true},
-		{"unverifiable digest", ErrChecksumUnsupported, false},
-		{"clean completion", nil, false},
+		{"decode error on the final block", errDecode, true, errDecode},
+		{"unverifiable digest", ErrChecksumUnsupported, false, ErrChecksumUnsupported},
+		{"clean completion", nil, false, io.EOF},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := NewReader(nil)
@@ -645,8 +658,13 @@ func TestFinishActive_DamageOnNonCleanOutcome(t *testing.T) {
 			// member continues into another part -- and a member that
 			// reaches its declared size while that claim stands is refused
 			// as malformed, which would make every case here damage.
+			//
+			// HasCRC32 matters for the same reason: a member that produced
+			// bytes and records no digest is unverifiable, so without a real
+			// checksum here the clean case cannot reach io.EOF at all.
 			fh := &FileHeader{
 				Name: "x.bin", UnpackedSize: int64(len(content)), LastBlock: true,
+				HasCRC32: true, CRC32: crc32.ChecksumIEEE(content),
 			}
 			e := newEntry(fh, &errWithFinalBytes{data: content, err: tc.err})
 			r.entry = e
@@ -655,6 +673,11 @@ func TestFinishActive_DamageOnNonCleanOutcome(t *testing.T) {
 			if e.remaining != 0 {
 				t.Fatalf("remaining = %d; this case must reach the byte budget, "+
 					"or it is testing the short path instead", e.remaining)
+			}
+
+			if !errors.Is(e.done, tc.wantDone) {
+				t.Fatalf("verdict = %v, want %v; this case is no longer "+
+					"exercising the branch it names", e.done, tc.wantDone)
 			}
 
 			r.finishActive()
