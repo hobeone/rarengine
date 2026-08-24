@@ -24,7 +24,7 @@ import (
 
 // memberWithEncVersion builds a stored member carrying an encryption extra
 // record declaring encryption version ver. notFirst clears FirstBlock (i.e.
-// sets HeaderFlagDataNotFirst), producing a continuation block belonging to
+// sets headerFlagDataNotFirst), producing a continuation block belonging to
 // a member already announced elsewhere.
 func memberWithEncVersion(t testing.TB, name, content string, ver uint64, notFirst bool) []byte {
 	t.Helper()
@@ -168,7 +168,7 @@ func TestTraversalContinuesAfterRefusedExtraRecordMember(t *testing.T) {
 	}
 }
 
-// (d) A continuation block (HeaderFlagDataNotFirst set) whose extra records
+// (d) A continuation block (headerFlagDataNotFirst set) whose extra records
 // fail to parse must still skip silently, exactly like the FirstBlock case
 // already covered by TestUnparsableFileHeaderDoesNotEndTraversal -- it
 // belongs to a member already abandoned and has no identity of its own to
@@ -190,7 +190,7 @@ func TestRefusedExtraRecordContinuationBlockSkipsSilently(t *testing.T) {
 	_ = e.Close()
 }
 
-// (e) Window damage from the refusal is recorded: a solid member following
+// (e) window damage from the refusal is recorded: a solid member following
 // the refused one must be refused too, rather than decoded against a window
 // missing the refused file's bytes. Mirrors TestSolidMemberAfterDamageIsRefused.
 func TestSolidMemberAfterRefusedExtraRecordMemberIsRefused(t *testing.T) {
@@ -222,13 +222,13 @@ func TestSolidMemberAfterRefusedExtraRecordMemberIsRefused(t *testing.T) {
 // late refusal is reported by name, not dropped -- for the two refusals that
 // moved from early-in-parseFileHeader positions (right after the flags vint,
 // and right after the size vint) into the identity-first validation block
-// placed immediately before parseExtraRecords: FileFlagUnpSizeUnknown and a
+// placed immediately before parseExtraRecords: fileFlagUnpSizeUnknown and a
 // negative decoded UnpackedSize. Unlike memberWithEncVersion's trigger (a
 // parseExtraRecords failure), these two fire from ordinary field values with
 // no extra records at all, so the builders below carry no extra area.
 
 // memberWithUnpSizeUnknown builds a stored member carrying
-// FileFlagUnpSizeUnknown: a complete, well-formed header through the name
+// fileFlagUnpSizeUnknown: a complete, well-formed header through the name
 // field, differing from a valid header ONLY in this flag. notFirst clears
 // FirstBlock, producing a continuation block belonging to a member already
 // announced elsewhere.
@@ -432,7 +432,7 @@ func TestTraversalContinuesAfterRefusedNegativeSizeMember(t *testing.T) {
 	}
 }
 
-// (d) Window damage is recorded for the UnpSizeUnknown refusal: a solid
+// (d) window damage is recorded for the UnpSizeUnknown refusal: a solid
 // member following it must itself be refused, rather than decoded against a
 // window missing the refused file's bytes.
 func TestSolidMemberAfterRefusedUnpSizeUnknownMemberIsRefused(t *testing.T) {
@@ -486,8 +486,8 @@ func TestSolidMemberAfterRefusedNegativeSizeMemberIsRefused(t *testing.T) {
 	}
 }
 
-// (e) A continuation block (HeaderFlagDataNotFirst set) carrying
-// FileFlagUnpSizeUnknown must still skip silently -- it belongs to a member
+// (e) A continuation block (headerFlagDataNotFirst set) carrying
+// fileFlagUnpSizeUnknown must still skip silently -- it belongs to a member
 // already abandoned and has no identity of its own to report.
 func TestUnpSizeUnknownContinuationBlockSkipsSilently(t *testing.T) {
 	stream := rar5Archive(t, false,

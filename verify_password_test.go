@@ -10,7 +10,7 @@ import (
 // cryptHeaderFromFixture opens a header-encrypted RAR5 fixture and reads
 // block headers, in the same order Reader.dispatch does, until it finds the
 // HEAD_CRYPT (archive header encryption) block, then returns its parsed
-// CryptHeader.
+// cryptHeader.
 func cryptHeaderFromFixture(t *testing.T, name string) *cryptHeader {
 	t.Helper()
 

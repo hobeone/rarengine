@@ -12,7 +12,7 @@ func TestReadFilter5Data(t *testing.T) {
 	// - 2 bits for bytesVal (value - 1) -> let's say bytesVal = 2 (so we write 1: 0x01)
 	// - 2 bytes of payload (each 8 bits): 0x34, 0x12 -> represents 0x1234
 	// In bits (MSB first, so we read 2 bits first, then 8, then 8):
-	// Let's create a BitReader from binary sequence
+	// Let's create a bitReader from binary sequence
 	// 01 (bytesVal=1, meaning 2 bytes) followed by 0x34 (00110100) and 0x12 (00010010)
 	// Output should be: 0x1234 = 4660
 	// Let's construct the bits:

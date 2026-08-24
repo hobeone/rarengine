@@ -197,8 +197,8 @@ func TestVolumeUseEncryptedHeadersDecryptsAndDoesNotCarryAcrossVolumes(t *testin
 //
 // The archive shape: a valid RAR5 signature, then a 4-byte CRC followed by
 // three size-vint bytes that all set the continuation bit (0x80) and never
-// terminate, so DecodeVint fails having consumed exactly the 7 bytes
-// ReadBlockHeader read up front. A complete, CRC-valid file block sits right
+// terminate, so decodeVint fails having consumed exactly the 7 bytes
+// readBlockHeader read up front. A complete, CRC-valid file block sits right
 // after -- the bytes a broken retry would reparse as the next header.
 func TestVolumeDoesNotResumeAfterFailedHeaderRead(t *testing.T) {
 	planted := rar5BlockDeclaring(headerTypeFile, 5, nil, false)

@@ -210,7 +210,7 @@ func TestEncryptedHeaderMultiVolume(t *testing.T) {
 // TestEmptyCandidateDoesNotEndThePasswordScan pins that an unusable
 // candidate costs itself and nothing else.
 //
-// VerifyFilePassword reports ErrPasswordRequired for an empty password,
+// verifyFileHeaderPassword reports ErrPasswordRequired for an empty password,
 // which says that candidate cannot be checked -- a fact about the
 // candidate, not about the archive. Treated as fatal, it ended the scan, so
 // a caller passing "" alongside real guesses (the natural way to say "try

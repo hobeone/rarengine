@@ -13,7 +13,7 @@ import (
 // next header read.
 //
 // The vulnerability these cover (#48) is that a block header may declare
-// payload whatever its type -- DataSize is read whenever HeaderFlagHasData is
+// payload whatever its type -- DataSize is read whenever headerFlagHasData is
 // set, and nothing consults the block type -- so
 // a crafted archive can put a complete, CRC-valid file entry in that region.
 // Whatever fails to consume it leaves the next header to be parsed out of
@@ -160,7 +160,7 @@ func TestServiceHeaderPayloadIsDiscarded_RAR5(t *testing.T) {
 // Its premise was that a failed archive-header parse is a refusal the caller
 // may retry past, landing on the real next entry. Dispatch treats an archive
 // header parse failure as archive-level fatal instead (reader.go, the
-// HeaderTypeArchive case's comment): the archive header defines archive-wide
+// headerTypeArchive case's comment): the archive header defines archive-wide
 // semantics, including whether the archive is solid, so a header this library
 // cannot parse means proceeding with UNKNOWN archive-wide semantics, not a
 // block to discard and scan past. NextEntry therefore returns the parse error
@@ -169,7 +169,7 @@ func TestServiceHeaderPayloadIsDiscarded_RAR5(t *testing.T) {
 //
 // This is not a gap the rewrite left uncovered: it is a deliberate, already
 // documented and already tested design decision from the traversal that
-// predates this task (see reader.go's HeaderTypeArchive case and
+// predates this task (see reader.go's headerTypeArchive case and
 // TestMalformedArchiveHeaderEndsTraversal in reader_test.go, which pins
 // exactly this property with its own fixture).
 //
@@ -181,9 +181,9 @@ func TestServiceHeaderPayloadIsDiscarded_RAR5(t *testing.T) {
 // a file header, where a bad member is just one entry among many, an
 // unparsed HEAD_CRYPT means every header AFTER it in the archive is
 // ciphertext this library cannot decrypt. There is no degraded-but-useful
-// mode to skip forward into, so dispatch's HeaderTypeEncryption case now
+// mode to skip forward into, so dispatch's headerTypeEncryption case now
 // treats a parse failure as archive-level fatal, exactly like the
-// HeaderTypeArchive parse failure covered by
+// headerTypeArchive parse failure covered by
 // TestArchiveHeaderParseErrorDiscardsPayload_RAR5's deletion note above and
 // pinned by TestMalformedArchiveHeaderEndsTraversal.
 //
@@ -351,7 +351,7 @@ func TestEveryBlockTypeAccountsForItsPayload_RAR5(t *testing.T) {
 	sentinel := rar5FileEntry("SENTINEL.txt", 4, crc32.ChecksumIEEE([]byte("real")), []byte("real"))
 	const declared = 9
 
-	// One past HeaderTypeEnd so an unrecognised type is swept too -- that is
+	// One past headerTypeEnd so an unrecognised type is swept too -- that is
 	// the case a future block type arrives as.
 	for blockType := uint64(headerTypeArchive); blockType <= headerTypeEnd+1; blockType++ {
 		t.Run(hexName(int(blockType)), func(t *testing.T) {
@@ -382,7 +382,7 @@ func TestEveryBlockTypeAccountsForItsPayload_RAR5(t *testing.T) {
 				// Also not swept: a crypt header whose payload cannot parse
 				// (the stub 0xAA bytes here decode to neither a valid
 				// version nor a valid flags vint) is archive-level fatal by
-				// design -- see reader.go's HeaderTypeEncryption case and
+				// design -- see reader.go's headerTypeEncryption case and
 				// crypt_header_error_test.go. Every header after a real
 				// HEAD_CRYPT is ciphertext, so there is no sentinel to
 				// reach past an unparsable one.
@@ -399,7 +399,7 @@ func TestEveryBlockTypeAccountsForItsPayload_RAR5(t *testing.T) {
 				// volume.next() skips the declared bytes before dispatch
 				// sees the header -- it is simply no longer observable from
 				// out here, because the traversal stops rather than reading
-				// on. See reader.go's HeaderTypeEnd case.
+				// on. See reader.go's headerTypeEnd case.
 				if err == nil {
 					t.Fatalf("a member (%q) was returned from behind the end "+
 						"header; nothing after it belongs to the archive", e.Header.Name)

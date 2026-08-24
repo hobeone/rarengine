@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// Tests for dispatch's HeaderTypeEncryption error route (reader.go). A
+// Tests for dispatch's headerTypeEncryption error route (reader.go). A
 // HEAD_CRYPT block that fails to parse is fatal, not skipped: every header
 // after a real crypt header is ciphertext, so an unparsed one leaves the
 // rest of the archive unreadable -- there is no degraded-but-useful mode to
@@ -18,10 +18,10 @@ import (
 // TestParseCryptHeader_UnknownVersion_ClassifiesDistinctly is the round-trip
 // check required before building the full-stream fixture below: it confirms
 // the crypt-header payload fails on the VERSION field specifically, via a
-// direct ParseCryptHeader call, rather than on some other field that would
+// direct parseCryptHeader call, rather than on some other field that would
 // make this fixture indistinguishable from the truncated-payload one.
 func TestParseCryptHeader_UnknownVersion_ClassifiesDistinctly(t *testing.T) {
-	// Version vint = 1 only. ParseCryptHeader reads and rejects the version
+	// Version vint = 1 only. parseCryptHeader reads and rejects the version
 	// before it ever looks at flags, KdfCount or salt, so nothing else is
 	// needed to reach ErrUnknownEncryptMethod specifically.
 	payload := encodeVint(1)
@@ -40,7 +40,7 @@ func TestParseCryptHeader_UnknownVersion_ClassifiesDistinctly(t *testing.T) {
 // TestParseCryptHeader_TruncatedPayload_ClassifiesDistinctly is the
 // round-trip check for the corruption-side fixture: version 0 (accepted)
 // and flags 0, but the record ends before the mandatory KdfCount+salt
-// bytes, so ParseCryptHeader fails on the length check rather than the
+// bytes, so parseCryptHeader fails on the length check rather than the
 // version check.
 func TestParseCryptHeader_TruncatedPayload_ClassifiesDistinctly(t *testing.T) {
 	payload := append(encodeVint(0), encodeVint(0)...) // version, flags; no KdfCount/salt

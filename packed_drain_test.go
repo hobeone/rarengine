@@ -53,7 +53,7 @@ func rar5FileEntry(name string, unpackedSize uint64, declaredCRC uint32, payload
 }
 
 // rar5EntryComp is rar5FileEntry with the compression-info vint exposed, so a
-// test can set FileCompSolid (0x40) or a method without rebuilding the block.
+// test can set fileCompSolid (0x40) or a method without rebuilding the block.
 // Method lives in bits 7-9 of the same vint, so 0 is store either way.
 func rar5EntryComp(name string, compFlags uint64, unpackedSize uint64, declaredCRC uint32, payload []byte) []byte {
 	return rar5EntryFlags(name, compFlags, headerFlagHasData, unpackedSize, declaredCRC, payload)
@@ -61,7 +61,7 @@ func rar5EntryComp(name string, compFlags uint64, unpackedSize uint64, declaredC
 
 // rar5EntryFlags is rar5EntryComp with the BLOCK header flags exposed as well,
 // so a test can mark an entry as continuing into the next volume
-// (HeaderFlagDataNotLast) without restating the header layout.
+// (headerFlagDataNotLast) without restating the header layout.
 func rar5EntryFlags(name string, compFlags uint64, blockFlags uint64, unpackedSize uint64, declaredCRC uint32, payload []byte) []byte {
 	var fp bytes.Buffer
 	fp.Write(encodeVint(fileFlagHasCRC32))

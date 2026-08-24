@@ -20,7 +20,7 @@ var (
 	// ErrCRCMismatch is returned by Read once a file's fully decompressed
 	// content has been read, if its CRC32 doesn't match the value recorded
 	// in the RAR file header. Only checked when the header carries a CRC32
-	// (FileFlagHasCRC32); verification is unconditional -- there is no
+	// (fileFlagHasCRC32); verification is unconditional -- there is no
 	// method to disable it.
 	ErrCRCMismatch = errors.New("rarengine: decompressed content CRC32 does not match file header")
 

@@ -118,7 +118,7 @@ func (r *Reader) Reset(volumes <-chan io.ReadCloser) {
 	// BeginFile(false) is the window's one entrance for discarding history: it
 	// resets the pointers and clears incomplete together. Poking r.win.incomplete
 	// directly here would reintroduce a second writer of that flag, which is
-	// exactly what Window.BeginFile/MarkIncomplete exist to prevent.
+	// exactly what window.BeginFile/MarkIncomplete exist to prevent.
 	_ = r.win.BeginFile(false)
 }
 
@@ -521,7 +521,7 @@ func (r *Reader) resolvePassword(fh *FileHeader) (string, error) {
 }
 
 // resolveHeaderPassword is resolvePassword for archive-level header
-// encryption, whose check value lives on the CryptHeader rather than on a file
+// encryption, whose check value lives on the cryptHeader rather than on a file
 // header.
 func (r *Reader) resolveHeaderPassword(ch *cryptHeader) (string, error) {
 	if r.hasResolved {

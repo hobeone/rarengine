@@ -45,7 +45,7 @@ func mtimeOf(t *testing.T, fixture string) time.Time {
 // oracle's own output.
 //
 // Expected values are what `unrar lt` prints for these fixtures. rar only sets
-// FileFlagHasUnixMtime for whole-second times and records sub-second times in
+// fileFlagHasUnixMtime for whole-second times and records sub-second times in
 // extra record 3 instead, so parsing the flag alone left ModificationTime zero
 // for every archive rar actually produces -- which made IgnoreUnrarDates a
 // no-op and left extracted files without their archive timestamps.

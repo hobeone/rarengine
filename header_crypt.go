@@ -101,7 +101,7 @@ type headerDecrypter struct {
 // block from r. It decrypts 16-byte ciphertext blocks incrementally until
 // enough plaintext is available to know the header's declared total size
 // (from its CRC32+size prefix), then hands off to parseBlockHeaderFields --
-// the same field-parsing logic ReadBlockHeader uses once decrypted.
+// the same field-parsing logic readBlockHeader uses once decrypted.
 func (hd *headerDecrypter) readEncryptedBlockHeader(r io.Reader) (*blockHeader, error) {
 	iv := make([]byte, 16)
 	if _, err := io.ReadFull(r, iv); err != nil {

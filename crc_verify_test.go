@@ -12,7 +12,7 @@ import (
 // buildSingleFileRAR5Archive constructs a minimal single-volume, single-file,
 // store-method (uncompressed) RAR5 archive in memory, mirroring the
 // hand-rolled construction in TestStreamDecompressor_TarStyle. The file
-// header's CRC32 field is set to crc32Value with the FileFlagHasCRC32 flag,
+// header's CRC32 field is set to crc32Value with the fileFlagHasCRC32 flag,
 // letting callers deliberately mismatch it against content to exercise the
 // verification path without needing a corrupted binary fixture.
 func buildSingleFileRAR5Archive(t *testing.T, name string, content []byte, crc32Value uint32) *bytes.Buffer {
@@ -22,7 +22,7 @@ func buildSingleFileRAR5Archive(t *testing.T, name string, content []byte, crc32
 
 // buildSingleFileRAR5ArchiveFlags is buildSingleFileRAR5Archive with extra
 // file-header flags OR'd in, for exercising flags whose handling is what is
-// under test (e.g. FileFlagUnpSizeUnknown).
+// under test (e.g. fileFlagUnpSizeUnknown).
 func buildSingleFileRAR5ArchiveFlags(t *testing.T, name string, content []byte, crc32Value uint32, extraFileFlags uint64) *bytes.Buffer {
 	t.Helper()
 
@@ -46,7 +46,7 @@ func buildSingleFileRAR5ArchiveFlags(t *testing.T, name string, content []byte, 
 	}
 	volBuf.Write(arcHashed.Bytes())
 
-	// 2. File Header, with FileFlagHasCRC32 set and an explicit (possibly
+	// 2. File Header, with fileFlagHasCRC32 set and an explicit (possibly
 	// wrong) CRC32 value, store method (compFlags=0 → Method=0).
 	var filePayload bytes.Buffer
 	filePayload.Write(encodeVint(fileFlagHasCRC32 | extraFileFlags)) // flags
@@ -182,7 +182,7 @@ func TestCRCVerification_UnconditionalOnMismatch(t *testing.T) {
 }
 
 // rar5FileEntryUnknownSize builds a RAR5 file block declaring
-// FileFlagUnpSizeUnknown, the flag parseFileHeader refuses because it makes
+// fileFlagUnpSizeUnknown, the flag parseFileHeader refuses because it makes
 // the declared size -- and so truncation detection -- meaningless.
 func rar5FileEntryUnknownSize(name string, content []byte, crc32Value uint32) []byte {
 	var fp bytes.Buffer
@@ -210,7 +210,7 @@ func rar5FileEntryUnknownSize(name string, content []byte, crc32Value uint32) []
 }
 
 // TestUnknownUnpackedSizeIsRefusedByName checks that a member carrying
-// FileFlagUnpSizeUnknown is refused BY NAME (identity-first validation) --
+// fileFlagUnpSizeUnknown is refused BY NAME (identity-first validation) --
 // the FIRST NextEntry call returns a non-nil Entry whose Header.Name is the
 // flagged member's name, reporting ErrUnpSizeUnknown from both Read and
 // Close -- and, separately, that the refused member's declared payload does

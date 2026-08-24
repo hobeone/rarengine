@@ -22,7 +22,7 @@ var (
 	ErrCorruptEncryptData   = errors.New("rarengine: corrupt encryption record")
 
 	// ErrUnpSizeUnknown is returned for a file whose header declares that its
-	// unpacked size is not known (FileFlagUnpSizeUnknown), as produced by
+	// unpacked size is not known (fileFlagUnpSizeUnknown), as produced by
 	// streamed archiving such as "rar -si". Decoding relies on the declared
 	// size to tell a completed file from a truncated one, so a file that
 	// declines to state it is refused rather than decoded on a size that
@@ -203,7 +203,7 @@ func readBlockHeader(r io.Reader) (*blockHeader, error) {
 // parseBlockHeaderFields decodes type, flags, payload, and extra records
 // from a header's already CRC-validated byte buffer (everything after the
 // CRC32 field). n is the byte length of the leading size vint within buf,
-// shared by both ReadBlockHeader's plaintext path and headerDecrypter's
+// shared by both readBlockHeader's plaintext path and headerDecrypter's
 // decrypted-header path so the two don't duplicate this parsing logic.
 func parseBlockHeaderFields(buf []byte, n int) (*blockHeader, error) {
 	payload := buf[n:]
@@ -384,7 +384,7 @@ const filetimeEpochOffset = 116444736000000000
 // parseTimeRecord decodes the file-times extra record.
 //
 // The modification time is not read from the file header's own mtime field
-// alone: rar only sets FileFlagHasUnixMtime for whole-second times, and
+// alone: rar only sets fileFlagHasUnixMtime for whole-second times, and
 // current versions record the time here instead. Parsing only the flag left
 // ModificationTime zero for every archive rar actually produces, which made
 // UnpackOptions.IgnoreUnrarDates a no-op -- extracted files never carried

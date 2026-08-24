@@ -30,7 +30,7 @@ func TestReadBlockHeader_CorruptCRC(t *testing.T) {
 
 func TestReadAndParseArchiveHeader(t *testing.T) {
 	// Let's build a valid Archive Header block
-	// Archive header has type = 1, flags = ArcFlagMultiVol (0x01) | ArcFlagVolNum (0x02)
+	// Archive header has type = 1, flags = arcFlagMultiVol (0x01) | arcFlagVolNum (0x02)
 	// Payload is: flags (VINT), volume number (VINT)
 	flagsV := encodeVint(arcFlagMultiVol | arcFlagVolNum)
 	volNumV := encodeVint(4)
@@ -84,7 +84,7 @@ func TestReadAndParseArchiveHeader(t *testing.T) {
 
 func TestReadAndParseFileHeader(t *testing.T) {
 	// Let's build a valid File Header block
-	// File flags: FileFlagHasCRC32 (0x04)
+	// File flags: fileFlagHasCRC32 (0x04)
 	// Unpacked size: 100
 	// Attributes: 0
 	// CRC32: 0x98765432
@@ -178,7 +178,7 @@ func TestSanitizePath(t *testing.T) {
 
 func TestFileHeader_ModeAndMTime(t *testing.T) {
 	// Build a file header with:
-	// File flags: FileFlagHasUnixMtime (0x02) | FileFlagHasCRC32 (0x04)
+	// File flags: fileFlagHasUnixMtime (0x02) | fileFlagHasCRC32 (0x04)
 	// Unpacked size: 50
 	// Attributes: 0o755 (493)
 	// Unix Mtime: 1700000000 (2023-11-14T22:13:20Z)
@@ -270,7 +270,7 @@ func TestParseHashRecord(t *testing.T) {
 		}
 	}
 
-	// Test DecodeVint error (truncated)
+	// Test decodeVint error (truncated)
 	err = parseHashRecord(&FileHeader{}, []byte{})
 	if err == nil {
 		t.Errorf("expected error for empty data")

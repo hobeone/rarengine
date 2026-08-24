@@ -479,7 +479,7 @@ func (d *decoder50) Read(win *window, p []byte) (int, error) {
 		}
 	}
 
-	// Fast path: no filter queued — copy window → p directly. Window.Read
+	// Fast path: no filter queued — copy window → p directly. window.Read
 	// returns at most len(p) bytes; the caller drives further progress.
 	if len(d.fl) == 0 {
 		n, _ := win.Read(p)

@@ -27,7 +27,7 @@ func newBitReader(buf []byte, limitBits int) *bitReader {
 	}
 }
 
-// Reset reuses an existing BitReader with a new source buffer and bit limit.
+// Reset reuses an existing bitReader with a new source buffer and bit limit.
 // All internal state (cache, byte offset, bits-read counter) is cleared.
 func (r *bitReader) Reset(buf []byte, limitBits int) {
 	r.buf = buf

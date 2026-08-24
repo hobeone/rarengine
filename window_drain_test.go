@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// staleFullWindow builds the exact state Window.Read used to hang on: full set
+// staleFullWindow builds the exact state window.Read used to hang on: full set
 // while w and r do not describe a full buffer, with w landed on 0.
 //
 // The sequence matters, so it is spelled out rather than assigned directly --
@@ -50,7 +50,7 @@ func staleFullWindow(t *testing.T, size, k int) *window {
 	return w
 }
 
-// TestWindowReadDoesNotSpinOnStaleFull pins that a Window whose full flag no
+// TestWindowReadDoesNotSpinOnStaleFull pins that a window whose full flag no
 // longer matches its pointers produces a short read rather than hanging.
 //
 // The loop copied until it had moved Available() bytes and had no exit for a
@@ -67,7 +67,7 @@ func staleFullWindow(t *testing.T, size, k int) *window {
 //
 // On failure that goroutine is left spinning for the rest of the run, which is
 // accepted rather than fixed: the loop it is stuck in has no cancellation
-// point, and giving Window.Read one so a test can interrupt it would put
+// point, and giving window.Read one so a test can interrupt it would put
 // production machinery in the hot path to serve a case that only occurs when
 // the code is already broken. A failing run is not expected to be a long one.
 func TestWindowReadDoesNotSpinOnStaleFull(t *testing.T) {

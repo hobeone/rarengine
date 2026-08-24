@@ -148,7 +148,7 @@ func (h *huffmanDecoder) ReadSym(r *bitReader) (int, error) {
 }
 
 // readCodeLengthTable reads a dynamic code length table from the bit stream.
-// The scratch HuffmanDecoder is used to decode the 20-symbol bit-length table;
+// The scratch huffmanDecoder is used to decode the 20-symbol bit-length table;
 // callers should reuse a single scratch across calls to avoid per-block allocations.
 func readCodeLengthTable(br *bitReader, codeLength []byte, scratch *huffmanDecoder) error {
 	var bitlength [20]byte

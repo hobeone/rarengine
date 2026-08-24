@@ -70,7 +70,7 @@ func readerFor(data []byte) *Reader {
 func TestNextEntrySkipsFabricatedHeaderInPayload(t *testing.T) {
 	planted := fabricatedRAR5()
 	// extra carries the archive header's own body (its flags vint) so
-	// ParseArchiveHeader succeeds and the block is legitimately skipped --
+	// parseArchiveHeader succeeds and the block is legitimately skipped --
 	// this test is about payload discarding, not archive-header parsing,
 	// which is pinned separately by TestMalformedArchiveHeaderEndsTraversal.
 	archive := rar5BlockDeclaring(headerTypeArchive, len(planted), encodeVint(0), true)
@@ -287,12 +287,12 @@ func rar5Member(t testing.TB, s memberSpec) []byte {
 		f.Write(crcBuf[:])
 	}
 	// Compression flags: method lives in bits 7..9, so zero is store (method
-	// 0). FileCompSolid is bit 6, and the unpack version is bits 0..5.
+	// 0). fileCompSolid is bit 6, and the unpack version is bits 0..5.
 	var compFlags uint64
 	if s.solid {
 		compFlags |= fileCompSolid
 	}
-	// Masked with a literal, not FileCompVersion: a test that builds its
+	// Masked with a literal, not fileCompVersion: a test that builds its
 	// input with the same constant the parser reads it with moves whenever
 	// that constant is wrong, and agrees with it either way.
 	compFlags |= s.unpackVersion & 0x3f
@@ -391,7 +391,7 @@ func truncatedThenSolidArchive(t testing.TB) []byte {
 }
 
 // malformedArchiveHeaderStream builds a stream whose archive header body
-// fails to parse (it declares ArcFlagVolNum without the volume-number vint
+// fails to parse (it declares arcFlagVolNum without the volume-number vint
 // that flag promises follows, though the BLOCK header itself stays
 // CRC-valid), followed by a real, well-formed member named plantedName. A
 // Reader that does not stop dead at the malformed header can resume scanning
@@ -439,7 +439,7 @@ func TestMalformedArchiveHeaderEndsTraversal(t *testing.T) {
 }
 
 // TestMalformedArchiveHeaderWrapsSentinels pins the wrap in dispatch's
-// HeaderTypeArchive case: a caller must be able to alarm on
+// headerTypeArchive case: a caller must be able to alarm on
 // ErrCorruptArchiveHeader specifically, and errors.Is must still reach the
 // underlying ErrTruncatedVint through the wrap for callers that want the
 // detail.
@@ -581,7 +581,7 @@ func TestFixtureBuildersRoundTrip(t *testing.T) {
 	}
 }
 
-// TestCRCVerificationIgnoresIsDir pins that FileFlagIsDir cannot switch
+// TestCRCVerificationIgnoresIsDir pins that fileFlagIsDir cannot switch
 // checksum verification off.
 //
 // entry.go's verifyChecksum gates on e.size == 0 -- the produced size, which
@@ -804,7 +804,7 @@ func TestResetSeversAMemberThatWouldReachForTheNextVolume(t *testing.T) {
 // ErrBadHeaderCRC as its final word instead of io.EOF, and a caller looping
 // until io.EOF saw a corrupt archive.
 //
-// Mutation check: remove dispatch's HeaderTypeEnd case and this test fails
+// Mutation check: remove dispatch's headerTypeEnd case and this test fails
 // with ErrBadHeaderCRC.
 func TestTrailingPaddingAfterTheEndHeaderIsNotParsed(t *testing.T) {
 	arc := rar5Archive(t, false, rar5Member(t, memberSpec{

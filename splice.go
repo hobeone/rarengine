@@ -92,7 +92,7 @@ func (r *Reader) nextVolumePayload(e *Entry) (io.Reader, error) {
 			// advancing to volume 3. NextEntry treats io.EOF/
 			// io.ErrUnexpectedEOF from vol.next() as "this volume is spent,
 			// open the next one and keep scanning" -- so this must too. The
-			// old engine got this for free from an explicit HeaderTypeEnd
+			// old engine got this for free from an explicit headerTypeEnd
 			// case in processVolumePayloadHeader that called nextVolume()
 			// itself; that case does not exist here, because end headers
 			// now fall through the same generic "not a file header, keep
