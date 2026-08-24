@@ -162,11 +162,11 @@ func readFixtureVolume(t testing.TB, name string) []byte {
 		t.Fatalf("reading fixture %s: %v", name, err)
 	}
 
-	h, err := ReadBlockHeader(bytes.NewReader(b[8:]))
+	h, err := readBlockHeader(bytes.NewReader(b[8:]))
 	if err != nil {
 		t.Fatalf("fixture %s: unreadable block header: %v", name, err)
 	}
-	if h.Type != HeaderTypeArchive {
+	if h.Type != headerTypeArchive {
 		t.Fatalf("fixture %s: expected archive header first, got type %d", name, h.Type)
 	}
 	return b
@@ -258,7 +258,7 @@ func TestCorruptContinuationHeaderCostsOneMember(t *testing.T) {
 		name: "split.bin", content: "aaaa", unpackedSz: 8, packedSz: 4, notLast: true,
 	}))
 	v2 := rar5Archive(t, false,
-		// badName fails ParseFileHeader's name bounds check while the BLOCK
+		// badName fails parseFileHeader's name bounds check while the BLOCK
 		// header stays CRC-valid, so the continuation scan reaches a header it
 		// cannot parse.
 		rar5Member(t, memberSpec{name: "split.bin", content: "bbbb", notFirst: true, badName: true}),
@@ -336,7 +336,7 @@ func TestSplicePreservesReadErrorAlongsideBytes(t *testing.T) {
 // whose header fails to parse is still reported, even when the scan that
 // found it was looking for something else.
 //
-// nextVolumePayload called the exported ParseFileHeader, which discards the
+// nextVolumePayload called the exported parseFileHeader, which discards the
 // header it built. With no header there is no FirstBlock to test, so a NEW
 // member's parse failure was returned as the SPLICED member's failure, and
 // the new member was never staged -- the next nextEntry call asked

@@ -73,7 +73,7 @@ func TestNextEntrySkipsFabricatedHeaderInPayload(t *testing.T) {
 	// ParseArchiveHeader succeeds and the block is legitimately skipped --
 	// this test is about payload discarding, not archive-header parsing,
 	// which is pinned separately by TestMalformedArchiveHeaderEndsTraversal.
-	archive := rar5BlockDeclaring(HeaderTypeArchive, len(planted), EncodeVint(0), true)
+	archive := rar5BlockDeclaring(headerTypeArchive, len(planted), encodeVint(0), true)
 	stream := append(append([]byte{}, archive...), planted...)
 
 	r := NewReader(volumesOf(stream))
@@ -239,7 +239,7 @@ type memberSpec struct {
 	notLast  bool // clears LastBlock: the member continues in the next volume
 
 	// badName declares a longer name than the header carries, so
-	// ParseFileHeader fails its bounds check while the BLOCK header stays
+	// parseFileHeader fails its bounds check while the BLOCK header stays
 	// CRC-valid. That is the case the traversal must skip rather than stop on.
 	badName bool
 
@@ -267,16 +267,16 @@ func rar5Member(t testing.TB, s memberSpec) []byte {
 
 	var fileFlags uint64
 	if s.isDir {
-		fileFlags |= FileFlagIsDir
+		fileFlags |= fileFlagIsDir
 	}
 	if s.withCRC {
-		fileFlags |= FileFlagHasCRC32
+		fileFlags |= fileFlagHasCRC32
 	}
 
 	var f bytes.Buffer
-	f.Write(EncodeVint(fileFlags))
-	f.Write(EncodeVint(uint64(unpacked)))
-	f.Write(EncodeVint(0)) // attributes
+	f.Write(encodeVint(fileFlags))
+	f.Write(encodeVint(uint64(unpacked)))
+	f.Write(encodeVint(0)) // attributes
 	if s.withCRC {
 		crcContent := content
 		if s.crcOf != "" {
@@ -290,29 +290,29 @@ func rar5Member(t testing.TB, s memberSpec) []byte {
 	// 0). FileCompSolid is bit 6, and the unpack version is bits 0..5.
 	var compFlags uint64
 	if s.solid {
-		compFlags |= FileCompSolid
+		compFlags |= fileCompSolid
 	}
 	// Masked with a literal, not FileCompVersion: a test that builds its
 	// input with the same constant the parser reads it with moves whenever
 	// that constant is wrong, and agrees with it either way.
 	compFlags |= s.unpackVersion & 0x3f
-	f.Write(EncodeVint(compFlags))
-	f.Write(EncodeVint(0)) // host OS
+	f.Write(encodeVint(compFlags))
+	f.Write(encodeVint(0)) // host OS
 
 	name := []byte(s.name)
 	if s.badName {
-		f.Write(EncodeVint(uint64(len(name) + 16)))
+		f.Write(encodeVint(uint64(len(name) + 16)))
 	} else {
-		f.Write(EncodeVint(uint64(len(name))))
+		f.Write(encodeVint(uint64(len(name))))
 	}
 	f.Write(name)
 
-	blockFlags := uint64(HeaderFlagHasData)
+	blockFlags := uint64(headerFlagHasData)
 	if s.notFirst {
-		blockFlags |= HeaderFlagDataNotFirst
+		blockFlags |= headerFlagDataNotFirst
 	}
 	if s.notLast {
-		blockFlags |= HeaderFlagDataNotLast
+		blockFlags |= headerFlagDataNotLast
 	}
 
 	// The extra area sits at the END of the header payload, and its length is
@@ -321,20 +321,20 @@ func rar5Member(t testing.TB, s memberSpec) []byte {
 	var extra bytes.Buffer
 	if s.badEncVersion {
 		var rec bytes.Buffer
-		rec.Write(EncodeVint(1))  // record type: encryption
-		rec.Write(EncodeVint(99)) // version: not 0, so unsupported
-		extra.Write(EncodeVint(uint64(rec.Len())))
+		rec.Write(encodeVint(1))  // record type: encryption
+		rec.Write(encodeVint(99)) // version: not 0, so unsupported
+		extra.Write(encodeVint(uint64(rec.Len())))
 		extra.Write(rec.Bytes())
-		blockFlags |= HeaderFlagHasExtra
+		blockFlags |= headerFlagHasExtra
 	}
 
 	var p bytes.Buffer
-	p.Write(EncodeVint(HeaderTypeFile))
-	p.Write(EncodeVint(blockFlags))
+	p.Write(encodeVint(headerTypeFile))
+	p.Write(encodeVint(blockFlags))
 	if extra.Len() > 0 {
-		p.Write(EncodeVint(uint64(extra.Len())))
+		p.Write(encodeVint(uint64(extra.Len())))
 	}
-	p.Write(EncodeVint(uint64(packed)))
+	p.Write(encodeVint(uint64(packed)))
 	p.Write(f.Bytes())
 	p.Write(extra.Bytes())
 
@@ -349,13 +349,13 @@ func rar5Member(t testing.TB, s memberSpec) []byte {
 func rar5Archive(t testing.TB, solid bool, members ...[]byte) []byte {
 	t.Helper()
 	var arc bytes.Buffer
-	arc.Write(EncodeVint(HeaderTypeArchive))
-	arc.Write(EncodeVint(0))
+	arc.Write(encodeVint(headerTypeArchive))
+	arc.Write(encodeVint(0))
 	var arcFlags uint64
 	if solid {
-		arcFlags |= ArcFlagSolid
+		arcFlags |= arcFlagSolid
 	}
-	arc.Write(EncodeVint(arcFlags))
+	arc.Write(encodeVint(arcFlags))
 
 	var out bytes.Buffer
 	out.Write([]byte{0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x01, 0x00})
@@ -399,9 +399,9 @@ func truncatedThenSolidArchive(t testing.TB) []byte {
 func malformedArchiveHeaderStream(t testing.TB, plantedName string) []byte {
 	t.Helper()
 	var p bytes.Buffer
-	p.Write(EncodeVint(HeaderTypeArchive))
-	p.Write(EncodeVint(0))
-	p.Write(EncodeVint(ArcFlagVolNum))
+	p.Write(encodeVint(headerTypeArchive))
+	p.Write(encodeVint(0))
+	p.Write(encodeVint(arcFlagVolNum))
 
 	var archive bytes.Buffer
 	archive.Write([]byte{0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x01, 0x00})
@@ -551,11 +551,11 @@ func TestResetClearsFatalLatch(t *testing.T) {
 func TestFixtureBuildersRoundTrip(t *testing.T) {
 	blk := rar5Member(t, memberSpec{name: "f.bin", content: "hello", withCRC: true})
 
-	h, err := ReadBlockHeader(bytes.NewReader(blk))
+	h, err := readBlockHeader(bytes.NewReader(blk))
 	if err != nil {
 		t.Fatalf("builder produced an unreadable block: %v", err)
 	}
-	fh, err := ParseFileHeader(h)
+	fh, err := parseFileHeader(h)
 	if err != nil {
 		t.Fatalf("builder produced an unparsable file header: %v", err)
 	}
@@ -571,12 +571,12 @@ func TestFixtureBuildersRoundTrip(t *testing.T) {
 	}
 
 	bad := rar5Member(t, memberSpec{name: "bad.bin", content: "junk", badName: true})
-	bh, err := ReadBlockHeader(bytes.NewReader(bad))
+	bh, err := readBlockHeader(bytes.NewReader(bad))
 	if err != nil {
 		t.Fatalf("badName fixture must keep a CRC-valid BLOCK header: %v", err)
 	}
-	if _, err := ParseFileHeader(bh); err == nil {
-		t.Fatal("badName fixture must fail ParseFileHeader, or the test it " +
+	if _, err := parseFileHeader(bh); err == nil {
+		t.Fatal("badName fixture must fail parseFileHeader, or the test it " +
 			"backs proves nothing")
 	}
 }
@@ -624,7 +624,7 @@ func TestCRCVerificationIgnoresIsDir(t *testing.T) {
 // into history it never wrote. Marking only the reportable path left exactly
 // the unreportable failures decoding against a window nobody filled.
 func TestSolidMemberAfterNamelessSkipIsRefused(t *testing.T) {
-	// badName makes ParseFileHeader fail its name bounds check, which happens
+	// badName makes parseFileHeader fail its name bounds check, which happens
 	// before fh.Name is set -- so this is the nameless path, not the
 	// refused-by-name one. TestFixtureBuildersRoundTrip pins that shape.
 	arc := rar5Archive(t, true,

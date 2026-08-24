@@ -85,6 +85,33 @@ again to reach the members behind it.
 r.Reset(newVolumesChan)
 ```
 
+### Inspecting an archive without decoding it
+
+Two read-only entry points answer questions traversal cannot. Both take a
+reader positioned at the start of the archive and consume the signature
+themselves; neither decompresses or decrypts anything.
+
+```go
+// Does this password match the archive's embedded check value?
+verified, hasCheckValue, err := rarengine.VerifyPassword(r, "guess")
+```
+
+`verified` is meaningful only when `hasCheckValue` is true. RAR5 records a
+check value optionally, and an archive carrying none cannot be tested this way
+at all — treating a bare `verified == false` as "wrong password" would reject
+every archive written without one.
+
+```go
+// Where does this volume sit in its set?
+index, multiVolume, err := rarengine.VolumeNumber(r)
+```
+
+`index` is 0-based. RAR5 omits the volume-number field on the first volume of
+a set, reported here as `0` rather than as an absence, so a set can be ordered
+without special-casing its head. This is for naming a volume whose on-disk
+filename lost its numbering — the archive header is the only place the number
+survives.
+
 ### Encryption
 
 Encryption is supported for RAR5 only. The two failures it can produce differ

@@ -24,10 +24,10 @@ func TestParseCryptHeader_UnknownVersion_ClassifiesDistinctly(t *testing.T) {
 	// Version vint = 1 only. ParseCryptHeader reads and rejects the version
 	// before it ever looks at flags, KdfCount or salt, so nothing else is
 	// needed to reach ErrUnknownEncryptMethod specifically.
-	payload := EncodeVint(1)
-	h := &BlockHeader{Type: HeaderTypeEncryption, Payload: payload}
+	payload := encodeVint(1)
+	h := &blockHeader{Type: headerTypeEncryption, Payload: payload}
 
-	_, err := ParseCryptHeader(h)
+	_, err := parseCryptHeader(h)
 	if !errors.Is(err, ErrUnknownEncryptMethod) {
 		t.Fatalf("ParseCryptHeader() error = %v, want ErrUnknownEncryptMethod", err)
 	}
@@ -43,10 +43,10 @@ func TestParseCryptHeader_UnknownVersion_ClassifiesDistinctly(t *testing.T) {
 // bytes, so ParseCryptHeader fails on the length check rather than the
 // version check.
 func TestParseCryptHeader_TruncatedPayload_ClassifiesDistinctly(t *testing.T) {
-	payload := append(EncodeVint(0), EncodeVint(0)...) // version, flags; no KdfCount/salt
-	h := &BlockHeader{Type: HeaderTypeEncryption, Payload: payload}
+	payload := append(encodeVint(0), encodeVint(0)...) // version, flags; no KdfCount/salt
+	h := &blockHeader{Type: headerTypeEncryption, Payload: payload}
 
-	_, err := ParseCryptHeader(h)
+	_, err := parseCryptHeader(h)
 	if !errors.Is(err, ErrCorruptEncryptData) {
 		t.Fatalf("ParseCryptHeader() error = %v, want ErrCorruptEncryptData", err)
 	}
@@ -64,7 +64,7 @@ func TestParseCryptHeader_TruncatedPayload_ClassifiesDistinctly(t *testing.T) {
 func TestDispatch_CryptHeaderUnknownVersion_IsUnsupportedNotCorrupt(t *testing.T) {
 	var archive []byte
 	archive = append(archive, rar5ArchiveHeader()...)
-	archive = append(archive, rar5BlockDeclaring(HeaderTypeEncryption, 0, EncodeVint(1), false)...)
+	archive = append(archive, rar5BlockDeclaring(headerTypeEncryption, 0, encodeVint(1), false)...)
 
 	r := NewReader(volumesOf(archive))
 	e, err := r.NextEntry()
@@ -88,11 +88,11 @@ func TestDispatch_CryptHeaderUnknownVersion_IsUnsupportedNotCorrupt(t *testing.T
 // ErrCorruptArchiveHeader, and must NOT be classified as
 // ErrUnsupportedEncryptionVersion.
 func TestDispatch_CryptHeaderTruncated_IsCorruptNotUnsupported(t *testing.T) {
-	truncated := append(EncodeVint(0), EncodeVint(0)...) // version 0, flags 0, no salt
+	truncated := append(encodeVint(0), encodeVint(0)...) // version 0, flags 0, no salt
 
 	var archive []byte
 	archive = append(archive, rar5ArchiveHeader()...)
-	archive = append(archive, rar5BlockDeclaring(HeaderTypeEncryption, 0, truncated, false)...)
+	archive = append(archive, rar5BlockDeclaring(headerTypeEncryption, 0, truncated, false)...)
 
 	r := NewReader(volumesOf(archive))
 	e, err := r.NextEntry()
@@ -122,7 +122,7 @@ func TestDispatch_CryptHeaderError_LatchesAndNeverReachesPlantedMember(t *testin
 
 	var archive []byte
 	archive = append(archive, rar5ArchiveHeader()...)
-	archive = append(archive, rar5BlockDeclaring(HeaderTypeEncryption, 0, EncodeVint(1), false)...)
+	archive = append(archive, rar5BlockDeclaring(headerTypeEncryption, 0, encodeVint(1), false)...)
 	archive = append(archive, planted...)
 	archive = append(archive, rar5EndHeader()...)
 

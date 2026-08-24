@@ -39,9 +39,9 @@ import (
 // bytes of payload, with extra appended to the header's own fields.
 func rar5BlockDeclaring(blockType uint64, dataSize int, extra []byte, withSig bool) []byte {
 	var p bytes.Buffer
-	p.Write(EncodeVint(blockType))
-	p.Write(EncodeVint(HeaderFlagHasData))
-	p.Write(EncodeVint(uint64(dataSize)))
+	p.Write(encodeVint(blockType))
+	p.Write(encodeVint(headerFlagHasData))
+	p.Write(encodeVint(uint64(dataSize)))
 	p.Write(extra)
 
 	var out bytes.Buffer
@@ -127,7 +127,7 @@ func TestArchiveHeaderPayloadIsDiscarded_RAR5(t *testing.T) {
 	fabricated := fabricatedRAR5()
 
 	var archive bytes.Buffer
-	archive.Write(rar5BlockDeclaring(HeaderTypeArchive, len(fabricated), EncodeVint(ArcFlagMultiVol), true))
+	archive.Write(rar5BlockDeclaring(headerTypeArchive, len(fabricated), encodeVint(arcFlagMultiVol), true))
 	archive.Write(fabricated)
 	archive.Write(rar5FileEntry("real.txt", 4, crc32.ChecksumIEEE([]byte("real")), []byte("real")))
 	archive.Write(rar5EndHeader())
@@ -145,7 +145,7 @@ func TestServiceHeaderPayloadIsDiscarded_RAR5(t *testing.T) {
 
 	var archive bytes.Buffer
 	archive.Write(rar5ArchiveHeader())
-	archive.Write(rar5BlockDeclaring(HeaderTypeService, len(fabricated), nil, false))
+	archive.Write(rar5BlockDeclaring(headerTypeService, len(fabricated), nil, false))
 	archive.Write(fabricated)
 	archive.Write(rar5FileEntry("real.txt", 4, crc32.ChecksumIEEE([]byte("real")), []byte("real")))
 	archive.Write(rar5EndHeader())
@@ -177,7 +177,7 @@ func TestServiceHeaderPayloadIsDiscarded_RAR5(t *testing.T) {
 //
 // Its premise was that a crypt header parse failure is a refusal the caller
 // may retry past, landing on the real next entry -- the same "skip rather
-// than fatal" treatment ParseFileHeader gets. That premise was wrong: unlike
+// than fatal" treatment parseFileHeader gets. That premise was wrong: unlike
 // a file header, where a bad member is just one entry among many, an
 // unparsed HEAD_CRYPT means every header AFTER it in the archive is
 // ciphertext this library cannot decrypt. There is no degraded-but-useful
@@ -205,16 +205,16 @@ func TestVolumeArchiveHeaderPayloadIsDiscarded_RAR5(t *testing.T) {
 
 	var vol1 bytes.Buffer
 	vol1.Write(rar5ArchiveHeader())
-	vol1.Write(rar5EntryFlags("split.bin", 0, HeaderFlagHasData|HeaderFlagDataNotLast,
+	vol1.Write(rar5EntryFlags("split.bin", 0, headerFlagHasData|headerFlagDataNotLast,
 		uint64(len(whole)), declaredCRC, content1))
 
-	fabricated := rar5EntryFlags("split.bin", 0, HeaderFlagHasData|HeaderFlagDataNotFirst,
+	fabricated := rar5EntryFlags("split.bin", 0, headerFlagHasData|headerFlagDataNotFirst,
 		uint64(len(whole)), declaredCRC, evil)
 
 	var vol2 bytes.Buffer
-	vol2.Write(rar5BlockDeclaring(HeaderTypeArchive, len(fabricated), EncodeVint(ArcFlagMultiVol), true))
+	vol2.Write(rar5BlockDeclaring(headerTypeArchive, len(fabricated), encodeVint(arcFlagMultiVol), true))
 	vol2.Write(fabricated)
-	vol2.Write(rar5EntryFlags("split.bin", 0, HeaderFlagHasData|HeaderFlagDataNotFirst,
+	vol2.Write(rar5EntryFlags("split.bin", 0, headerFlagHasData|headerFlagDataNotFirst,
 		uint64(len(whole)), declaredCRC, content2))
 	vol2.Write(rar5EndHeader())
 
@@ -249,7 +249,7 @@ func TestTerminatorPayloadUnreachableWhenChannelCloses_RAR5(t *testing.T) {
 
 	var vol1 bytes.Buffer
 	vol1.Write(rar5ArchiveHeader())
-	vol1.Write(rar5BlockDeclaring(HeaderTypeEnd, len(fabricated), nil, false))
+	vol1.Write(rar5BlockDeclaring(headerTypeEnd, len(fabricated), nil, false))
 	vol1.Write(fabricated)
 
 	ch := keepReadableVolumes(vol1.Bytes())
@@ -279,18 +279,18 @@ func TestVolumeEndHeaderPayloadDoesNotEatNextVolume_RAR5(t *testing.T) {
 
 	var vol1 bytes.Buffer
 	vol1.Write(rar5ArchiveHeader())
-	vol1.Write(rar5EntryFlags("split.bin", 0, HeaderFlagHasData|HeaderFlagDataNotLast,
+	vol1.Write(rar5EntryFlags("split.bin", 0, headerFlagHasData|headerFlagDataNotLast,
 		uint64(len(whole)), declaredCRC, content1))
 
 	// A volume holding nothing but an end header that claims a payload. The
 	// claim is a lie -- the bytes are not there -- which is the point: the
 	// count must never be applied to the volume that opens next.
 	var vol2 bytes.Buffer
-	vol2.Write(rar5BlockDeclaring(HeaderTypeEnd, 12, nil, true))
+	vol2.Write(rar5BlockDeclaring(headerTypeEnd, 12, nil, true))
 
 	var vol3 bytes.Buffer
 	vol3.Write(rar5ArchiveHeader())
-	vol3.Write(rar5EntryFlags("split.bin", 0, HeaderFlagHasData|HeaderFlagDataNotFirst,
+	vol3.Write(rar5EntryFlags("split.bin", 0, headerFlagHasData|headerFlagDataNotFirst,
 		uint64(len(whole)), declaredCRC, content2))
 	vol3.Write(rar5EndHeader())
 
@@ -353,7 +353,7 @@ func TestEveryBlockTypeAccountsForItsPayload_RAR5(t *testing.T) {
 
 	// One past HeaderTypeEnd so an unrecognised type is swept too -- that is
 	// the case a future block type arrives as.
-	for blockType := uint64(HeaderTypeArchive); blockType <= HeaderTypeEnd+1; blockType++ {
+	for blockType := uint64(headerTypeArchive); blockType <= headerTypeEnd+1; blockType++ {
 		t.Run(hexName(int(blockType)), func(t *testing.T) {
 			var stream bytes.Buffer
 			stream.Write(rar5ArchiveHeader())
@@ -365,7 +365,7 @@ func TestEveryBlockTypeAccountsForItsPayload_RAR5(t *testing.T) {
 
 			e, err := r.NextEntry()
 			switch blockType {
-			case HeaderTypeArchive:
+			case headerTypeArchive:
 				// Not swept the same way as the rest of the type space: a
 				// SECOND archive header mid-stream fails to parse (it carries
 				// no archive-flags vint here) and dispatch treats that as
@@ -378,7 +378,7 @@ func TestEveryBlockTypeAccountsForItsPayload_RAR5(t *testing.T) {
 						"returning %q; want the archive-level parse error", e.Header.Name)
 				}
 				return
-			case HeaderTypeEncryption:
+			case headerTypeEncryption:
 				// Also not swept: a crypt header whose payload cannot parse
 				// (the stub 0xAA bytes here decode to neither a valid
 				// version nor a valid flags vint) is archive-level fatal by
@@ -391,7 +391,7 @@ func TestEveryBlockTypeAccountsForItsPayload_RAR5(t *testing.T) {
 						"returning %q; want the archive-level parse error", e.Header.Name)
 				}
 				return
-			case HeaderTypeEnd:
+			case headerTypeEnd:
 				// Also not swept, and deliberately: the end header says this
 				// volume holds no further blocks, so the sentinel behind it
 				// is not part of the archive and must NOT be reached. The
@@ -408,7 +408,7 @@ func TestEveryBlockTypeAccountsForItsPayload_RAR5(t *testing.T) {
 					t.Fatalf("NextEntry after an end header = %v, want io.EOF", err)
 				}
 				return
-			case HeaderTypeFile:
+			case headerTypeFile:
 				// The stub payload cannot parse as a file header, so this row
 				// is refused and swept the same as every other unclaimed
 				// type: skipped, and the sentinel is reached next.
@@ -437,7 +437,7 @@ func hexName(v int) string {
 func TestEndHeaderPayloadDoesNotEatNextVolume_RAR5(t *testing.T) {
 	var vol1 bytes.Buffer
 	vol1.Write(rar5ArchiveHeader())
-	vol1.Write(rar5BlockDeclaring(HeaderTypeEnd, 40, nil, false))
+	vol1.Write(rar5BlockDeclaring(headerTypeEnd, 40, nil, false))
 
 	var vol2 bytes.Buffer
 	vol2.Write(rar5ArchiveHeader())

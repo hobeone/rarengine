@@ -31,39 +31,39 @@ func memberWithEncVersion(t testing.TB, name, content string, ver uint64, notFir
 	c := []byte(content)
 
 	var f bytes.Buffer
-	f.Write(EncodeVint(FileFlagHasCRC32))
-	f.Write(EncodeVint(uint64(len(c))))
-	f.Write(EncodeVint(0)) // attributes
+	f.Write(encodeVint(fileFlagHasCRC32))
+	f.Write(encodeVint(uint64(len(c))))
+	f.Write(encodeVint(0)) // attributes
 	var crcBuf [4]byte
 	binary.LittleEndian.PutUint32(crcBuf[:], crc32.ChecksumIEEE(c))
 	f.Write(crcBuf[:])
-	f.Write(EncodeVint(0)) // comp flags: store
-	f.Write(EncodeVint(0)) // host OS
-	f.Write(EncodeVint(uint64(len(name))))
+	f.Write(encodeVint(0)) // comp flags: store
+	f.Write(encodeVint(0)) // host OS
+	f.Write(encodeVint(uint64(len(name))))
 	f.Write([]byte(name))
 
 	// Encryption extra record: type 1, version ver, flags 0, 33 bytes of
 	// KDF count + salt + IV.
 	var rec bytes.Buffer
-	rec.Write(EncodeVint(1))
-	rec.Write(EncodeVint(ver))
-	rec.Write(EncodeVint(0))
+	rec.Write(encodeVint(1))
+	rec.Write(encodeVint(ver))
+	rec.Write(encodeVint(0))
 	rec.Write(make([]byte, 33))
 
 	var extra bytes.Buffer
-	extra.Write(EncodeVint(uint64(rec.Len())))
+	extra.Write(encodeVint(uint64(rec.Len())))
 	extra.Write(rec.Bytes())
 
-	blockFlags := uint64(HeaderFlagHasData | HeaderFlagHasExtra)
+	blockFlags := uint64(headerFlagHasData | headerFlagHasExtra)
 	if notFirst {
-		blockFlags |= HeaderFlagDataNotFirst
+		blockFlags |= headerFlagDataNotFirst
 	}
 
 	var p bytes.Buffer
-	p.Write(EncodeVint(HeaderTypeFile))
-	p.Write(EncodeVint(blockFlags))
-	p.Write(EncodeVint(uint64(extra.Len()))) // extra area size
-	p.Write(EncodeVint(uint64(len(c))))      // data size
+	p.Write(encodeVint(headerTypeFile))
+	p.Write(encodeVint(blockFlags))
+	p.Write(encodeVint(uint64(extra.Len()))) // extra area size
+	p.Write(encodeVint(uint64(len(c))))      // data size
 	p.Write(f.Bytes())
 	p.Write(extra.Bytes())
 
@@ -80,11 +80,11 @@ func memberWithEncVersion(t testing.TB, name, content string, ver uint64, notFir
 func TestMemberWithEncVersionRoundTrip(t *testing.T) {
 	blk := memberWithEncVersion(t, "enc0.bin", "hello", 0, false)
 
-	h, err := ReadBlockHeader(bytes.NewReader(blk))
+	h, err := readBlockHeader(bytes.NewReader(blk))
 	if err != nil {
 		t.Fatalf("builder produced an unreadable block: %v", err)
 	}
-	fh, err := ParseFileHeader(h)
+	fh, err := parseFileHeader(h)
 	if err != nil {
 		t.Fatalf("builder produced an unparsable file header with ver=0: %v", err)
 	}
@@ -237,26 +237,26 @@ func memberWithUnpSizeUnknown(t testing.TB, name, content string, notFirst bool)
 	c := []byte(content)
 
 	var f bytes.Buffer
-	f.Write(EncodeVint(FileFlagHasCRC32 | FileFlagUnpSizeUnknown))
-	f.Write(EncodeVint(uint64(len(c)))) // UnpackedSize -- meaningless per the flag, but still decoded
-	f.Write(EncodeVint(0))              // attributes
+	f.Write(encodeVint(fileFlagHasCRC32 | fileFlagUnpSizeUnknown))
+	f.Write(encodeVint(uint64(len(c)))) // UnpackedSize -- meaningless per the flag, but still decoded
+	f.Write(encodeVint(0))              // attributes
 	var crcBuf [4]byte
 	binary.LittleEndian.PutUint32(crcBuf[:], crc32.ChecksumIEEE(c))
 	f.Write(crcBuf[:])
-	f.Write(EncodeVint(0)) // comp flags: store
-	f.Write(EncodeVint(0)) // host OS
-	f.Write(EncodeVint(uint64(len(name))))
+	f.Write(encodeVint(0)) // comp flags: store
+	f.Write(encodeVint(0)) // host OS
+	f.Write(encodeVint(uint64(len(name))))
 	f.Write([]byte(name))
 
-	blockFlags := uint64(HeaderFlagHasData)
+	blockFlags := uint64(headerFlagHasData)
 	if notFirst {
-		blockFlags |= HeaderFlagDataNotFirst
+		blockFlags |= headerFlagDataNotFirst
 	}
 
 	var p bytes.Buffer
-	p.Write(EncodeVint(HeaderTypeFile))
-	p.Write(EncodeVint(blockFlags))
-	p.Write(EncodeVint(uint64(len(c))))
+	p.Write(encodeVint(headerTypeFile))
+	p.Write(encodeVint(blockFlags))
+	p.Write(encodeVint(uint64(len(c))))
 	p.Write(f.Bytes())
 
 	var out bytes.Buffer
@@ -274,26 +274,26 @@ func memberWithNegativeSize(t testing.TB, name, content string, notFirst bool) [
 	c := []byte(content)
 
 	var f bytes.Buffer
-	f.Write(EncodeVint(FileFlagHasCRC32))
-	f.Write(EncodeVint(uint64(1) << 63)) // sets the int64 sign bit
-	f.Write(EncodeVint(0))               // attributes
+	f.Write(encodeVint(fileFlagHasCRC32))
+	f.Write(encodeVint(uint64(1) << 63)) // sets the int64 sign bit
+	f.Write(encodeVint(0))               // attributes
 	var crcBuf [4]byte
 	binary.LittleEndian.PutUint32(crcBuf[:], crc32.ChecksumIEEE(c))
 	f.Write(crcBuf[:])
-	f.Write(EncodeVint(0)) // comp flags: store
-	f.Write(EncodeVint(0)) // host OS
-	f.Write(EncodeVint(uint64(len(name))))
+	f.Write(encodeVint(0)) // comp flags: store
+	f.Write(encodeVint(0)) // host OS
+	f.Write(encodeVint(uint64(len(name))))
 	f.Write([]byte(name))
 
-	blockFlags := uint64(HeaderFlagHasData)
+	blockFlags := uint64(headerFlagHasData)
 	if notFirst {
-		blockFlags |= HeaderFlagDataNotFirst
+		blockFlags |= headerFlagDataNotFirst
 	}
 
 	var p bytes.Buffer
-	p.Write(EncodeVint(HeaderTypeFile))
-	p.Write(EncodeVint(blockFlags))
-	p.Write(EncodeVint(uint64(len(c))))
+	p.Write(encodeVint(headerTypeFile))
+	p.Write(encodeVint(blockFlags))
+	p.Write(encodeVint(uint64(len(c))))
 	p.Write(f.Bytes())
 
 	var out bytes.Buffer

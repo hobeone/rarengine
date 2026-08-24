@@ -19,25 +19,25 @@ const signBitVint = uint64(1) << 63
 
 func TestFileHeaderRejectsNameLenSignWrap(t *testing.T) {
 	var p []byte
-	p = append(p, EncodeVint(0)...)           // flags
-	p = append(p, EncodeVint(1)...)           // unpacked size
-	p = append(p, EncodeVint(0)...)           // attributes
-	p = append(p, EncodeVint(0)...)           // compression flags
-	p = append(p, EncodeVint(0)...)           // host OS
-	p = append(p, EncodeVint(signBitVint)...) // name length
+	p = append(p, encodeVint(0)...)           // flags
+	p = append(p, encodeVint(1)...)           // unpacked size
+	p = append(p, encodeVint(0)...)           // attributes
+	p = append(p, encodeVint(0)...)           // compression flags
+	p = append(p, encodeVint(0)...)           // host OS
+	p = append(p, encodeVint(signBitVint)...) // name length
 
-	fh, err := parseFileHeader(&BlockHeader{Type: HeaderTypeFile, Payload: p})
+	fh, err := parseFileHeader(&blockHeader{Type: headerTypeFile, Payload: p})
 	if !errors.Is(err, ErrCorruptFileHeader) {
 		t.Fatalf("parseFileHeader = (%v, %v), want ErrCorruptFileHeader", fh, err)
 	}
 }
 
 func TestBlockHeaderRejectsExtraSizeSignWrap(t *testing.T) {
-	buf := EncodeVint(99) // header size vint, the n bytes the parser skips
+	buf := encodeVint(99) // header size vint, the n bytes the parser skips
 	n := len(buf)
-	buf = append(buf, EncodeVint(uint64(HeaderTypeFile))...)
-	buf = append(buf, EncodeVint(uint64(HeaderFlagHasExtra))...)
-	buf = append(buf, EncodeVint(signBitVint)...)
+	buf = append(buf, encodeVint(uint64(headerTypeFile))...)
+	buf = append(buf, encodeVint(uint64(headerFlagHasExtra))...)
+	buf = append(buf, encodeVint(signBitVint)...)
 
 	h, err := parseBlockHeaderFields(buf, n)
 	if !errors.Is(err, ErrCorruptBlockHeader) {
@@ -49,13 +49,13 @@ func TestBlockHeaderRejectsExtraRecordSizeSignWrap(t *testing.T) {
 	// One extra record whose declared size wraps negative. extraSize itself
 	// is honest, so the block-level bound above passes and the per-record
 	// bound is the one under test.
-	rec := EncodeVint(signBitVint)
+	rec := encodeVint(signBitVint)
 
-	buf := EncodeVint(99)
+	buf := encodeVint(99)
 	n := len(buf)
-	buf = append(buf, EncodeVint(uint64(HeaderTypeFile))...)
-	buf = append(buf, EncodeVint(uint64(HeaderFlagHasExtra))...)
-	buf = append(buf, EncodeVint(uint64(len(rec)))...)
+	buf = append(buf, encodeVint(uint64(headerTypeFile))...)
+	buf = append(buf, encodeVint(uint64(headerFlagHasExtra))...)
+	buf = append(buf, encodeVint(uint64(len(rec)))...)
 	buf = append(buf, rec...)
 
 	h, err := parseBlockHeaderFields(buf, n)

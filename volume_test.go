@@ -19,16 +19,16 @@ func TestVolumeNextSkipsUnclaimedPayload(t *testing.T) {
 	// fails to skip parses the planted block as the next header.
 	planted := rar5Block(func() []byte {
 		var p bytes.Buffer
-		p.Write(EncodeVint(HeaderTypeFile))
-		p.Write(EncodeVint(0))
+		p.Write(encodeVint(headerTypeFile))
+		p.Write(encodeVint(0))
 		return p.Bytes()
 	}())
-	archive := rar5BlockDeclaring(HeaderTypeArchive, len(planted), nil, true)
+	archive := rar5BlockDeclaring(headerTypeArchive, len(planted), nil, true)
 
 	real := rar5Block(func() []byte {
 		var p bytes.Buffer
-		p.Write(EncodeVint(HeaderTypeEnd))
-		p.Write(EncodeVint(0))
+		p.Write(encodeVint(headerTypeEnd))
+		p.Write(encodeVint(0))
 		return p.Bytes()
 	}())
 
@@ -43,7 +43,7 @@ func TestVolumeNextSkipsUnclaimedPayload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first next(): %v", err)
 	}
-	if h.Type != HeaderTypeArchive {
+	if h.Type != headerTypeArchive {
 		t.Fatalf("first block type = %d, want HeaderTypeArchive", h.Type)
 	}
 
@@ -51,7 +51,7 @@ func TestVolumeNextSkipsUnclaimedPayload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second next(): %v", err)
 	}
-	if h.Type != HeaderTypeEnd {
+	if h.Type != headerTypeEnd {
 		t.Fatalf("second block type = %d, want HeaderTypeEnd (the planted "+
 			"file block was parsed out of the first block's payload)", h.Type)
 	}
@@ -62,7 +62,7 @@ func TestVolumeNextSkipsUnclaimedPayload(t *testing.T) {
 func TestVolumePayloadIsBoundedByDataSize(t *testing.T) {
 	const declared = 4
 	trailing := []byte("SHOULD-NOT-BE-READABLE")
-	blk := rar5BlockDeclaring(HeaderTypeFile, declared, nil, true)
+	blk := rar5BlockDeclaring(headerTypeFile, declared, nil, true)
 	stream := append(append([]byte{}, blk...), append([]byte("DATA"), trailing...)...)
 
 	v, err := openVolume(&mockReadCloser{bytes.NewReader(stream)})
@@ -95,7 +95,7 @@ func TestOpenVolumeRefusesRAR3(t *testing.T) {
 // A volume truncated inside a block's payload must report exhaustion, not
 // silently continue. The skip stops at EOF and the header read then fails.
 func TestVolumeTruncatedInsidePayloadReportsEOF(t *testing.T) {
-	blk := rar5BlockDeclaring(HeaderTypeFile, 100, nil, true)
+	blk := rar5BlockDeclaring(headerTypeFile, 100, nil, true)
 	stream := append(append([]byte{}, blk...), []byte("short")...)
 
 	v, err := openVolume(&mockReadCloser{bytes.NewReader(stream)})
@@ -123,8 +123,8 @@ func TestVolumeUseEncryptedHeadersDecryptsAndDoesNotCarryAcrossVolumes(t *testin
 
 	plain := rar5Block(func() []byte {
 		var p bytes.Buffer
-		p.Write(EncodeVint(HeaderTypeEnd))
-		p.Write(EncodeVint(0))
+		p.Write(encodeVint(headerTypeEnd))
+		p.Write(encodeVint(0))
 		return p.Bytes()
 	}())
 	// CBC operates on whole 16-byte blocks; readEncryptedBlockHeader only
@@ -161,7 +161,7 @@ func TestVolumeUseEncryptedHeadersDecryptsAndDoesNotCarryAcrossVolumes(t *testin
 	if err != nil {
 		t.Fatalf("next(): %v", err)
 	}
-	if h.Type != HeaderTypeEnd {
+	if h.Type != headerTypeEnd {
 		t.Fatalf("block type = %d, want HeaderTypeEnd", h.Type)
 	}
 
@@ -183,7 +183,7 @@ func TestVolumeUseEncryptedHeadersDecryptsAndDoesNotCarryAcrossVolumes(t *testin
 	if err != nil {
 		t.Fatalf("next() on the new plaintext volume: %v", err)
 	}
-	if h.Type != HeaderTypeEnd {
+	if h.Type != headerTypeEnd {
 		t.Fatalf("new volume block type = %d, want HeaderTypeEnd", h.Type)
 	}
 }
@@ -201,7 +201,7 @@ func TestVolumeUseEncryptedHeadersDecryptsAndDoesNotCarryAcrossVolumes(t *testin
 // ReadBlockHeader read up front. A complete, CRC-valid file block sits right
 // after -- the bytes a broken retry would reparse as the next header.
 func TestVolumeDoesNotResumeAfterFailedHeaderRead(t *testing.T) {
-	planted := rar5BlockDeclaring(HeaderTypeFile, 5, nil, false)
+	planted := rar5BlockDeclaring(headerTypeFile, 5, nil, false)
 
 	stream := append([]byte{}, rar5Signature...)
 	stream = append(stream, 0x00, 0x00, 0x00, 0x00, 0x80, 0x80, 0x80)
@@ -232,7 +232,7 @@ func TestVolumeDoesNotResumeAfterFailedHeaderRead(t *testing.T) {
 // next() after Close() must not dereference the now-nil io.ReadCloser: a
 // caller mistake must produce an error, not a crashed process.
 func TestVolumeNextAfterCloseReturnsError(t *testing.T) {
-	blk := rar5BlockDeclaring(HeaderTypeFile, 4, nil, true)
+	blk := rar5BlockDeclaring(headerTypeFile, 4, nil, true)
 	stream := append(append([]byte{}, blk...), []byte("DATA")...)
 
 	v, err := openVolume(&mockReadCloser{bytes.NewReader(stream)})

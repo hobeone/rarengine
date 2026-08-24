@@ -9,29 +9,29 @@ import (
 	"io"
 )
 
-// CryptHeader holds the parameters decoded from a RAR5 archive encryption
+// cryptHeader holds the parameters decoded from a RAR5 archive encryption
 // header (HEAD_CRYPT, header type 4) -- present when the archive's own
 // headers, not just file content, are encrypted.
-type CryptHeader struct {
+type cryptHeader struct {
 	KdfCount   int
 	Salt       []byte // 16 bytes, shared by every encrypted header in the archive.
 	CheckValue []byte // 12 bytes; nil if the archive carries no password check value.
 }
 
-// ParseCryptHeader decodes the archive encryption header payload. Per the
+// parseCryptHeader decodes the archive encryption header payload. Per the
 // RAR 5.0 format spec its fields are: encryption version (vint, must be 0 =
 // AES-256), encryption flags (vint, bit 0 = password check value present),
 // KDF count (1 raw byte), salt (16 bytes), and an optional 12-byte check
 // value. Unlike the per-file encryption record (parseEncryptionRecord),
 // this header carries no IV -- per spec, every subsequent header instead
 // supplies its own fresh IV inline (see headerDecrypter).
-func ParseCryptHeader(h *BlockHeader) (*CryptHeader, error) {
-	if h.Type != HeaderTypeEncryption {
+func parseCryptHeader(h *blockHeader) (*cryptHeader, error) {
+	if h.Type != headerTypeEncryption {
 		return nil, ErrBadBlockHeader
 	}
 	payload := h.Payload
 
-	ver, n, err := DecodeVint(payload)
+	ver, n, err := decodeVint(payload)
 	if err != nil {
 		return nil, err
 	}
@@ -40,7 +40,7 @@ func ParseCryptHeader(h *BlockHeader) (*CryptHeader, error) {
 	}
 	payload = payload[n:]
 
-	flags, n, err := DecodeVint(payload)
+	flags, n, err := decodeVint(payload)
 	if err != nil {
 		return nil, err
 	}
@@ -49,13 +49,13 @@ func ParseCryptHeader(h *BlockHeader) (*CryptHeader, error) {
 	if len(payload) < 17 {
 		return nil, ErrCorruptEncryptData
 	}
-	ch := &CryptHeader{
+	ch := &cryptHeader{
 		KdfCount: int(payload[0]),
 		Salt:     append([]byte(nil), payload[1:17]...),
 	}
 	payload = payload[17:]
 
-	if flags&FileEncCheckPresent > 0 {
+	if flags&fileEncCheckPresent > 0 {
 		if len(payload) < 12 {
 			return nil, ErrCorruptEncryptData
 		}
@@ -69,7 +69,7 @@ func ParseCryptHeader(h *BlockHeader) (*CryptHeader, error) {
 // against CheckValue when present. Uses the same PBKDF2 scheme as per-file
 // content encryption (pbkdf2HmacSha256) -- the RAR 5.0 spec defines one key
 // derivation function shared by both header and file encryption.
-func headerKeyFromPassword(ch *CryptHeader, password string) ([]byte, error) {
+func headerKeyFromPassword(ch *cryptHeader, password string) ([]byte, error) {
 	if password == "" {
 		return nil, ErrPasswordRequired
 	}
@@ -102,7 +102,7 @@ type headerDecrypter struct {
 // enough plaintext is available to know the header's declared total size
 // (from its CRC32+size prefix), then hands off to parseBlockHeaderFields --
 // the same field-parsing logic ReadBlockHeader uses once decrypted.
-func (hd *headerDecrypter) readEncryptedBlockHeader(r io.Reader) (*BlockHeader, error) {
+func (hd *headerDecrypter) readEncryptedBlockHeader(r io.Reader) (*blockHeader, error) {
 	iv := make([]byte, 16)
 	if _, err := io.ReadFull(r, iv); err != nil {
 		return nil, err
@@ -126,7 +126,7 @@ func (hd *headerDecrypter) readEncryptedBlockHeader(r io.Reader) (*BlockHeader, 
 		plain = append(plain, pt...)
 
 		if declaredTotal < 0 && len(plain) >= 8 {
-			sizeV, n, err := DecodeVint(plain[4:])
+			sizeV, n, err := decodeVint(plain[4:])
 			if err != nil {
 				return nil, err
 			}

@@ -251,7 +251,7 @@ func TestHeaderPasswordIsNotLatchedUnverified(t *testing.T) {
 
 	// A crypt header carrying no check value: nothing here can verify a
 	// candidate, so the first is used and must NOT be recorded as resolved.
-	if _, err := r.resolveHeaderPassword(&CryptHeader{}); err != nil {
+	if _, err := r.resolveHeaderPassword(&cryptHeader{}); err != nil {
 		t.Fatalf("resolveHeaderPassword with no check value: %v", err)
 	}
 	if r.hasResolved {

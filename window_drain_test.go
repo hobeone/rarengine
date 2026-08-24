@@ -27,10 +27,10 @@ import (
 // being repeated as a literal in three places.
 const staleK = 100
 
-func staleFullWindow(t *testing.T, size, k int) *Window {
+func staleFullWindow(t *testing.T, size, k int) *window {
 	t.Helper()
 
-	w := NewWindow(size)
+	w := newWindow(size)
 	size = w.size // NewWindow enforces a minimum
 
 	w.writeBytes(bytes.Repeat([]byte{'a'}, k))
@@ -137,7 +137,7 @@ func TestWindowReadReportsWhatItActuallyMoved(t *testing.T) {
 // Mutation check: change storeReader.Read back to win.writeBytes and this
 // fails on the pointer assertions.
 func TestStoreReaderLeavesWindowPointersConsistent(t *testing.T) {
-	win := NewWindow(0x40000)
+	win := newWindow(0x40000)
 	// Three and a bit laps, in chunks that do not divide the window, so a
 	// chunk boundary lands on r at some point rather than by construction.
 	content := bytes.Repeat([]byte("stored member payload. "), 60000)
@@ -192,7 +192,7 @@ func TestStoreReaderLeavesWindowPointersConsistent(t *testing.T) {
 // back-reference the stored bytes. This is the property the window write
 // exists for, asserted end to end so the fix cannot quietly drop it.
 func TestSolidSuccessorReachesStoredHistory(t *testing.T) {
-	win := NewWindow(0x40000)
+	win := newWindow(0x40000)
 	content := bytes.Repeat([]byte("stored member payload. "), 60000)
 
 	s := &storeReader{r: bytes.NewReader(content), win: win}

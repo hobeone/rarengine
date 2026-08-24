@@ -22,12 +22,12 @@ func mtimeOf(t *testing.T, fixture string) time.Time {
 	r := bytes.NewReader(b[8:]) // past the RAR5 signature
 
 	for {
-		h, err := ReadBlockHeader(r)
+		h, err := readBlockHeader(r)
 		if err != nil {
 			t.Fatalf("no file header found in %s: %v", fixture, err)
 		}
-		if h.Type == HeaderTypeFile {
-			fh, err := ParseFileHeader(h)
+		if h.Type == headerTypeFile {
+			fh, err := parseFileHeader(h)
 			if err != nil {
 				t.Fatalf("parse file header: %v", err)
 			}
@@ -83,7 +83,7 @@ func TestParseFileHeader_ModificationTimeMatchesUnrar(t *testing.T) {
 // timeRecord builds a file-times extra record payload.
 func timeRecord(flags uint64, secs []uint32, nsecs []uint32) []byte {
 	var b bytes.Buffer
-	b.Write(EncodeVint(flags))
+	b.Write(encodeVint(flags))
 	for _, s := range secs {
 		_ = binary.Write(&b, binary.LittleEndian, s)
 	}
@@ -182,7 +182,7 @@ func TestParseTimeRecord_DeclaredFieldsMustBePresent(t *testing.T) {
 		},
 		{
 			"filetime: two declared, one carried",
-			append(EncodeVint(extraTimeMtime|extraTimeCtime), make([]byte, 8)...),
+			append(encodeVint(extraTimeMtime|extraTimeCtime), make([]byte, 8)...),
 		},
 		{
 			"mtime absent but ctime declared and missing",

@@ -6,7 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `rarengine` is a zero-allocation, stream-oriented RAR5 decompression library in Go. It is designed for high-throughput Usenet downloaders (e.g., `gonzbd`) that decompress RAR5 streams on-the-fly from channels of `io.ReadCloser` volumes.
 
-The public API surface is intentionally small: `NewReader`, `Reset`, `NextEntry`, `SetPasswords`, plus `Entry`'s `Read`/`Close`, and the exported error sentinels callers match on. Keep it that way — anything new here is a contract this library has to hold forever.
+The public API surface is intentionally small, and is now **compiler-enforced** rather than merely documented: `NewReader`, `Reset`, `NextEntry`, `SetPasswords`, plus `Entry`'s `Read`/`Close`/`Header`, `FileHeader`, the two inspection entry points `VerifyPassword` and `VolumeNumber`, and the exported error sentinels callers match on. Everything else is unexported. Keep it that way — anything new here is a contract this library has to hold forever.
+
+`go doc` is the check: if it lists a symbol not named above, the surface has grown.
 
 ## Commands
 
@@ -87,6 +89,14 @@ The library is **not concurrently safe** within a single `Reader` instance. File
 - Do not instantiate `Reader` inside a loop — use `Reset(newChan)` to reuse the 32 MB window.
 - Do not introduce heap allocations inside `NextEntry()` or `Entry.Read()` without a benchmark justifying the regression.
 - Never reintroduce a zeroing loop on the window history buffer.
+
+## Inspection entry points
+
+`VerifyPassword` and `VolumeNumber` (`inspect.go`) answer two read-only questions traversal cannot: does this password match the archive's embedded check value, and where does this volume sit in its set. Both take an `io.Reader` positioned at the START and consume the signature themselves.
+
+They exist because the header parsers they replace used to be exported, and were the only way to ask either question. A consumer had `ReadBlockHeader` plus `Parse{File,Archive,Crypt}Header` plus the `HeaderType*`/`ArcFlag*` constants — a parsing kit, from which a caller could hand a hand-built `blockHeader` straight to the decoders and bypass every format-level check. Two purpose-built answers replace it.
+
+Both are subject to the traversal's own rules, because they walk blocks with no `volume` to do it for them: `skipPayload` advances past a block's declared payload (or the next header read lands on content), and a bare `io.EOF` before either question is answered is truncation, not a clean negative. A real archive never reaches that EOF — an unencrypted one answers at its first file header, an empty one at its end header — so only a cut stream does, and reporting it as "no password needed" would be the silent-truncation bug in another costume.
 
 ## Security Constraints
 

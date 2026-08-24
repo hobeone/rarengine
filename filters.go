@@ -11,8 +11,8 @@ var (
 
 const fileSize = 0x1000000
 
-// FilterDelta computes cumulative striped byte differences.
-func FilterDelta(n int, buf []byte, out []byte) []byte {
+// filterDelta computes cumulative striped byte differences.
+func filterDelta(n int, buf []byte, out []byte) []byte {
 	if n <= 0 || n > len(buf) {
 		return buf
 	}
@@ -33,8 +33,8 @@ func FilterDelta(n int, buf []byte, out []byte) []byte {
 	return out
 }
 
-// FilterArm relocates branch offsets in ARM machine code.
-func FilterArm(buf []byte, offset int64) []byte {
+// filterArm relocates branch offsets in ARM machine code.
+func filterArm(buf []byte, offset int64) []byte {
 	var start int
 	if filterArmSIMD != nil && len(buf) >= 32 {
 		start = filterArmSIMD(buf, offset)
@@ -53,8 +53,8 @@ func FilterArm(buf []byte, offset int64) []byte {
 	return buf
 }
 
-// FilterE8 relocates relative CALL/JMP offset addresses to absolute offsets in x86 executables.
-func FilterE8(c byte, buf []byte, offset int64) []byte {
+// filterE8 relocates relative CALL/JMP offset addresses to absolute offsets in x86 executables.
+func filterE8(c byte, buf []byte, offset int64) []byte {
 	off := int32(offset)
 	for b := buf; len(b) >= 5; {
 		if filterE8ScanSIMD != nil && len(b) >= 32 {

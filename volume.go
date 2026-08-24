@@ -75,27 +75,42 @@ func signatureReadError(err error) error {
 // reported as ErrUnsupportedFormat by name; nothing past the signature is
 // parsed.
 func openVolume(rc io.ReadCloser) (*volume, error) {
+	if err := readSignature(rc); err != nil {
+		return nil, err
+	}
+	return &volume{rc: rc}, nil
+}
+
+// readSignature consumes the RAR signature from r, leaving it positioned on
+// the first block boundary.
+//
+// Split out of openVolume so the inspection entry points in inspect.go reach
+// the stream the same way traversal does. A caller must never be asked to skip
+// the signature itself: its length depends on which format the bytes turn out
+// to be -- 7 for RAR3, 8 for RAR5 -- so "skip 8 and start parsing" silently
+// mis-frames every RAR3 archive it is handed.
+func readSignature(r io.Reader) error {
 	var sig [8]byte
-	if _, err := io.ReadFull(rc, sig[:7]); err != nil {
-		return nil, signatureReadError(err)
+	if _, err := io.ReadFull(r, sig[:7]); err != nil {
+		return signatureReadError(err)
 	}
 	if !bytes.Equal(sig[:6], rar5Signature[:6]) {
-		return nil, fmt.Errorf("%w: bad signature", ErrUnsupportedFormat)
+		return fmt.Errorf("%w: bad signature", ErrUnsupportedFormat)
 	}
 	switch sig[6] {
 	case 0x00:
-		return nil, fmt.Errorf("%w: RAR3", ErrUnsupportedFormat)
+		return fmt.Errorf("%w: RAR3", ErrUnsupportedFormat)
 	case 0x01:
-		if _, err := io.ReadFull(rc, sig[7:]); err != nil {
-			return nil, signatureReadError(err)
+		if _, err := io.ReadFull(r, sig[7:]); err != nil {
+			return signatureReadError(err)
 		}
 		if sig[7] != 0x00 {
-			return nil, fmt.Errorf("%w: bad signature", ErrUnsupportedFormat)
+			return fmt.Errorf("%w: bad signature", ErrUnsupportedFormat)
 		}
 	default:
-		return nil, fmt.Errorf("%w: bad signature", ErrUnsupportedFormat)
+		return fmt.Errorf("%w: bad signature", ErrUnsupportedFormat)
 	}
-	return &volume{rc: rc}, nil
+	return nil
 }
 
 // next skips whatever remains of the current block's payload, then reads the
@@ -109,7 +124,7 @@ func openVolume(rc io.ReadCloser) (*volume, error) {
 // Once next() has failed, it keeps failing with the same error and never
 // touches v.rc again -- see the err field's comment for why a failed read
 // cannot safely be retried.
-func (v *volume) next() (*BlockHeader, error) {
+func (v *volume) next() (*blockHeader, error) {
 	if v.err != nil {
 		return nil, v.err
 	}
@@ -132,13 +147,13 @@ func (v *volume) next() (*BlockHeader, error) {
 		return nil, v.err
 	}
 	var (
-		h   *BlockHeader
+		h   *blockHeader
 		err error
 	)
 	if v.hd != nil {
 		h, err = v.hd.readEncryptedBlockHeader(v.rc)
 	} else {
-		h, err = ReadBlockHeader(v.rc)
+		h, err = readBlockHeader(v.rc)
 	}
 	if err != nil {
 		v.err = err

@@ -34,60 +34,60 @@ const (
 	maxHeaderSize = 2097151 // 2MB - 1 byte, max valid 3-byte vint
 
 	// Header types
-	HeaderTypeArchive    = 1
-	HeaderTypeFile       = 2
-	HeaderTypeService    = 3
-	HeaderTypeEncryption = 4
-	HeaderTypeEnd        = 5
+	headerTypeArchive    = 1
+	headerTypeFile       = 2
+	headerTypeService    = 3
+	headerTypeEncryption = 4
+	headerTypeEnd        = 5
 
 	// General Header Flags
-	HeaderFlagHasExtra     = 0x0001
-	HeaderFlagHasData      = 0x0002
-	HeaderFlagDataNotFirst = 0x0008
-	HeaderFlagDataNotLast  = 0x0010
+	headerFlagHasExtra     = 0x0001
+	headerFlagHasData      = 0x0002
+	headerFlagDataNotFirst = 0x0008
+	headerFlagDataNotLast  = 0x0010
 
 	// Main Archive Header Flags
-	ArcFlagMultiVol = 0x0001
-	ArcFlagVolNum   = 0x0002
-	ArcFlagSolid    = 0x0004
+	arcFlagMultiVol = 0x0001
+	arcFlagVolNum   = 0x0002
+	arcFlagSolid    = 0x0004
 
 	// File Header Flags
-	FileFlagIsDir          = 0x0001
-	FileFlagHasUnixMtime   = 0x0002
-	FileFlagHasCRC32       = 0x0004
-	FileFlagUnpSizeUnknown = 0x0008
+	fileFlagIsDir          = 0x0001
+	fileFlagHasUnixMtime   = 0x0002
+	fileFlagHasCRC32       = 0x0004
+	fileFlagUnpSizeUnknown = 0x0008
 
 	// File Compression Flags
-	// FileCompVersion masks the unpack-version field of a file header's
+	// fileCompVersion masks the unpack-version field of a file header's
 	// compression-information vint. Zero is RAR 5.0; RAR 7.0 raised it, and
 	// the two formats are otherwise indistinguishable from outside a file
 	// header -- same signature, same block framing, same vint encoding.
-	FileCompVersion = 0x0000003f
+	fileCompVersion = 0x0000003f
 
-	FileCompSolid = 0x00000040
+	fileCompSolid = 0x00000040
 
 	// File Encryption Extra Flags
-	FileEncCheckPresent = 0x0001
-	FileEncUseMac       = 0x0002
+	fileEncCheckPresent = 0x0001
+	fileEncUseMac       = 0x0002
 )
 
-// BlockHeader represents a generic RAR5 block header.
-type BlockHeader struct {
+// blockHeader represents a generic RAR5 block header.
+type blockHeader struct {
 	Type     uint64
 	Flags    uint64
 	DataSize int64
 	Payload  []byte
-	Extra    []ExtraRecord
+	Extra    []extraRecord
 }
 
-// ExtraRecord represents metadata parsed from header extra area.
-type ExtraRecord struct {
+// extraRecord represents metadata parsed from header extra area.
+type extraRecord struct {
 	Type uint64
 	Data []byte
 }
 
-// ArchiveHeader represents a parsed main archive header.
-type ArchiveHeader struct {
+// archiveHeader represents a parsed main archive header.
+type archiveHeader struct {
 	MultiVolume  bool
 	Solid        bool
 	VolumeNumber int
@@ -152,8 +152,8 @@ func (fh *FileHeader) Mode() fs.FileMode {
 	return m
 }
 
-// ReadBlockHeader reads and validates a RAR5 block header from the stream.
-func ReadBlockHeader(r io.Reader) (*BlockHeader, error) {
+// readBlockHeader reads and validates a RAR5 block header from the stream.
+func readBlockHeader(r io.Reader) (*blockHeader, error) {
 	var sizeBuf [7]byte
 	_, err := io.ReadFull(r, sizeBuf[:])
 	if err != nil {
@@ -163,7 +163,7 @@ func ReadBlockHeader(r io.Reader) (*BlockHeader, error) {
 	crc := binary.LittleEndian.Uint32(sizeBuf[0:4])
 
 	// Decode the header size vint starting at sizeBuf[4:]
-	sizeV, n, err := DecodeVint(sizeBuf[4:])
+	sizeV, n, err := decodeVint(sizeBuf[4:])
 	if err != nil {
 		return nil, err
 	}
@@ -205,29 +205,29 @@ func ReadBlockHeader(r io.Reader) (*BlockHeader, error) {
 // CRC32 field). n is the byte length of the leading size vint within buf,
 // shared by both ReadBlockHeader's plaintext path and headerDecrypter's
 // decrypted-header path so the two don't duplicate this parsing logic.
-func parseBlockHeaderFields(buf []byte, n int) (*BlockHeader, error) {
+func parseBlockHeaderFields(buf []byte, n int) (*blockHeader, error) {
 	payload := buf[n:]
 
-	hType, nType, err := DecodeVint(payload)
+	hType, nType, err := decodeVint(payload)
 	if err != nil {
 		return nil, err
 	}
 	payload = payload[nType:]
 
-	flags, nFlags, err := DecodeVint(payload)
+	flags, nFlags, err := decodeVint(payload)
 	if err != nil {
 		return nil, err
 	}
 	payload = payload[nFlags:]
 
-	h := &BlockHeader{
+	h := &blockHeader{
 		Type:  hType,
 		Flags: flags,
 	}
 
 	var extraSize uint64
-	if flags&HeaderFlagHasExtra > 0 {
-		exSizeV, nEx, err := DecodeVint(payload)
+	if flags&headerFlagHasExtra > 0 {
+		exSizeV, nEx, err := decodeVint(payload)
 		if err != nil {
 			return nil, err
 		}
@@ -235,8 +235,8 @@ func parseBlockHeaderFields(buf []byte, n int) (*BlockHeader, error) {
 		payload = payload[nEx:]
 	}
 
-	if flags&HeaderFlagHasData > 0 {
-		dtSizeV, nDt, err := DecodeVint(payload)
+	if flags&headerFlagHasData > 0 {
+		dtSizeV, nDt, err := decodeVint(payload)
 		if err != nil {
 			return nil, err
 		}
@@ -261,7 +261,7 @@ func parseBlockHeaderFields(buf []byte, n int) (*BlockHeader, error) {
 
 	extraPayload := payload[len(payload)-int(extraSize):]
 	for len(extraPayload) > 0 {
-		exRecSizeV, nExRecSize, err := DecodeVint(extraPayload)
+		exRecSizeV, nExRecSize, err := decodeVint(extraPayload)
 		if err != nil {
 			return nil, err
 		}
@@ -275,11 +275,11 @@ func parseBlockHeaderFields(buf []byte, n int) (*BlockHeader, error) {
 		recData := extraPayload[:exRecSize]
 		extraPayload = extraPayload[exRecSize:]
 
-		fType, nFType, err := DecodeVint(recData)
+		fType, nFType, err := decodeVint(recData)
 		if err != nil {
 			return nil, err
 		}
-		h.Extra = append(h.Extra, ExtraRecord{
+		h.Extra = append(h.Extra, extraRecord{
 			Type: fType,
 			Data: recData[nFType:],
 		})
@@ -288,27 +288,27 @@ func parseBlockHeaderFields(buf []byte, n int) (*BlockHeader, error) {
 	return h, nil
 }
 
-// ParseArchiveHeader decodes the main archive header details.
-func ParseArchiveHeader(h *BlockHeader) (*ArchiveHeader, error) {
-	if h.Type != HeaderTypeArchive {
+// parseArchiveHeader decodes the main archive header details.
+func parseArchiveHeader(h *blockHeader) (*archiveHeader, error) {
+	if h.Type != headerTypeArchive {
 		return nil, ErrBadBlockHeader
 	}
 	payload := h.Payload
 
-	flags, nFlags, err := DecodeVint(payload)
+	flags, nFlags, err := decodeVint(payload)
 	if err != nil {
 		return nil, err
 	}
 	payload = payload[nFlags:]
 
-	ah := &ArchiveHeader{
-		MultiVolume:  flags&ArcFlagMultiVol > 0,
-		Solid:        flags&ArcFlagSolid > 0,
+	ah := &archiveHeader{
+		MultiVolume:  flags&arcFlagMultiVol > 0,
+		Solid:        flags&arcFlagSolid > 0,
 		VolumeNumber: -1,
 	}
 
-	if flags&ArcFlagVolNum > 0 {
-		volNum, _, err := DecodeVint(payload)
+	if flags&arcFlagVolNum > 0 {
+		volNum, _, err := decodeVint(payload)
 		if err != nil {
 			return nil, err
 		}
@@ -320,7 +320,7 @@ func ParseArchiveHeader(h *BlockHeader) (*ArchiveHeader, error) {
 
 // parseEncryptionRecord decodes RAR5 encryption extra record details.
 func parseEncryptionRecord(fh *FileHeader, b []byte) error {
-	ver, nVer, err := DecodeVint(b)
+	ver, nVer, err := decodeVint(b)
 	if err != nil {
 		return err
 	}
@@ -329,7 +329,7 @@ func parseEncryptionRecord(fh *FileHeader, b []byte) error {
 	}
 	b = b[nVer:]
 
-	encFlags, nEnc, err := DecodeVint(b)
+	encFlags, nEnc, err := decodeVint(b)
 	if err != nil {
 		return err
 	}
@@ -344,19 +344,19 @@ func parseEncryptionRecord(fh *FileHeader, b []byte) error {
 	fh.IV = append([]byte(nil), b[17:33]...)
 	b = b[33:]
 
-	if encFlags&FileEncCheckPresent > 0 {
+	if encFlags&fileEncCheckPresent > 0 {
 		if len(b) < 12 {
 			return ErrCorruptEncryptData
 		}
 		fh.EncCheck = append([]byte(nil), b[:12]...)
 	}
-	fh.UseMac = encFlags&FileEncUseMac > 0
+	fh.UseMac = encFlags&fileEncUseMac > 0
 	return nil
 }
 
 // parseHashRecord decodes RAR5 blake2sp file hash extra record details.
 func parseHashRecord(fh *FileHeader, b []byte) error {
-	hashType, nHash, err := DecodeVint(b)
+	hashType, nHash, err := decodeVint(b)
 	if err != nil {
 		return err
 	}
@@ -395,7 +395,7 @@ const filetimeEpochOffset = 116444736000000000
 // stored before any of the nanoseconds, so the mtime nanosecond field sits
 // after the ctime and atime seconds rather than next to its own.
 func parseTimeRecord(fh *FileHeader, data []byte) error {
-	flags, n, err := DecodeVint(data)
+	flags, n, err := decodeVint(data)
 	if err != nil {
 		return ErrCorruptFileHeader
 	}
@@ -451,7 +451,7 @@ func parseTimeRecord(fh *FileHeader, data []byte) error {
 }
 
 // parseExtraRecords iterates over extra records and parses encryption or file hash blocks.
-func parseExtraRecords(fh *FileHeader, extra []ExtraRecord) error {
+func parseExtraRecords(fh *FileHeader, extra []extraRecord) error {
 	for _, e := range extra {
 		switch e.Type {
 		case 1: // Encryption
@@ -471,30 +471,30 @@ func parseExtraRecords(fh *FileHeader, extra []ExtraRecord) error {
 	return nil
 }
 
-// ParseFileHeader decodes the file header details from a block header.
-func ParseFileHeader(h *BlockHeader) (*FileHeader, error) {
-	fh, err := parseFileHeader(h)
-	if err != nil {
-		return nil, err
-	}
-	return fh, nil
-}
-
-// parseFileHeader is ParseFileHeader's internal form. It is the ONLY function
-// in this package permitted to return a non-nil *FileHeader alongside a
-// non-nil error: every failure up through the name field means there is no
-// identity to report, so those paths return a nil header like any other
-// parse failure. Only a failure inside parseExtraRecords, the last step,
-// returns the header it built anyway -- by that point the member's name and
-// sizes are already decoded, so the caller (Reader.dispatch) can refuse the
-// member by name instead of dropping it from the listing with no trace.
-func parseFileHeader(h *BlockHeader) (*FileHeader, error) {
-	if h.Type != HeaderTypeFile && h.Type != HeaderTypeService {
+// parseFileHeader decodes the file header details from a block header.
+//
+// It is the ONLY function in this package permitted to return a non-nil
+// *FileHeader alongside a non-nil error. Every failure up through the name
+// field means there is no identity to report, so those paths return a nil
+// header like any other parse failure. Two later failures return the header
+// they built anyway, because by then the member's name and sizes are decoded
+// and the caller (Reader.dispatch) can refuse the member BY NAME instead of
+// dropping it from the listing with no trace:
+//
+//   - ErrUnpSizeUnknown, from the declared-size check
+//   - a failure inside parseExtraRecords, the last step
+//
+// An exported wrapper used to stand in front of this and flatten both to a
+// nil header, which is why callers could not tell those two apart from a
+// header that never parsed. It had no callers outside tests once the
+// traversal started using this form directly, and it is gone.
+func parseFileHeader(h *blockHeader) (*FileHeader, error) {
+	if h.Type != headerTypeFile && h.Type != headerTypeService {
 		return nil, ErrBadBlockHeader
 	}
 	payload := h.Payload
 
-	flags, nFlags, err := DecodeVint(payload)
+	flags, nFlags, err := decodeVint(payload)
 	if err != nil {
 		return nil, err
 	}
@@ -503,16 +503,16 @@ func parseFileHeader(h *BlockHeader) (*FileHeader, error) {
 	// Captured here, at the point the flag is decoded, but not acted on until
 	// the validation block below: the flag itself is decoded identity, not a
 	// failure to decode, and the name has not been read yet.
-	unpSizeUnknown := flags&FileFlagUnpSizeUnknown > 0
+	unpSizeUnknown := flags&fileFlagUnpSizeUnknown > 0
 
 	fh := &FileHeader{
-		IsDir:      flags&FileFlagIsDir > 0,
-		FirstBlock: h.Flags&HeaderFlagDataNotFirst == 0,
-		LastBlock:  h.Flags&HeaderFlagDataNotLast == 0,
+		IsDir:      flags&fileFlagIsDir > 0,
+		FirstBlock: h.Flags&headerFlagDataNotFirst == 0,
+		LastBlock:  h.Flags&headerFlagDataNotLast == 0,
 		PackedSize: h.DataSize,
 	}
 
-	unpackedSize, nUnp, err := DecodeVint(payload)
+	unpackedSize, nUnp, err := decodeVint(payload)
 	if err != nil {
 		return nil, err
 	}
@@ -525,14 +525,14 @@ func parseFileHeader(h *BlockHeader) (*FileHeader, error) {
 	fh.UnpackedSize = int64(unpackedSize)
 	payload = payload[nUnp:]
 
-	attrs, nAttrs, err := DecodeVint(payload) // Attributes
+	attrs, nAttrs, err := decodeVint(payload) // Attributes
 	if err != nil {
 		return nil, err
 	}
 	fh.Attributes = attrs
 	payload = payload[nAttrs:]
 
-	if flags&FileFlagHasUnixMtime > 0 {
+	if flags&fileFlagHasUnixMtime > 0 {
 		if len(payload) < 4 {
 			return nil, ErrCorruptFileHeader
 		}
@@ -541,7 +541,7 @@ func parseFileHeader(h *BlockHeader) (*FileHeader, error) {
 		payload = payload[4:]
 	}
 
-	if flags&FileFlagHasCRC32 > 0 {
+	if flags&fileFlagHasCRC32 > 0 {
 		if len(payload) < 4 {
 			return nil, ErrCorruptFileHeader
 		}
@@ -550,23 +550,23 @@ func parseFileHeader(h *BlockHeader) (*FileHeader, error) {
 		payload = payload[4:]
 	}
 
-	compFlags, nComp, err := DecodeVint(payload)
+	compFlags, nComp, err := decodeVint(payload)
 	if err != nil {
 		return nil, err
 	}
-	fh.UnpackVersion = int(compFlags & FileCompVersion)
-	fh.Solid = compFlags&FileCompSolid > 0
+	fh.UnpackVersion = int(compFlags & fileCompVersion)
+	fh.Solid = compFlags&fileCompSolid > 0
 	fh.Method = int((compFlags >> 7) & 7)
 	payload = payload[nComp:]
 
-	hostOS, nOS, err := DecodeVint(payload)
+	hostOS, nOS, err := decodeVint(payload)
 	if err != nil {
 		return nil, err
 	}
 	fh.HostOS = hostOS
 	payload = payload[nOS:]
 
-	nameLen, nName, err := DecodeVint(payload)
+	nameLen, nName, err := decodeVint(payload)
 	if err != nil {
 		return nil, err
 	}

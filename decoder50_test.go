@@ -18,7 +18,7 @@ func TestReadFilter5Data(t *testing.T) {
 	// Let's construct the bits:
 	// 01 00110100 00010010 -> 01001101 00000100 10000000 = 0x4D, 0x04, 0x80
 	buf := []byte{0x4d, 0x04, 0x80}
-	br := NewBitReader(buf, len(buf)*8)
+	br := newBitReader(buf, len(buf)*8)
 
 	val, err := readFilter5Data(br)
 	if err != nil {
@@ -30,7 +30,7 @@ func TestReadFilter5Data(t *testing.T) {
 	}
 
 	// Error path: EOF
-	brEOF := NewBitReader([]byte{0x00}, 2) // not enough bits
+	brEOF := newBitReader([]byte{0x00}, 2) // not enough bits
 	_, err = readFilter5Data(brEOF)
 	if !errors.Is(err, io.EOF) {
 		t.Errorf("expected io.EOF, got %v", err)
@@ -39,7 +39,7 @@ func TestReadFilter5Data(t *testing.T) {
 
 func TestDecoder50_ReadFilter(t *testing.T) {
 	d := newDecoder50()
-	win := NewWindow(1024)
+	win := newWindow(1024)
 
 	// A delta filter at raw offset 0x10, block length 0x08, param 5.
 	err := queueOne(d, win, 0x10, 0x08, 0, 5)
@@ -67,7 +67,7 @@ func TestDecoder50_ReadFilter(t *testing.T) {
 	}
 
 	// Test ErrTooManyFilters limit
-	d.fl = make([]FilterBlock, maxQueuedFilters)
+	d.fl = make([]filterBlock, maxQueuedFilters)
 	err = d.readFilter(win)
 	if !errors.Is(err, ErrTooManyFilters) {
 		t.Errorf("expected ErrTooManyFilters, got %v", err)
@@ -76,7 +76,7 @@ func TestDecoder50_ReadFilter(t *testing.T) {
 
 func TestDecoder50_DecodeSymbol(t *testing.T) {
 	d := newDecoder50()
-	win := NewWindow(1024)
+	win := newWindow(1024)
 
 	// Initialize offset history
 	d.offset = [4]int{10, 20, 30, 40}
@@ -137,7 +137,7 @@ func TestDecoder50_DecodeSymbol(t *testing.T) {
 // offset and CopyBytes, so how the value was derived does not affect what is
 // under test here.
 func TestEntry_RejectsOverReachingBackReference(t *testing.T) {
-	win := NewWindow(0x40000)
+	win := newWindow(0x40000)
 	fillWindowWithPriorFile(win)
 
 	// A new non-solid file begins, exactly as buildChain does.

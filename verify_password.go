@@ -12,7 +12,7 @@ func errKdfCountExceeded(got, max int) error {
 	return fmt.Errorf("rarengine: KdfCount %d exceeds maximum %d", got, max)
 }
 
-// VerifyPassword reports whether password matches the archive's embedded
+// verifyCryptHeaderPassword reports whether password matches the archive's embedded
 // header-encryption check value (RAR5 HEAD_CRYPT, "store password check
 // value" -- the default for modern RAR), without decrypting any header
 // content beyond the check itself. It requires ch.CheckValue to be present;
@@ -26,7 +26,7 @@ func errKdfCountExceeded(got, max int) error {
 // header-decrypt time -- it is the same check, exposed standalone so callers
 // can verify a password before committing to decrypting/decompressing
 // anything.
-func VerifyPassword(ch *CryptHeader, password string) (verified bool, hasCheckValue bool, err error) {
+func verifyCryptHeaderPassword(ch *cryptHeader, password string) (verified bool, hasCheckValue bool, err error) {
 	if ch == nil {
 		return false, false, errors.New("rarengine: nil crypt header")
 	}
@@ -51,7 +51,7 @@ func VerifyPassword(ch *CryptHeader, password string) (verified bool, hasCheckVa
 	return true, true, nil
 }
 
-// VerifyFilePassword reports whether password matches a file header's
+// verifyFileHeaderPassword reports whether password matches a file header's
 // embedded per-file content-encryption check value (fh.EncCheck) -- used
 // when the archive's own headers are plaintext and only file content is
 // encrypted. Same semantics as VerifyPassword: hasCheckValue distinguishes
@@ -60,7 +60,7 @@ func VerifyPassword(ch *CryptHeader, password string) (verified bool, hasCheckVa
 // This reuses the same derivation/check logic that Reader.buildChain
 // already runs lazily during extraction setup (reader.go), exposed
 // standalone so it can be checked ahead of extraction.
-func VerifyFilePassword(fh *FileHeader, password string) (verified bool, hasCheckValue bool, err error) {
+func verifyFileHeaderPassword(fh *FileHeader, password string) (verified bool, hasCheckValue bool, err error) {
 	if fh == nil {
 		return false, false, errors.New("rarengine: nil file header")
 	}
