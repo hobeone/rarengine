@@ -493,11 +493,14 @@ func (r *Reader) resolvePassword(fh *FileHeader) (string, error) {
 	if len(r.passwords) == 0 {
 		return "", ErrPasswordRequired
 	}
+	// This early return is also what makes hasCheck below always true:
+	// verifyFileHeaderPassword reports hasCheckValue=false only when EncCheck
+	// is nil, and that case never reaches the loop.
 	if fh.EncCheck == nil {
 		return r.passwords[0], nil
 	}
 	for _, candidate := range r.passwords {
-		ok, hasCheck, err := verifyFileHeaderPassword(fh, candidate)
+		ok, _, err := verifyFileHeaderPassword(fh, candidate)
 		if err != nil {
 			// An empty candidate cannot be checked against anything, which
 			// is a fact about that candidate and not about the archive. It
@@ -508,9 +511,6 @@ func (r *Reader) resolvePassword(fh *FileHeader) (string, error) {
 				continue
 			}
 			return "", err
-		}
-		if !hasCheck {
-			return candidate, nil
 		}
 		if ok {
 			r.resolved, r.hasResolved = candidate, true
@@ -535,19 +535,18 @@ func (r *Reader) resolveHeaderPassword(ch *cryptHeader) (string, error) {
 	// header, so scanning them is pointless -- and latching the first as
 	// though it were knowledge would suppress the scan for a later header
 	// that DOES carry a check value.
+	// As above: verifyCryptHeaderPassword reports hasCheckValue=false only
+	// for a nil CheckValue, so the loop below never sees it.
 	if ch.CheckValue == nil {
 		return r.passwords[0], nil
 	}
 	for _, candidate := range r.passwords {
-		ok, hasCheck, err := verifyCryptHeaderPassword(ch, candidate)
+		ok, _, err := verifyCryptHeaderPassword(ch, candidate)
 		if err != nil {
 			if errors.Is(err, ErrPasswordRequired) {
 				continue
 			}
 			return "", err
-		}
-		if !hasCheck {
-			return candidate, nil
 		}
 		if ok {
 			r.resolved, r.hasResolved = candidate, true

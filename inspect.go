@@ -79,10 +79,18 @@ func VerifyPassword(r io.Reader, password string) (verified, hasCheckValue bool,
 				return false, false, err
 			}
 			if fh.Encrypted {
-				return verifyFileHeaderPassword(fh, password)
+				verified, hasCheck, err := verifyFileHeaderPassword(fh, password)
+				// hasCheck false means this member carries no check value --
+				// encryption is optional about that -- so it cannot answer
+				// either, and a later member still might. Only a definite
+				// result or a real error ends the scan.
+				if err != nil || hasCheck {
+					return verified, hasCheck, err
+				}
 			}
 			// An unencrypted member is not the answer, only this member's
-			// answer. RAR5 encrypts per member, so an archive can hold both
+			// answer -- same as an encrypted one carrying no check value
+			// just above. RAR5 encrypts per member, so an archive can hold both
 			// -- `rar a x.rar plain` then `rar a -p x.rar secret` produces
 			// exactly that, and unrar lists the second with a leading '*'.
 			// Stopping here reported "nothing to verify" for an archive
@@ -146,11 +154,20 @@ func VolumeNumber(r io.Reader) (index int, multiVolume bool, err error) {
 			}
 			return ah.VolumeNumber, true, nil
 
-		// Scanned for rather than required in first position. A
-		// header-encrypted archive puts its encryption header ahead of the
-		// main one, and requiring position rather than type would report
-		// those as corrupt. Reaching a file header means there was no main
-		// header to find.
+		// Everything after HEAD_CRYPT is AES-256-CBC ciphertext, including
+		// the main archive header this is looking for. Falling through to
+		// the default case skipped the payload and then parsed ciphertext as
+		// a header, which reported ErrBadHeaderCRC or unexpected EOF -- both
+		// saying "corrupt" about an archive that is merely locked. The
+		// number is unreachable without a password, and that is what to say.
+		case headerTypeEncryption:
+			return 0, false, fmt.Errorf(
+				"%w: the archive's headers are encrypted, so its volume "+
+					"number cannot be read", ErrPasswordRequired)
+
+		// Scanned for rather than required in first position: an encryption
+		// header can precede the main one, which is why the case above
+		// exists. Reaching a file header means there was no main header.
 		case headerTypeFile, headerTypeService, headerTypeEnd:
 			return 0, false, fmt.Errorf(
 				"%w: no main archive header before the first member",
@@ -172,6 +189,25 @@ func VolumeNumber(r io.Reader) (index int, multiVolume bool, err error) {
 // prevent inside the traversal.
 func skipPayload(r io.Reader, h *blockHeader) error {
 	if h.DataSize <= 0 {
+		return nil
+	}
+	// A seekable source skips in constant time instead of reading every byte
+	// into a discard buffer. This matters because VerifyPassword walks a
+	// fully unencrypted archive to its end header: without it, answering
+	// "no password needed" costs a read of the whole archive.
+	//
+	// Seeking past the end succeeds silently, so this gives up detecting a
+	// cut INSIDE a payload -- but not detecting the cut. The next
+	// readBlockHeader reads short and both entry points report it, so a
+	// truncated archive still fails; only the message differs, naming the
+	// header rather than the payload. Neither can answer its question from a
+	// stream that ended, so that distinction buys nothing here. Traversal,
+	// where it does buy something, keeps the counted skip in volume.next().
+	if s, ok := r.(io.Seeker); ok {
+		if _, err := s.Seek(h.DataSize, io.SeekCurrent); err != nil {
+			return fmt.Errorf("%w: seeking past a %d byte payload: %w",
+				ErrCorruptBlockHeader, h.DataSize, err)
+		}
 		return nil
 	}
 	if _, err := io.CopyN(io.Discard, r, h.DataSize); err != nil {

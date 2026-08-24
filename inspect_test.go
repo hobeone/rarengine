@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"strings"
 	"testing"
 )
 
@@ -279,5 +280,113 @@ func TestVolumeNumberRejectsAnOutOfRangeDeclaration(t *testing.T) {
 	}
 	if !errors.Is(err, ErrCorruptBlockHeader) {
 		t.Fatalf("err = %v, want ErrCorruptBlockHeader", err)
+	}
+}
+
+// An encrypted member that carries no check value cannot answer either, so
+// the scan must continue past it.
+//
+// verifyFileHeaderPassword reports hasCheckValue=false for a nil EncCheck --
+// encryption is optional about recording one -- and returning that ended the
+// walk, reporting "this archive cannot be tested" while a later encrypted
+// member still held the check value. Same defect as answering from the first
+// unencrypted member, one step further in.
+//
+// Built rather than fixtured: rar always records a check value, so only a
+// crafted archive separates "encrypted" from "has a check value".
+func TestVerifyPasswordScansPastAnEncryptedMemberWithNoCheckValue(t *testing.T) {
+	noCheck := encryptedMemberHeader(t, "nocheck.bin", false)
+	withCheck := encryptedMemberHeader(t, "withcheck.bin", true)
+
+	verified, hasCheck, err := VerifyPassword(
+		bytes.NewReader(rar5Archive(t, false, noCheck, withCheck)), "test")
+	if err != nil {
+		t.Fatalf("VerifyPassword: %v", err)
+	}
+	if !hasCheck {
+		t.Fatal("hasCheckValue = false; the second member carries a check " +
+			"value and the first only lacks one")
+	}
+	_ = verified
+}
+
+// A header-encrypted archive's volume number is unreachable without a
+// password, and saying so beats saying the archive is corrupt.
+//
+// Everything after HEAD_CRYPT is ciphertext, including the main archive
+// header. Skipping that block and parsing on produced ErrBadHeaderCRC for one
+// fixture and "unexpected EOF" for another -- both accusing an intact archive
+// of being damaged.
+//
+// Mutation check: drop the headerTypeEncryption case and these report
+// ErrBadHeaderCRC / unexpected EOF again.
+func TestVolumeNumberOnHeaderEncryptedArchive(t *testing.T) {
+	for _, name := range []string{
+		"rar5_encrypted_header.rar",
+		"rar5_enchdr_multi.part2.rar",
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, _, err := VolumeNumber(bytes.NewReader(fixtureBytes(t, name)))
+			if !errors.Is(err, ErrPasswordRequired) {
+				t.Fatalf("VolumeNumber = %v, want ErrPasswordRequired", err)
+			}
+			if errors.Is(err, ErrBadHeaderCRC) {
+				t.Fatal("reported as a corrupt header; the archive is intact " +
+					"and merely locked")
+			}
+		})
+	}
+}
+
+// encryptedMemberHeader builds a stored member whose header declares content
+// encryption, optionally carrying a password check value. rar always records
+// one, so only a built archive can separate "encrypted" from "has a check
+// value" -- which is the distinction the scan has to handle.
+func encryptedMemberHeader(t *testing.T, name string, withCheck bool) []byte {
+	t.Helper()
+	var enc bytes.Buffer
+	enc.Write(encodeVint(0)) // encryption version 0 (AES-256)
+	if withCheck {
+		enc.Write(encodeVint(fileEncCheckPresent))
+	} else {
+		enc.Write(encodeVint(0))
+	}
+	enc.WriteByte(15)                         // kdf count
+	enc.Write(bytes.Repeat([]byte{0xAA}, 16)) // salt
+	enc.Write(bytes.Repeat([]byte{0xBB}, 16)) // IV
+	if withCheck {
+		enc.Write(bytes.Repeat([]byte{0xCC}, 12)) // check value
+	}
+	return rar5Member(t, memberSpec{
+		name: name, content: "encrypted content", encRecord: enc.Bytes(),
+	})
+}
+
+// TestInspectionReportsTruncationThroughTheSeekPath pins what the seek
+// fast-path in skipPayload gives up, and what it must not.
+//
+// Seeking past the end of a file succeeds silently, so a cut inside a
+// payload is no longer detected AT THE SKIP. It must still be detected: the
+// next readBlockHeader reads short and both entry points report it. The
+// message names the header rather than the payload, which costs nothing --
+// neither function can answer its question from a stream that ended.
+//
+// Driven through both reader shapes, because only one of them takes the seek
+// path and the outcome has to match.
+func TestInspectionReportsTruncationThroughTheSeekPath(t *testing.T) {
+	// A member with a payload, cut inside that payload.
+	full := rar5Archive(t, false, rar5Member(t, memberSpec{
+		name: "big.bin", content: strings.Repeat("payload bytes. ", 400),
+	}))
+	cut := full[:len(full)-1200]
+
+	seekable := bytes.NewReader(cut)                          // *bytes.Reader: seeks
+	streaming := struct{ io.Reader }{&byteAtATime{data: cut}} // no Seek method
+
+	if _, _, err := VerifyPassword(seekable, "x"); err == nil {
+		t.Error("seekable reader: truncation inside a payload returned no error")
+	}
+	if _, _, err := VerifyPassword(streaming, "x"); err == nil {
+		t.Error("streaming reader: truncation inside a payload returned no error")
 	}
 }

@@ -249,6 +249,13 @@ type memberSpec struct {
 	// only failure that yields a header alongside its error, so the member
 	// can be refused by name instead of vanishing from the listing.
 	badEncVersion bool
+
+	// encRecord attaches a raw file-encryption extra record body (everything
+	// after the record-type vint). Unlike badEncVersion, which builds one
+	// specific malformed record, this lets a test state the encryption
+	// metadata it needs -- notably an encrypted member with no check value,
+	// which rar never produces but the format permits.
+	encRecord []byte
 }
 
 // rar5Member builds one RAR5 file block followed by its payload.
@@ -323,6 +330,14 @@ func rar5Member(t testing.TB, s memberSpec) []byte {
 		var rec bytes.Buffer
 		rec.Write(encodeVint(1))  // record type: encryption
 		rec.Write(encodeVint(99)) // version: not 0, so unsupported
+		extra.Write(encodeVint(uint64(rec.Len())))
+		extra.Write(rec.Bytes())
+		blockFlags |= headerFlagHasExtra
+	}
+	if s.encRecord != nil {
+		var rec bytes.Buffer
+		rec.Write(encodeVint(1)) // record type: encryption
+		rec.Write(s.encRecord)
 		extra.Write(encodeVint(uint64(rec.Len())))
 		extra.Write(rec.Bytes())
 		blockFlags |= headerFlagHasExtra
