@@ -269,18 +269,30 @@ func (e *Entry) truncated() error {
 		ErrTruncatedFile, e.Header.Name, e.size-e.remaining, e.size)
 }
 
-// uncheckableDigest names which digest a member carries that this library
-// cannot compare, for the error message only. The verdict does not depend on
-// it -- all three cases mean the same thing to a caller -- but "records only a
+// uncheckableDigest describes what the member recorded in place of a
+// comparable CRC32, for the error message only. The verdict does not depend on
+// it -- all of these mean the same thing to a caller -- but "records only a
 // BLAKE2sp digest" tells someone reading a log that their archive was written
-// with -htb, which "cannot verify" alone does not.
+// with -htb, which "could not be verified" alone does not.
+//
+// UseMac is composed with the digest kind rather than short-circuiting it.
+// The flag says the recorded value is a key-derived MAC; it does not say WHICH
+// field holds it, and rar -ma5 -htb -p sets UseMac with HasCRC32 false and
+// HasBlake2sp true. Reporting "not a CRC32 of the plaintext" there named a
+// field the header does not carry, and testing HasCRC32 first would have
+// dropped the MAC instead. Both facts are true of that archive, so the message
+// carries both.
 func uncheckableDigest(fh *FileHeader) string {
 	switch {
+	case fh.UseMac && fh.HasCRC32:
+		return "records a key-derived MAC in place of a CRC32 of the plaintext"
+	case fh.UseMac && fh.HasBlake2sp:
+		return "records a key-derived MAC over a BLAKE2sp digest"
 	case fh.UseMac:
-		return "records a key-derived MAC, not a CRC32 of the plaintext"
+		return "records a key-derived MAC"
 	case fh.HasBlake2sp:
 		return "records only a BLAKE2sp digest, which this library cannot compute"
 	default:
-		return "records no checksum at all"
+		return "records no checksum"
 	}
 }

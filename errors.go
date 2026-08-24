@@ -50,11 +50,20 @@ var (
 	// ErrChecksumUnsupported is returned once a file has produced bytes that
 	// this library could not compare against any digest. Three archive classes
 	// reach it, and they are one verdict because a caller can do only one thing
-	// about them:
+	// about them.
 	//
-	//   - UseMac: the header's digest field holds a key-derived MAC rather than
-	//     a CRC32 of the plaintext. RAR sets that flag on the header carrying
-	//     the digest, which for a multi-volume file is the last part's.
+	// The sentinel says "could not be verified" rather than naming an
+	// unsupported checksum, because one of the three classes records no
+	// checksum at all -- "file records a checksum this library cannot verify:
+	// ... records no checksum" contradicted itself in a log line.
+	//
+	// The classes:
+	//
+	//   - UseMac: the recorded digest is a key-derived MAC rather than a plain
+	//     hash of the plaintext. RAR sets that flag on the header carrying the
+	//     digest, which for a multi-volume file is the last part's. It composes
+	//     with the class below rather than excluding it: rar -htb -p sets
+	//     UseMac over a BLAKE2sp digest with no CRC32 present.
 	//   - BLAKE2sp only: written by rar -htb, which records a BLAKE2sp hash and
 	//     no CRC32 at all. This library does not compute BLAKE2sp.
 	//   - No digest recorded at all.
@@ -69,7 +78,7 @@ var (
 	// unverifiable content treats it as success; one that does not, does not.
 	// A member that produced no bytes -- a directory, an empty file -- never
 	// reaches this, because it has nothing to verify.
-	ErrChecksumUnsupported = errors.New("rarengine: file records a checksum this library cannot verify")
+	ErrChecksumUnsupported = errors.New("rarengine: file content could not be verified against a checksum")
 
 	// ErrCorruptArchiveHeader reports that the archive-level header (the
 	// block that declares archive-wide semantics, including whether the
