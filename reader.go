@@ -594,13 +594,6 @@ func (s *storeReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// nextVolume closes the current volume and opens the next.
-//
-// Every failure leaves r.vol nil, which is a lifetime rather than a rule: the
-// field is assigned the result, so a failed advance has nothing to leave
-// behind. Under the previous design this had to be maintained by hand at each
-// exit, and a volume left standing after a failure was read again at whatever
-// offset the failure stopped at.
 // openNextVolume advances to the next volume, skipping any that cannot be
 // opened because they ended inside their signature.
 //
@@ -623,6 +616,13 @@ func (r *Reader) openNextVolume() error {
 	}
 }
 
+// nextVolume closes the current volume and opens the next.
+//
+// Every failure leaves r.vol nil, which is a lifetime rather than a rule: the
+// field is assigned the result, so a failed advance has nothing to leave
+// behind. Under the previous design this had to be maintained by hand at each
+// exit, and a volume left standing after a failure was read again at whatever
+// offset the failure stopped at.
 func (r *Reader) nextVolume() error {
 	if r.vol != nil {
 		_ = r.vol.Close()
