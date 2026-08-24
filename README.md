@@ -47,12 +47,19 @@ for {
 		_ = e.Close()
 		continue
 	}
-	if _, err := io.Copy(dst, e); err != nil {
+	// This example's policy accepts content the library could not verify --
+	// see "Unverifiable checksums" below. Drop the ErrChecksumUnsupported
+	// filter at both sites to reject it instead. It has to be filtered at both:
+	// io.Copy surfaces the verdict from Read, so without the first filter a
+	// fully delivered member is logged as skipped.
+	if _, err := io.Copy(dst, e); err != nil &&
+		!errors.Is(err, rarengine.ErrChecksumUnsupported) {
 		log.Printf("skipping %s: %v", e.Header.Name, err)
 	}
 	// Close reports the member's verdict. A member that failed does not end
 	// the archive: call NextEntry again.
-	if err := e.Close(); err != nil {
+	if err := e.Close(); err != nil &&
+		!errors.Is(err, rarengine.ErrChecksumUnsupported) {
 		log.Printf("%s: %v", e.Header.Name, err)
 	}
 }

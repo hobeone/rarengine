@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -146,5 +147,43 @@ func TestUnverifiableMemberDoesNotDamageTheWindow(t *testing.T) {
 	}
 	if err := e.Close(); err != nil {
 		t.Fatalf("solid successor Close = %v", err)
+	}
+}
+
+// A member that produced no bytes has nothing to verify, whatever kind of
+// digest its header records.
+//
+// The produced-size gate used to sit BELOW the UseMac test, so an empty file
+// or a directory inside an encrypted archive reported ErrChecksumUnsupported
+// having produced nothing at all -- a member the library could not have failed
+// to verify, because there was nothing to compare. The gate now precedes every
+// uncheckable-digest arm, and this pins that ordering.
+//
+// Built directly rather than through a fixture: rar will not produce a
+// zero-byte member carrying UseMac, which is the point -- nothing stops a
+// crafted archive from doing so, and the verdict must not depend on RAR's
+// habits.
+//
+// Mutation check: move the e.size == 0 return back below the UseMac test and
+// this fails with ErrChecksumUnsupported.
+func TestZeroLengthMemberIsCleanEvenWithAnUncheckableDigest(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		fh   *FileHeader
+	}{
+		{"UseMac", &FileHeader{Name: "empty.bin", LastBlock: true, UseMac: true}},
+		{"blake2sp only", &FileHeader{
+			Name: "empty.bin", LastBlock: true,
+			HasBlake2sp: true, Blake2sp: make([]byte, 32),
+		}},
+		{"no digest", &FileHeader{Name: "empty.bin", LastBlock: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEntry(tc.fh, strings.NewReader(""))
+			if err := e.Close(); err != nil {
+				t.Fatalf("Close = %v, want nil: the member produced no bytes, "+
+					"so no check was missed", err)
+			}
+		})
 	}
 }
