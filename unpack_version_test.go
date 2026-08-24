@@ -254,3 +254,49 @@ func TestRealRAR7ArchiveIsRefused(t *testing.T) {
 		}
 	})
 }
+
+// TestContinuationChangingUnpackVersionIsRefused pins the version check on the
+// volume-advance path, not only at admission.
+//
+// dispatch refuses a nonzero version, but it only ever sees FIRST blocks --
+// continuation headers are skipped there by the !FirstBlock test. So a member
+// could be admitted declaring version 0 and continue, on the next volume,
+// declaring version 1, and that continuation's payload went to the RAR5
+// decoder as though the member had never changed formats.
+//
+// Compared against e.Header.UnpackVersion rather than tested for zero: the
+// first block is already known to be version 0, so one comparison covers both
+// "changed" and "unsupported", and it says what the rule actually is -- a
+// continuation must prove it belongs to the member it is spliced into, which
+// is the same reason Name, Method and Encrypted are checked here.
+//
+// Mutation check: drop UnpackVersion from that comparison and this reads the
+// continuation's bytes with a nil error.
+func TestContinuationChangingUnpackVersionIsRefused(t *testing.T) {
+	v1 := rar5Archive(t, false, rar5Member(t, memberSpec{
+		name: "split.bin", content: "aaaa", unpackedSz: 8, packedSz: 4, notLast: true,
+	}))
+	v2 := rar5Archive(t, false, rar5Member(t, memberSpec{
+		name: "split.bin", content: "bbbb", notFirst: true, unpackVersion: 1,
+	}))
+
+	r := NewReader(volumesOf(v1, v2))
+	e, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("NextEntry: %v", err)
+	}
+	if e.Header.UnpackVersion != unpackVersionRAR5 {
+		t.Fatalf("first block UnpackVersion = %d, want 0 -- this test needs a "+
+			"member admitted as RAR5", e.Header.UnpackVersion)
+	}
+
+	got, err := io.ReadAll(e)
+	if !errors.Is(err, ErrCorruptFileHeader) {
+		t.Fatalf("reading split.bin = %q, %v; want ErrCorruptFileHeader for a "+
+			"continuation declaring a different unpack version", got, err)
+	}
+	if bytes.Contains(got, []byte("bbbb")) {
+		t.Fatalf("split.bin was served %q from a continuation declaring a "+
+			"format this library does not decode", got)
+	}
+}
