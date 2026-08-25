@@ -36,6 +36,15 @@ var (
 	// check for either with errors.Is.
 	ErrPasswordRequired = errors.New("rarengine: password required for encrypted file")
 
+	// ErrReaderClosed is returned by a Reader whose Close has been called.
+	// It is what a call blocked waiting for the next volume receives when
+	// Close releases it, and what every later call receives.
+	//
+	// It is not a failure of the archive. A caller that closed a Reader
+	// deliberately -- a cancelled download, a user abandoning an extraction
+	// -- should expect this rather than treat it as corruption.
+	ErrReaderClosed = errors.New("rarengine: reader is closed")
+
 	// ErrUnsupportedFormat reports content this library cannot decode. Two
 	// things reach it, at different scopes:
 	//

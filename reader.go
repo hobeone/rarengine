@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"sync"
 )
 
 // Reader is a sequential, tar-like reader over a RAR5 archive delivered as a
@@ -49,6 +50,29 @@ type Reader struct {
 	// between setting staged and consuming it.
 	staged *blockHeader
 
+	// done is closed by Close. It is the escape from the volume receive,
+	// which is otherwise unbounded: a Reader waiting for a volume that will
+	// never arrive cannot rescue itself, because the only other thing that
+	// ends that wait is the producer closing the channel.
+	done   chan struct{}
+	closed bool
+
+	// volMu guards every field Close touches -- r.vol, r.done and r.closed --
+	// against Close, which is the one method another goroutine may call. It is
+	// taken at volume transitions only, once per volume and never per byte, so
+	// it costs nothing on any path that moves data.
+	//
+	// r.done and r.closed are in here because Reset REPLACES them: a plain
+	// sync.Once would be copied out from under a Close already inside its Do,
+	// letting a second Do body run and close an already-closed channel, which
+	// panics. A flag under the same lock cannot be copied at the wrong moment,
+	// so the hazard stops existing rather than being synchronised around.
+	//
+	// It does not make the volume's CONTENTS concurrently safe, and cannot:
+	// the splice holds &v.body and reads through it, so guarding that would
+	// mean a lock per read. See Close for what that means for a caller.
+	volMu sync.Mutex
+
 	// damaged remembers a volume that ended somewhere this traversal cannot
 	// vouch for -- inside a block's declared payload, or partway through a
 	// header. Scanning continues past it, because the members in the volumes
@@ -88,6 +112,7 @@ type Reader struct {
 // NewReader constructs a Reader over volumes, allocating the 32 MB window.
 func NewReader(volumes <-chan io.ReadCloser) *Reader {
 	return &Reader{
+		done:    make(chan struct{}),
 		volumes: volumes,
 		win:     newWindow(32 * 1024 * 1024),
 		dec50:   newDecoder50(),
@@ -105,11 +130,33 @@ func (r *Reader) Reset(volumes <-chan io.ReadCloser) {
 	// pulled volumes off the NEW channel and consumed headers the new
 	// traversal had not seen.
 	r.severActive()
-	if r.vol != nil {
-		_ = r.vol.Close()
-		r.vol = nil
+	r.volMu.Lock()
+	prev := r.vol
+	r.vol = nil
+	r.volMu.Unlock()
+	// --- no lock held below this line ---
+	if prev != nil {
+		_ = prev.Close()
 	}
+	// The abandoned channel's queued volumes are closed here, or nothing ever
+	// closes them: Reset is the caller saying it is done with that archive,
+	// and the ReadClosers still sitting on its channel are as much a part of
+	// it as the one that was open.
+	r.volMu.Lock()
+	old := r.volumes
+	r.volMu.Unlock()
+	// --- no lock held below this line ---
+	drainVolumes(old)
+	// A fresh done, so Reset revives a Reader that had been closed. Close is
+	// terminal for an ARCHIVE, not for the Reader: reuse across archives is
+	// what Reset exists for, and refusing to revive would mean allocating a
+	// new 32 MB window to recover from a cancelled download.
+	r.volMu.Lock()
+	r.closed = false
+	r.done = make(chan struct{})
 	r.volumes = volumes
+	r.volMu.Unlock()
+	// --- no lock held below this line ---
 	r.staged = nil
 	r.damaged = nil
 	r.resolved, r.hasResolved = "", false
@@ -134,6 +181,18 @@ func (r *Reader) SetPasswords(candidates []string) { r.passwords = candidates }
 // delivered by the Entry, including refusals, which arrive as an Entry that is
 // already terminal.
 func (r *Reader) NextEntry() (*Entry, error) {
+	// Checked before r.fatal and before any read: a closed Reader must not go
+	// on traversing the volume it still holds. That volume is closed, so its
+	// body reads as empty, and without this the scan would report the archive
+	// truncated or ended rather than closed -- describing the caller's own
+	// decision as damage.
+	r.volMu.Lock()
+	closed := r.closed
+	r.volMu.Unlock()
+	// --- no lock held below this line ---
+	if closed {
+		return nil, ErrReaderClosed
+	}
 	if r.fatal != nil {
 		return nil, r.fatal
 	}
@@ -630,6 +689,93 @@ func (s *storeReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
+// Close releases the Reader and unblocks a call waiting for the next volume.
+//
+// It closes the volume currently open and every volume already queued on the
+// channel, and makes every later call return ErrReaderClosed. It is
+// idempotent.
+//
+// Close is the ONE method safe to call from another goroutine while a read is
+// in progress. Every other method requires the caller's own serialisation --
+// this type is not concurrently safe and does not become so. The asymmetry is
+// the point: a Reader blocked on a volume that will never arrive cannot
+// rescue itself, because the only other thing that ends that wait is the
+// producer closing the channel, and a stalled producer is exactly when a
+// caller needs to give up.
+//
+// That is also how a context reaches this library without it storing one:
+//
+//	r := rarengine.NewReader(volumes)
+//	defer r.Close()
+//	context.AfterFunc(ctx, func() { r.Close() })
+//
+// which is why NextEntry and Entry.Read take no context. Entry.Read reaches
+// the same volume receive through the splice and must satisfy io.Reader, so a
+// context parameter could never have covered it -- the long operation would
+// have stayed uncancellable while the short one gained a ceremony.
+//
+// Close does not nil the open volume, it closes it: volume.Close zeroes the
+// aliased body, so a read already in flight sees EOF rather than a nil
+// dereference. A caller that closes from another goroutine gets errors and
+// unwinds; it does not get a panic.
+//
+// One limit, stated because the race detector will find it otherwise. Close
+// synchronises the volume POINTER, not the volume's contents. Closing while
+// another goroutine is mid-read of a payload races on the volume's aliased
+// body, and making that safe would mean a lock per read on a library whose
+// point is that there is none. In practice the two stalls have different
+// cures: a stalled VOLUME CHANNEL is what Close is for, and a stalled
+// underlying stream is cured by closing that stream, which the caller owns
+// and which types like net.Conn already make safe. This is the same division
+// io.Pipe and net.Conn draw.
+//
+// After Close, Reset revives the Reader for a different archive. Close ends
+// an archive, not the 32 MB window.
+func (r *Reader) Close() error {
+	r.volMu.Lock()
+	if !r.closed {
+		r.closed = true
+		close(r.done)
+	}
+	v := r.vol
+	r.vol = nil
+	// Snapshotted for the same reason as r.done: Reset replaces this field,
+	// so draining r.volumes after the unlock would race with a revival and
+	// could drain the NEW archive's channel.
+	volumes := r.volumes
+	r.volMu.Unlock()
+	// --- no lock held below this line ---
+	var err error
+	if v != nil {
+		err = v.Close()
+	}
+	drainVolumes(volumes)
+	return err
+}
+
+// drainVolumes closes everything already queued on ch.
+//
+// Non-blocking on purpose. A channel the producer has not closed has no end
+// to wait for, so this takes what is there and stops; anything sent afterwards
+// belongs to a producer that has not yet noticed it should stop, and closing
+// it is that producer's job. Draining until close would hang exactly in the
+// case Close exists to escape.
+func drainVolumes(ch <-chan io.ReadCloser) {
+	for {
+		select {
+		case rc, ok := <-ch:
+			if !ok {
+				return
+			}
+			if rc != nil {
+				_ = rc.Close()
+			}
+		default:
+			return
+		}
+	}
+}
+
 // openNextVolume advances to the next volume, skipping any that cannot be
 // opened because they ended inside their signature.
 //
@@ -660,13 +806,32 @@ func (r *Reader) openNextVolume() error {
 // exit, and a volume left standing after a failure was read again at whatever
 // offset the failure stopped at.
 func (r *Reader) nextVolume() error {
-	if r.vol != nil {
-		_ = r.vol.Close()
-		r.vol = nil
+	// Under the lock because Close reads this pointer from another goroutine.
+	// The previous volume is finished with by the time this runs, so closing
+	// it here races with nothing.
+	r.volMu.Lock()
+	prev := r.vol
+	r.vol = nil
+	// Snapshotted, not read at the select: Reset replaces this field, so
+	// reading it there would race with a revival.
+	done := r.done
+	r.volMu.Unlock()
+	// --- no lock held below this line ---
+	if prev != nil {
+		_ = prev.Close()
 	}
-	rc, ok := <-r.volumes
-	if !ok {
-		return ErrNoNextVolume
+	var rc io.ReadCloser
+	var ok bool
+	select {
+	case rc, ok = <-r.volumes:
+		if !ok {
+			return ErrNoNextVolume
+		}
+	case <-done:
+		// Close was called, possibly from another goroutine and possibly
+		// while this receive was already blocked. That is the whole reason
+		// Close exists.
+		return ErrReaderClosed
 	}
 	if rc == nil {
 		// A nil element on the channel is the caller's bug, but the library
@@ -680,6 +845,24 @@ func (r *Reader) nextVolume() error {
 		_ = rc.Close()
 		return err
 	}
+	// Re-checked under the lock, because the select above proves nothing
+	// about Close. When both its cases are ready Go picks at random, so a
+	// Close that landed during acquisition can have taken the volumes branch
+	// anyway -- and by then Close has already read r.vol (nil, cleared at the
+	// top of this function), drained the queue and returned. Publishing here
+	// would attach a freshly opened volume to a closed Reader that nothing
+	// will ever close, and let traversal carry on reading from it.
+	//
+	// Under the same lock Close uses, so the two orderings are the only ones
+	// possible: either Close saw this volume, or this sees Close.
+	r.volMu.Lock()
+	if r.closed {
+		r.volMu.Unlock()
+		// --- no lock held below this line ---
+		_ = v.Close()
+		return ErrReaderClosed
+	}
 	r.vol = v
+	r.volMu.Unlock()
 	return nil
 }

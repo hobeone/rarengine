@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `rarengine` is a zero-allocation, stream-oriented RAR5 decompression library in Go. It is designed for high-throughput Usenet downloaders (e.g., `gonzbd`) that decompress RAR5 streams on-the-fly from channels of `io.ReadCloser` volumes.
 
-The public API surface is intentionally small, and is now **compiler-enforced** rather than merely documented: `NewReader`, `Reset`, `NextEntry`, `SetPasswords`, plus `Entry`'s `Read`/`Close`/`Header`, `FileHeader`, the two inspection entry points `VerifyPassword` and `VolumeNumber`, and the exported error sentinels callers match on. Everything else is unexported. Keep it that way — anything new here is a contract this library has to hold forever.
+The public API surface is intentionally small, and is now **compiler-enforced** rather than merely documented: `NewReader`, `Reset`, `NextEntry`, `SetPasswords`, `Close`, plus `Entry`'s `Read`/`Close`/`Header`, `FileHeader`, the two inspection entry points `VerifyPassword` and `VolumeNumber`, and the exported error sentinels callers match on. Everything else is unexported. Keep it that way — anything new here is a contract this library has to hold forever.
 
 `go doc` is the check: if it lists a symbol not named above, the surface has grown.
 
@@ -55,6 +55,8 @@ volumes <-chan io.ReadCloser
                  └─ cbcDecryptReader (if encrypted)
                       └─ multiVolumePayloadReader
 ```
+
+`Reader.Close` is the only method another goroutine may call. It closes `done`, which is selected on at the volume receive — the one place this library can block unboundedly, since a channel with no sender and no close has no other end. `volMu` guards the `r.vol` pointer against that concurrent call and is taken once per volume, never per byte. It does NOT make the volume's contents concurrently safe: the splice holds `&v.body`, so guarding that would mean a lock per read. A `context.Context` reaches this library as `context.AfterFunc(ctx, func() { r.Close() })`, which is why nothing here takes one — `Entry.Read` reaches the same receive through the splice and must satisfy `io.Reader`, so a context parameter could never have covered the long operation.
 
 `Reader` (`reader.go`) owns traversal only: which volume, which block, whether a member may begin. It does not own where the stream is — `volume` (`volume.go`) does, one instance per RAR volume, constructed fresh on every advance so a stale read position cannot outlive the volume it describes. It does not own how a member ended — `Entry` (`entry.go`) does: byte budget, running CRC, and a terminal verdict delivered by both `Read` and `Close` (`Close` reports `nil` on success). `splice.go` stitches a member's payload across a volume boundary; `crypto.go` holds the AES-256-CBC/PBKDF2 primitives; `errors.go` holds the exported sentinels.
 
