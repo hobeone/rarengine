@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `rarengine` is a zero-allocation, stream-oriented RAR5 decompression library in Go. It is designed for high-throughput Usenet downloaders (e.g., `gonzbd`) that decompress RAR5 streams on-the-fly from channels of `io.ReadCloser` volumes.
 
-The public API surface is intentionally small, and is now **compiler-enforced** rather than merely documented: `NewReader`, `Reset`, `NextEntry`, `SetPasswords`, plus `Entry`'s `Read`/`Close`/`Header`, `FileHeader`, the two inspection entry points `VerifyPassword` and `VolumeNumber`, and the exported error sentinels callers match on. Everything else is unexported. Keep it that way — anything new here is a contract this library has to hold forever.
+The public API surface is intentionally small, and is now **compiler-enforced** rather than merely documented: `NewReader`, `Reset`, `NextEntry`, `SetPasswords`, `Close`, plus `Entry`'s `Read`/`Close`/`Header`, `FileHeader`, the two inspection entry points `VerifyPassword` and `VolumeNumber`, and the exported error sentinels callers match on. Everything else is unexported. Keep it that way — anything new here is a contract this library has to hold forever.
 
 `go doc` is the check: if it lists a symbol not named above, the surface has grown.
 

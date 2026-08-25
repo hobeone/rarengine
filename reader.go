@@ -813,7 +813,24 @@ func (r *Reader) nextVolume() error {
 		_ = rc.Close()
 		return err
 	}
+	// Re-checked under the lock, because the select above proves nothing
+	// about Close. When both its cases are ready Go picks at random, so a
+	// Close that landed during acquisition can have taken the volumes branch
+	// anyway -- and by then Close has already read r.vol (nil, cleared at the
+	// top of this function), drained the queue and returned. Publishing here
+	// would attach a freshly opened volume to a closed Reader that nothing
+	// will ever close, and let traversal carry on reading from it.
+	//
+	// Under the same lock Close uses, so the two orderings are the only ones
+	// possible: either Close saw this volume, or this sees Close.
 	r.volMu.Lock()
+	select {
+	case <-r.done:
+		r.volMu.Unlock()
+		_ = v.Close()
+		return ErrReaderClosed
+	default:
+	}
 	r.vol = v
 	r.volMu.Unlock()
 	return nil

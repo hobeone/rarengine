@@ -227,3 +227,57 @@ type trackedCloser struct {
 }
 
 func (t *trackedCloser) Close() error { t.closed = true; return nil }
+
+// TestCloseDuringVolumeAcquisitionDoesNotStrandTheVolume covers the window
+// between the volume receive and the assignment that publishes it.
+//
+// nextVolume selects on the volumes channel and on done. When BOTH are ready
+// Go picks at random, so a Close that lands during acquisition can take the
+// volumes branch anyway. Close then reads r.vol -- nil, because nextVolume
+// clears it before receiving -- drains the queue and returns, and nextVolume
+// afterwards publishes a freshly opened volume onto a Reader that is already
+// closed. Nothing ever closes it, and traversal carries on reading from it.
+//
+// Driven at nextVolume rather than through NextEntry because NextEntry's
+// own guard short-circuits the already-closed case and would hide this.
+// Repeated because the branch is chosen at random: one iteration proves
+// nothing either way.
+//
+// Mutation check: remove the second done check in nextVolume and this fails
+// within a few iterations with a volume left open.
+func TestCloseDuringVolumeAcquisitionDoesNotStrandTheVolume(t *testing.T) {
+	for i := range 200 {
+		archive := rar5Archive(t, false, rar5Member(t,
+			memberSpec{name: "a.bin", content: "aaaa", withCRC: true}))
+		vol := &trackedCloser{Reader: bytes.NewReader(archive)}
+
+		volumes := make(chan io.ReadCloser, 1)
+		r := NewReader(volumes)
+
+		// The volume arrives AFTER Close has drained, which drainVolumes
+		// documents as possible: a producer that has not yet noticed it
+		// should stop keeps sending. Now both select cases are ready at
+		// once -- a queued volume and a closed done -- so the branch taken
+		// is the runtime's choice.
+		_ = r.Close()
+		volumes <- vol
+		err := r.openNextVolume()
+
+		if !errors.Is(err, ErrReaderClosed) {
+			t.Fatalf("iteration %d: openNextVolume = %v, want ErrReaderClosed "+
+				"on a closed Reader", i, err)
+		}
+		if r.vol != nil {
+			t.Fatalf("iteration %d: a closed Reader published a volume", i)
+		}
+		// Whichever branch the runtime took, the volume must not be stranded:
+		// either it was never received and is still the producer's, or it was
+		// received and this closed it. What must never happen is received,
+		// opened, and abandoned.
+		queued := len(volumes) == 1
+		if !vol.closed && !queued {
+			t.Fatalf("iteration %d: a volume was received after Close and "+
+				"left open; nothing will ever close it", i)
+		}
+	}
+}
