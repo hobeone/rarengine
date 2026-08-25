@@ -2,90 +2,11 @@ package rarengine
 
 import (
 	"bytes"
-	"encoding/binary"
 	"errors"
 	"hash/crc32"
 	"io"
 	"testing"
 )
-
-// The builders below differ from the ones in crc_verify_test.go in exactly
-// one way that matters here: a block's on-stream payload length and the
-// file's declared unpacked size are set independently. Every other builder
-// derives one from the other, which is why no existing test could express an
-// entry whose packed block outlives its decompressed content.
-
-func rar5Block(payload []byte) []byte {
-	sizeV := encodeVint(uint64(len(payload)))
-	var hashed bytes.Buffer
-	hashed.Write(sizeV)
-	hashed.Write(payload)
-	var out bytes.Buffer
-	_ = binary.Write(&out, binary.LittleEndian, crc32.ChecksumIEEE(hashed.Bytes()))
-	out.Write(hashed.Bytes())
-	return out.Bytes()
-}
-
-func rar5ArchiveHeader() []byte {
-	var p bytes.Buffer
-	p.Write(encodeVint(headerTypeArchive))
-	p.Write(encodeVint(0))
-	p.Write(encodeVint(arcFlagMultiVol))
-	var out bytes.Buffer
-	out.Write([]byte{0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x01, 0x00})
-	out.Write(rar5Block(p.Bytes()))
-	return out.Bytes()
-}
-
-func rar5EndHeader() []byte {
-	var p bytes.Buffer
-	p.Write(encodeVint(headerTypeEnd))
-	p.Write(encodeVint(0))
-	return rar5Block(p.Bytes())
-}
-
-// rar5FileEntry emits a store-method file block plus its payload. dataSize is
-// taken from len(payload), so passing a payload longer than unpackedSize
-// produces an entry whose packed block has bytes left over once the declared
-// content has been produced.
-func rar5FileEntry(name string, unpackedSize uint64, declaredCRC uint32, payload []byte) []byte {
-	return rar5EntryComp(name, 0, unpackedSize, declaredCRC, payload)
-}
-
-// rar5EntryComp is rar5FileEntry with the compression-info vint exposed, so a
-// test can set fileCompSolid (0x40) or a method without rebuilding the block.
-// Method lives in bits 7-9 of the same vint, so 0 is store either way.
-func rar5EntryComp(name string, compFlags uint64, unpackedSize uint64, declaredCRC uint32, payload []byte) []byte {
-	return rar5EntryFlags(name, compFlags, headerFlagHasData, unpackedSize, declaredCRC, payload)
-}
-
-// rar5EntryFlags is rar5EntryComp with the BLOCK header flags exposed as well,
-// so a test can mark an entry as continuing into the next volume
-// (headerFlagDataNotLast) without restating the header layout.
-func rar5EntryFlags(name string, compFlags uint64, blockFlags uint64, unpackedSize uint64, declaredCRC uint32, payload []byte) []byte {
-	var fp bytes.Buffer
-	fp.Write(encodeVint(fileFlagHasCRC32))
-	fp.Write(encodeVint(unpackedSize))
-	fp.Write(encodeVint(0))
-	var crcBuf [4]byte
-	binary.LittleEndian.PutUint32(crcBuf[:], declaredCRC)
-	fp.Write(crcBuf[:])
-	fp.Write(encodeVint(compFlags))
-	fp.Write(encodeVint(1))
-	fp.Write(encodeVint(uint64(len(name))))
-	fp.WriteString(name)
-
-	var hp bytes.Buffer
-	hp.Write(encodeVint(headerTypeFile))
-	hp.Write(encodeVint(blockFlags))
-	hp.Write(encodeVint(uint64(len(payload))))
-	hp.Write(fp.Bytes())
-
-	var out bytes.Buffer
-	out.Write(rar5Block(hp.Bytes()))
-	out.Write(payload)
-	return out.Bytes()
-}
 
 // TestPackedRemainder_RAR5FabricatedHeaderIsRefused is the reproduction for
 // the header-fabrication path. A file whose declared UnpackedSize is smaller

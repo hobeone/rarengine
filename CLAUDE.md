@@ -151,3 +151,5 @@ Carried forward — still a runtime guard, still needs a test:
 ## Integration Testing
 
 `integration_test.go` runs differential oracle tests against the system `unrar` binary. Test fixtures live in `testdata/`. The fuzz target for the Huffman decoder is in `huffman_test.go` (`FuzzHuffman`).
+
+Hand-built archives come from `testbuild_test.go` and nowhere else. Four files used to construct RAR5 headers from raw bytes, so a format-level correction had to be found and applied in each — the count in issue #35 was wrong twice before it landed. There is now one signature (`rar5Sig`), one block wrapper (`rar5Block`), one archive/end header pair, and one file-header layout (`buildRAR5Member`). `memberSpec` is the descriptive way to reach that layout; `rar5FileEntry`/`rar5EntryComp`/`rar5EntryFlags` are a positional face over the same function, kept because their call sites read better with three arguments than a struct literal. `rar5BlockDeclaring` is deliberately not a member builder: it declares payload with no entry behind it, which is the shape the payload-discard tests attack and which nothing derived from a file can express.
