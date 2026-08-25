@@ -23,7 +23,7 @@ import (
 func TestCutInsideAMembersPayloadIsNotStitchedOver(t *testing.T) {
 	// The header declares 10 packed bytes; the volume carries 4.
 	v1 := rar5Archive(t, false, rar5Member(t, memberSpec{
-		name: "split.bin", content: "aaaa", unpackedSz: 14, packedSz: 10, notLast: true,
+		name: "split.bin", content: "aaaa", unpackedSz: new(int64(14)), packedSz: new(int64(10)), notLast: true,
 	}))
 	v2 := rar5Archive(t, false, rar5Member(t, memberSpec{
 		name: "split.bin", content: "bbbbbbbbbb", notFirst: true,

@@ -97,15 +97,15 @@ func storedMemberSplitAcrossVolumes(t testing.TB, name, content string) (v1, v2 
 	v1 = rar5Archive(t, false, rar5Member(t, memberSpec{
 		name:       name,
 		content:    first,
-		unpackedSz: int64(len(content)), // the WHOLE member's output size
-		packedSz:   int64(len(first)),   // this part's packed bytes
+		unpackedSz: new(int64(len(content))), // the WHOLE member's output size
+		packedSz:   new(int64(len(first))),   // this part's packed bytes
 		notLast:    true,
 	}))
 	v2 = rar5Archive(t, false, rar5Member(t, memberSpec{
 		name:       name,
 		content:    second,
-		unpackedSz: int64(len(content)),
-		packedSz:   int64(len(second)),
+		unpackedSz: new(int64(len(content))),
+		packedSz:   new(int64(len(second))),
 		notFirst:   true,
 		withCRC:    true, // whole-file CRC32 lives on the last part
 		crcOf:      content,
@@ -118,11 +118,11 @@ func storedMemberSplitAcrossVolumes(t testing.TB, name, content string) (v1, v2 
 func splitMemberThenSecondMember(t testing.TB, splitName, secondName string) (v1, v2 []byte) {
 	t.Helper()
 	v1 = rar5Archive(t, false, rar5Member(t, memberSpec{
-		name: splitName, content: "aaaa", unpackedSz: 8, packedSz: 4, notLast: true,
+		name: splitName, content: "aaaa", unpackedSz: new(int64(8)), packedSz: new(int64(4)), notLast: true,
 	}))
 	v2 = rar5Archive(t, false,
 		rar5Member(t, memberSpec{
-			name: splitName, content: "bbbb", unpackedSz: 8, packedSz: 4,
+			name: splitName, content: "bbbb", unpackedSz: new(int64(8)), packedSz: new(int64(4)),
 			notFirst: true, withCRC: true, crcOf: "aaaabbbb",
 		}),
 		rar5Member(t, memberSpec{name: secondName, content: "second", withCRC: true}),
@@ -182,7 +182,7 @@ func readFixtureVolume(t testing.TB, name string) []byte {
 func splitMemberThenMissingContinuation(t testing.TB, splitName, survivorName, survivorContent string) (v1, v2 []byte) {
 	t.Helper()
 	v1 = rar5Archive(t, false, rar5Member(t, memberSpec{
-		name: splitName, content: "aaaa", unpackedSz: 8, packedSz: 4, notLast: true,
+		name: splitName, content: "aaaa", unpackedSz: new(int64(8)), packedSz: new(int64(4)), notLast: true,
 	}))
 	v2 = rar5Archive(t, false, rar5Member(t, memberSpec{
 		name: survivorName, content: survivorContent, withCRC: true,
@@ -255,7 +255,7 @@ func TestMissingContinuationDoesNotConsumeNextMember(t *testing.T) {
 // the same header.
 func TestCorruptContinuationHeaderCostsOneMember(t *testing.T) {
 	v1 := rar5Archive(t, false, rar5Member(t, memberSpec{
-		name: "split.bin", content: "aaaa", unpackedSz: 8, packedSz: 4, notLast: true,
+		name: "split.bin", content: "aaaa", unpackedSz: new(int64(8)), packedSz: new(int64(4)), notLast: true,
 	}))
 	v2 := rar5Archive(t, false,
 		// badName fails parseFileHeader's name bounds check while the BLOCK
@@ -348,10 +348,10 @@ func TestSplicePreservesReadErrorAlongsideBytes(t *testing.T) {
 // point: it is the difference between "refused" and "gone".
 func TestNewMemberWithABadHeaderSurvivesTheContinuationScan(t *testing.T) {
 	v1 := rar5Archive(t, false, rar5Member(t, memberSpec{
-		name: "split.bin", content: "aaaa", unpackedSz: 8, packedSz: 4, notLast: true,
+		name: "split.bin", content: "aaaa", unpackedSz: new(int64(8)), packedSz: new(int64(4)), notLast: true,
 	}))
 	v2 := rar5Archive(t, false, rar5Member(t, memberSpec{
-		name: "refused.bin", content: "bbbb", badEncVersion: true,
+		name: "refused.bin", content: "bbbb", encRecord: encodeVint(99),
 	}))
 
 	r := NewReader(volumesOf(v1, v2))
@@ -388,7 +388,7 @@ func TestNewMemberWithABadHeaderSurvivesTheContinuationScan(t *testing.T) {
 // continuation switching method fed compressed bytes to a store reader.
 func TestContinuationForADifferentMemberIsRefused(t *testing.T) {
 	v1 := rar5Archive(t, false, rar5Member(t, memberSpec{
-		name: "split.bin", content: "aaaa", unpackedSz: 8, packedSz: 4, notLast: true,
+		name: "split.bin", content: "aaaa", unpackedSz: new(int64(8)), packedSz: new(int64(4)), notLast: true,
 	}))
 	v2 := rar5Archive(t, false, rar5Member(t, memberSpec{
 		name: "other.bin", content: "bbbb", notFirst: true,

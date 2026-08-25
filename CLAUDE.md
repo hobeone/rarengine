@@ -151,3 +151,16 @@ Carried forward — still a runtime guard, still needs a test:
 ## Integration Testing
 
 `integration_test.go` runs differential oracle tests against the system `unrar` binary. Test fixtures live in `testdata/`. The fuzz target for the Huffman decoder is in `huffman_test.go` (`FuzzHuffman`).
+
+Well-formed RAR5 framing comes from `testbuild_test.go` and nowhere else. Four files used to construct RAR5 headers from raw bytes, so a format-level correction had to be found and applied in each — the count in issue #35 was wrong twice before it landed. There is now one signature (`rar5Sig`), one block wrapper (`rar5Block`), one archive/end header pair, and one file-header layout (`buildRAR5Member`). `memberSpec` is the descriptive way to reach that layout; `rar5FileEntry`/`rar5EntryComp`/`rar5EntryFlags` are a positional face over the same function, kept because their call sites read better with three arguments than a struct literal. `rar5BlockDeclaring` is deliberately not a member builder: it declares payload with no entry behind it, which is the shape the payload-discard tests attack and which nothing derived from a file can express.
+
+What a fixture states locally is its *malformation*. `malformedArchiveHeaderStream` (`reader_test.go`) and the CRC-broken header in `skip_damaged_test.go`, along with the raw blocks in `volume_test.go`, write bad bytes at their own call site and reach for the shared primitives for everything around them — which is the right split: the bad bytes are what the test is about, and hoisting them would put a header nothing should ever produce next to the builders everything else uses. A fixture that finds itself restating *valid* framing has found a gap in `testbuild_test.go` instead.
+
+One rule governs `buildRAR5Member`: **it must not quietly rewrite what a fixture declared.** A test builder's whole job is expressing archives that should not exist, so a field read as a hint rather than a statement removes an attack from the suite's vocabulary — and does it silently, since the fixture still builds and the test still passes against whatever came out instead. Four fields broke this, none with a caller at the time, all found by reading rather than by a failure:
+
+  - `unpackedSz`/`packedSz` were `int64` with zero meaning "derive from content". A member declaring `UnpackedSize` 0 while carrying a payload IS the packed-remainder attack — its leftover bytes are what gets parsed as the next block header — and that declaration became the member's own length. They are `*int64` now: `new(int64(n))` states a size, `nil` asks for the default.
+  - The extra-area size vint was gated on `len(extra)` while the parser reads it from `headerFlagHasExtra`. A header claiming an extra area it does not carry — again, a thing an attacker writes — omitted the vint, and every field after it was read one position early.
+  - `crcOf` says WHAT to checksum, but required `withCRC` alongside it, so stating it alone wrote no checksum at all.
+  - `unpackVersion` was masked to six bits, so 64 came out as 0 — `unpackVersionRAR5` — and a fixture built to be refused for its version was emitted as an ordinary member that decoded cleanly. It panics now.
+
+`TestBuilderPreservesADeclaredZeroSize` and `TestBuilderDoesNotRewriteWhatAFixtureDeclared` pin all four, each mutation-checked against the behaviour it replaced.

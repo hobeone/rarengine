@@ -2,7 +2,6 @@ package rarengine
 
 import (
 	"bytes"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"hash/crc32"
@@ -168,8 +167,8 @@ func TestRefusedMemberWithTruncatedPayloadDoesNotFabricateNextEntry(t *testing.T
 	bomb := rar5Member(t, memberSpec{
 		name:       "bomb.bin",
 		content:    "",
-		unpackedSz: 2 << 30, // 2 GiB declared, so the bomb guard fires
-		packedSz:   declaredPacked,
+		unpackedSz: new(int64(2 << 30)), // 2 GiB declared, so the bomb guard fires
+		packedSz:   new(declaredPacked),
 	})
 	archive := rar5Archive(t, false, bomb)
 	stream := append(append([]byte{}, archive...), planted...)
@@ -207,186 +206,12 @@ func TestRefusedMemberWithTruncatedPayloadDoesNotFabricateNextEntry(t *testing.T
 	}
 }
 
-// memberSpec describes one stored (method 0) RAR5 member. The zero value is an
-// ordinary single-block member: notFirst and notLast are negative so that the
-// common case needs no fields set.
-type memberSpec struct {
-	name    string
-	content string
-
-	// unpackedSz and packedSz default to len(content). Set them to make the
-	// header lie about the size, which is how the bomb and truncation
-	// fixtures are built.
-	unpackedSz int64
-	packedSz   int64
-
-	solid   bool
-	isDir   bool
-	withCRC bool
-
-	// unpackVersion sets the compression-algorithm version field. Zero is
-	// RAR 5.0, the only version this library decodes; a nonzero value builds
-	// the RAR7-shaped member Reader.dispatch must refuse.
-	unpackVersion uint64
-
-	// crcOf overrides what withCRC checksums, defaulting to content. A
-	// multi-volume member's last part carries the WHOLE file's CRC32, not
-	// just that part's own bytes, so a split fixture must set this to the
-	// full reassembled content rather than the tail it actually carries.
-	crcOf string
-
-	notFirst bool // clears FirstBlock: this is a continuation block
-	notLast  bool // clears LastBlock: the member continues in the next volume
-
-	// badName declares a longer name than the header carries, so
-	// parseFileHeader fails its bounds check while the BLOCK header stays
-	// CRC-valid. That is the case the traversal must skip rather than stop on.
-	badName bool
-
-	// badEncVersion attaches a file-encryption extra record declaring an
-	// unsupported version. It fails LATER than badName does -- inside
-	// parseExtraRecords, after the name has been decoded -- which is the
-	// only failure that yields a header alongside its error, so the member
-	// can be refused by name instead of vanishing from the listing.
-	badEncVersion bool
-
-	// encRecord attaches a raw file-encryption extra record body (everything
-	// after the record-type vint). Unlike badEncVersion, which builds one
-	// specific malformed record, this lets a test state the encryption
-	// metadata it needs -- notably an encrypted member with no check value,
-	// which rar never produces but the format permits.
-	encRecord []byte
-}
-
-// rar5Member builds one RAR5 file block followed by its payload.
-func rar5Member(t testing.TB, s memberSpec) []byte {
-	t.Helper()
-	content := []byte(s.content)
-
-	unpacked := s.unpackedSz
-	if unpacked == 0 {
-		unpacked = int64(len(content))
-	}
-	packed := s.packedSz
-	if packed == 0 {
-		packed = int64(len(content))
-	}
-
-	var fileFlags uint64
-	if s.isDir {
-		fileFlags |= fileFlagIsDir
-	}
-	if s.withCRC {
-		fileFlags |= fileFlagHasCRC32
-	}
-
-	var f bytes.Buffer
-	f.Write(encodeVint(fileFlags))
-	f.Write(encodeVint(uint64(unpacked)))
-	f.Write(encodeVint(0)) // attributes
-	if s.withCRC {
-		crcContent := content
-		if s.crcOf != "" {
-			crcContent = []byte(s.crcOf)
-		}
-		var crcBuf [4]byte
-		binary.LittleEndian.PutUint32(crcBuf[:], crc32.ChecksumIEEE(crcContent))
-		f.Write(crcBuf[:])
-	}
-	// Compression flags: method lives in bits 7..9, so zero is store (method
-	// 0). fileCompSolid is bit 6, and the unpack version is bits 0..5.
-	var compFlags uint64
-	if s.solid {
-		compFlags |= fileCompSolid
-	}
-	// Masked with a literal, not fileCompVersion: a test that builds its
-	// input with the same constant the parser reads it with moves whenever
-	// that constant is wrong, and agrees with it either way.
-	compFlags |= s.unpackVersion & 0x3f
-	f.Write(encodeVint(compFlags))
-	f.Write(encodeVint(0)) // host OS
-
-	name := []byte(s.name)
-	if s.badName {
-		f.Write(encodeVint(uint64(len(name) + 16)))
-	} else {
-		f.Write(encodeVint(uint64(len(name))))
-	}
-	f.Write(name)
-
-	blockFlags := uint64(headerFlagHasData)
-	if s.notFirst {
-		blockFlags |= headerFlagDataNotFirst
-	}
-	if s.notLast {
-		blockFlags |= headerFlagDataNotLast
-	}
-
-	// The extra area sits at the END of the header payload, and its length is
-	// declared before the data size -- so it has to be built before the block
-	// header fields are written.
-	var extra bytes.Buffer
-	if s.badEncVersion {
-		var rec bytes.Buffer
-		rec.Write(encodeVint(1))  // record type: encryption
-		rec.Write(encodeVint(99)) // version: not 0, so unsupported
-		extra.Write(encodeVint(uint64(rec.Len())))
-		extra.Write(rec.Bytes())
-		blockFlags |= headerFlagHasExtra
-	}
-	if s.encRecord != nil {
-		var rec bytes.Buffer
-		rec.Write(encodeVint(1)) // record type: encryption
-		rec.Write(s.encRecord)
-		extra.Write(encodeVint(uint64(rec.Len())))
-		extra.Write(rec.Bytes())
-		blockFlags |= headerFlagHasExtra
-	}
-
-	var p bytes.Buffer
-	p.Write(encodeVint(headerTypeFile))
-	p.Write(encodeVint(blockFlags))
-	if extra.Len() > 0 {
-		p.Write(encodeVint(uint64(extra.Len())))
-	}
-	p.Write(encodeVint(uint64(packed)))
-	p.Write(f.Bytes())
-	p.Write(extra.Bytes())
-
-	var out bytes.Buffer
-	out.Write(rar5Block(p.Bytes()))
-	out.Write(content)
-	return out.Bytes()
-}
-
-// rar5Archive concatenates the RAR5 signature, an archive header, and each
-// member, producing one volume's bytes.
-func rar5Archive(t testing.TB, solid bool, members ...[]byte) []byte {
-	t.Helper()
-	var arc bytes.Buffer
-	arc.Write(encodeVint(headerTypeArchive))
-	arc.Write(encodeVint(0))
-	var arcFlags uint64
-	if solid {
-		arcFlags |= arcFlagSolid
-	}
-	arc.Write(encodeVint(arcFlags))
-
-	var out bytes.Buffer
-	out.Write([]byte{0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x01, 0x00})
-	out.Write(rar5Block(arc.Bytes()))
-	for _, m := range members {
-		out.Write(m)
-	}
-	return out.Bytes()
-}
-
 func rarBombArchive(t testing.TB) []byte {
 	return rar5Archive(t, false, rar5Member(t, memberSpec{
 		name:       "bomb.bin",
 		content:    "x",
-		unpackedSz: 2 << 30, // 2 GiB declared
-		packedSz:   1,       // from 1 byte packed
+		unpackedSz: new(int64(2 << 30)), // 2 GiB declared
+		packedSz:   new(int64(1)),       // from 1 byte packed
 	}))
 }
 
@@ -400,7 +225,7 @@ func archiveWithBadFileHeaderThen(t testing.TB, name, content string) []byte {
 func truncatedThenSolidArchive(t testing.TB) []byte {
 	return rar5Archive(t, true,
 		// Declares 100 bytes of output but carries 5, so it ends short.
-		rar5Member(t, memberSpec{name: "short.bin", content: "short", unpackedSz: 100}),
+		rar5Member(t, memberSpec{name: "short.bin", content: "short", unpackedSz: new(int64(100))}),
 		rar5Member(t, memberSpec{name: "solid.bin", content: "after", solid: true, withCRC: true}),
 	)
 }
@@ -419,7 +244,7 @@ func malformedArchiveHeaderStream(t testing.TB, plantedName string) []byte {
 	p.Write(encodeVint(arcFlagVolNum))
 
 	var archive bytes.Buffer
-	archive.Write([]byte{0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x01, 0x00})
+	archive.Write(rar5Signature)
 	archive.Write(rar5Block(p.Bytes()))
 
 	planted := rar5Member(t, memberSpec{name: plantedName, content: "payload", withCRC: true})
@@ -724,7 +549,7 @@ func TestResetSeversARetainedEntry(t *testing.T) {
 // too late, which is precisely the fabrication the latch exists to stop.
 func TestFatalLatchedMidCallOutrunsNoEntry(t *testing.T) {
 	v1 := rar5Archive(t, true, rar5Member(t, memberSpec{
-		name: "solid.bin", content: "aaaa", unpackedSz: 8, packedSz: 4,
+		name: "solid.bin", content: "aaaa", unpackedSz: new(int64(8)), packedSz: new(int64(4)),
 		solid: true, notLast: true,
 	}))
 	v2 := malformedArchiveHeaderStream(t, "SHOULD_NEVER_BE_REACHABLE.txt")
@@ -772,7 +597,7 @@ func TestFatalLatchedMidCallOutrunsNoEntry(t *testing.T) {
 // volume from the second archive.
 func TestResetSeversAMemberThatWouldReachForTheNextVolume(t *testing.T) {
 	v1 := rar5Archive(t, false, rar5Member(t, memberSpec{
-		name: "split.bin", content: "aaaa", unpackedSz: 8, packedSz: 4, notLast: true,
+		name: "split.bin", content: "aaaa", unpackedSz: new(int64(8)), packedSz: new(int64(4)), notLast: true,
 	}))
 	v2 := rar5Archive(t, false, rar5Member(t, memberSpec{
 		name: "split.bin", content: "bbbb", notFirst: true, withCRC: true, crcOf: "aaaabbbb",
@@ -878,11 +703,11 @@ func TestArchiveHeaderSolidFlagReachesTheReader(t *testing.T) {
 		half := len(content) / 2
 		v1 := rar5Archive(t, false, rar5Member(t, memberSpec{
 			name: "split.bin", content: content[:half],
-			unpackedSz: int64(len(content)), packedSz: int64(half), notLast: true,
+			unpackedSz: new(int64(len(content))), packedSz: new(int64(half)), notLast: true,
 		}))
 		v2 := rar5Archive(t, true, rar5Member(t, memberSpec{
 			name: "split.bin", content: content[half:],
-			unpackedSz: int64(len(content)), packedSz: int64(len(content) - half),
+			unpackedSz: new(int64(len(content))), packedSz: new(int64(len(content) - half)),
 			notFirst: true, withCRC: true, crcOf: content,
 		}))
 

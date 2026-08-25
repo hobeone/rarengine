@@ -35,33 +35,6 @@ import (
 // switch case's bookkeeping, now check the one property that actually
 // matters.
 
-// rar5BlockDeclaring builds a RAR5 block of the given type declaring dataSize
-// bytes of payload, with extra appended to the header's own fields.
-func rar5BlockDeclaring(blockType uint64, dataSize int, extra []byte, withSig bool) []byte {
-	var p bytes.Buffer
-	p.Write(encodeVint(blockType))
-	p.Write(encodeVint(headerFlagHasData))
-	p.Write(encodeVint(uint64(dataSize)))
-	p.Write(extra)
-
-	var out bytes.Buffer
-	if withSig {
-		out.Write([]byte{0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x01, 0x00})
-	}
-	out.Write(rar5Block(p.Bytes()))
-	return out.Bytes()
-}
-
-// volumesOf returns a closed channel carrying each part as a volume.
-func volumesOf(parts ...[]byte) <-chan io.ReadCloser {
-	ch := make(chan io.ReadCloser, len(parts))
-	for _, p := range parts {
-		ch <- &mockReadCloser{bytes.NewReader(p)}
-	}
-	close(ch)
-	return ch
-}
-
 // keepReadableVolumes is volumesOf for the terminator tests, named for the
 // property they depend on: mockReadCloser's Close does nothing, so its bytes
 // stay readable afterwards -- which is what io.NopCloser gives a caller and

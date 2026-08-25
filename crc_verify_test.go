@@ -2,7 +2,6 @@ package rarengine
 
 import (
 	"bytes"
-	"encoding/binary"
 	"errors"
 	"hash/crc32"
 	"io"
@@ -10,11 +9,10 @@ import (
 )
 
 // buildSingleFileRAR5Archive constructs a minimal single-volume, single-file,
-// store-method (uncompressed) RAR5 archive in memory, mirroring the
-// hand-rolled construction in TestStreamDecompressor_TarStyle. The file
-// header's CRC32 field is set to crc32Value with the fileFlagHasCRC32 flag,
-// letting callers deliberately mismatch it against content to exercise the
-// verification path without needing a corrupted binary fixture.
+// store-method (uncompressed) RAR5 archive in memory. The file header's CRC32
+// field is set to crc32Value with the fileFlagHasCRC32 flag, letting callers
+// deliberately mismatch it against content to exercise the verification path
+// without needing a corrupted binary fixture.
 func buildSingleFileRAR5Archive(t *testing.T, name string, content []byte, crc32Value uint32) *bytes.Buffer {
 	t.Helper()
 	return buildSingleFileRAR5ArchiveFlags(t, name, content, crc32Value, 0)
@@ -23,84 +21,24 @@ func buildSingleFileRAR5Archive(t *testing.T, name string, content []byte, crc32
 // buildSingleFileRAR5ArchiveFlags is buildSingleFileRAR5Archive with extra
 // file-header flags OR'd in, for exercising flags whose handling is what is
 // under test (e.g. fileFlagUnpSizeUnknown).
+//
+// It used to write the signature, all three block headers and the file-header
+// field order itself -- seventy lines that had to be corrected in step with
+// three other copies. It now states only what is peculiar to it: one member,
+// between an archive header and an end header.
 func buildSingleFileRAR5ArchiveFlags(t *testing.T, name string, content []byte, crc32Value uint32, extraFileFlags uint64) *bytes.Buffer {
 	t.Helper()
-
-	// 1. Archive Header
-	arcFlagsV := encodeVint(arcFlagMultiVol)
-	var arcPayload bytes.Buffer
-	arcPayload.Write(encodeVint(headerTypeArchive))
-	arcPayload.Write(encodeVint(0))
-	arcPayload.Write(arcFlagsV)
-
-	arcSizeV := encodeVint(uint64(arcPayload.Len()))
-	var arcHashed bytes.Buffer
-	arcHashed.Write(arcSizeV)
-	arcHashed.Write(arcPayload.Bytes())
-	arcCrc := crc32.ChecksumIEEE(arcHashed.Bytes())
-
-	var volBuf bytes.Buffer
-	volBuf.Write([]byte{0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x01, 0x00}) // RAR5 magic
-	if err := binary.Write(&volBuf, binary.LittleEndian, arcCrc); err != nil {
-		t.Fatal(err)
-	}
-	volBuf.Write(arcHashed.Bytes())
-
-	// 2. File Header, with fileFlagHasCRC32 set and an explicit (possibly
-	// wrong) CRC32 value, store method (compFlags=0 → Method=0).
-	var filePayload bytes.Buffer
-	filePayload.Write(encodeVint(fileFlagHasCRC32 | extraFileFlags)) // flags
-	filePayload.Write(encodeVint(uint64(len(content))))              // unpacked size
-	filePayload.Write(encodeVint(0))                                 // attributes
-	var crcBuf [4]byte
-	binary.LittleEndian.PutUint32(crcBuf[:], crc32Value)
-	filePayload.Write(crcBuf[:])     // CRC32 (gated by FileFlagHasCRC32)
-	filePayload.Write(encodeVint(0)) // compFlags (Method=0, not solid)
-	filePayload.Write(encodeVint(1)) // hostOS
-	filePayload.Write(encodeVint(uint64(len(name))))
-	filePayload.WriteString(name)
-
-	var headerPayload bytes.Buffer
-	headerPayload.Write(encodeVint(headerTypeFile))
-	headerPayload.Write(encodeVint(headerFlagHasData))
-	headerPayload.Write(encodeVint(uint64(len(content))))
-	headerPayload.Write(filePayload.Bytes())
-
-	fileSizeV := encodeVint(uint64(headerPayload.Len()))
-	var fileHashed bytes.Buffer
-	fileHashed.Write(fileSizeV)
-	fileHashed.Write(headerPayload.Bytes())
-	fileCrc := crc32.ChecksumIEEE(fileHashed.Bytes())
-
-	if err := binary.Write(&volBuf, binary.LittleEndian, fileCrc); err != nil {
-		t.Fatal(err)
-	}
-	volBuf.Write(fileHashed.Bytes())
-	volBuf.Write(content)
-
-	// 3. End Header
-	var endPayload bytes.Buffer
-	endPayload.Write(encodeVint(headerTypeEnd))
-	endPayload.Write(encodeVint(0))
-	endSizeV := encodeVint(uint64(endPayload.Len()))
-	var endHashed bytes.Buffer
-	endHashed.Write(endSizeV)
-	endHashed.Write(endPayload.Bytes())
-	endCrc := crc32.ChecksumIEEE(endHashed.Bytes())
-
-	if err := binary.Write(&volBuf, binary.LittleEndian, endCrc); err != nil {
-		t.Fatal(err)
-	}
-	volBuf.Write(endHashed.Bytes())
-
-	return &volBuf
-}
-
-func newSingleVolumeChan(buf *bytes.Buffer) <-chan io.ReadCloser {
-	volumes := make(chan io.ReadCloser, 1)
-	volumes <- &mockReadCloser{buf}
-	close(volumes)
-	return volumes
+	var buf bytes.Buffer
+	buf.Write(rar5ArchiveHeader())
+	buf.Write(rar5Member(t, memberSpec{
+		name:           name,
+		content:        string(content),
+		rawCRC:         &crc32Value,
+		hostOS:         1,
+		extraFileFlags: extraFileFlags,
+	}))
+	buf.Write(rar5EndHeader())
+	return &buf
 }
 
 // readAllAndEOFErr reads e to completion, returning the first non-io.EOF
@@ -130,7 +68,7 @@ func TestCRCVerification_DefaultDetectsMismatch(t *testing.T) {
 	wrongCRC := crc32.ChecksumIEEE(content) ^ 0xFFFFFFFF // deliberately wrong
 	buf := buildSingleFileRAR5Archive(t, "hello.txt", content, wrongCRC)
 
-	r := NewReader(newSingleVolumeChan(buf))
+	r := NewReader(volumesOf(buf.Bytes()))
 	e, err := r.NextEntry()
 	if err != nil {
 		t.Fatalf("NextEntry() failed: %v", err)
@@ -149,7 +87,7 @@ func TestCRCVerification_DefaultHappyPath(t *testing.T) {
 	correctCRC := crc32.ChecksumIEEE(content)
 	buf := buildSingleFileRAR5Archive(t, "hello.txt", content, correctCRC)
 
-	r := NewReader(newSingleVolumeChan(buf))
+	r := NewReader(volumesOf(buf.Bytes()))
 	e, err := r.NextEntry()
 	if err != nil {
 		t.Fatalf("NextEntry() failed: %v", err)
@@ -169,7 +107,7 @@ func TestCRCVerification_UnconditionalOnMismatch(t *testing.T) {
 	wrongCRC := crc32.ChecksumIEEE(content) ^ 0xFFFFFFFF
 	buf := buildSingleFileRAR5Archive(t, "hello.txt", content, wrongCRC)
 
-	r := NewReader(newSingleVolumeChan(buf))
+	r := NewReader(volumesOf(buf.Bytes()))
 	e, err := r.NextEntry()
 	if err != nil {
 		t.Fatalf("NextEntry() failed: %v", err)
@@ -185,28 +123,13 @@ func TestCRCVerification_UnconditionalOnMismatch(t *testing.T) {
 // fileFlagUnpSizeUnknown, the flag parseFileHeader refuses because it makes
 // the declared size -- and so truncation detection -- meaningless.
 func rar5FileEntryUnknownSize(name string, content []byte, crc32Value uint32) []byte {
-	var fp bytes.Buffer
-	fp.Write(encodeVint(fileFlagHasCRC32 | fileFlagUnpSizeUnknown))
-	fp.Write(encodeVint(uint64(len(content))))
-	fp.Write(encodeVint(0))
-	var crcBuf [4]byte
-	binary.LittleEndian.PutUint32(crcBuf[:], crc32Value)
-	fp.Write(crcBuf[:])
-	fp.Write(encodeVint(0))
-	fp.Write(encodeVint(1))
-	fp.Write(encodeVint(uint64(len(name))))
-	fp.WriteString(name)
-
-	var hp bytes.Buffer
-	hp.Write(encodeVint(headerTypeFile))
-	hp.Write(encodeVint(headerFlagHasData))
-	hp.Write(encodeVint(uint64(len(content))))
-	hp.Write(fp.Bytes())
-
-	var out bytes.Buffer
-	out.Write(rar5Block(hp.Bytes()))
-	out.Write(content)
-	return out.Bytes()
+	return buildRAR5Member(memberSpec{
+		name:           name,
+		content:        string(content),
+		rawCRC:         &crc32Value,
+		hostOS:         1,
+		extraFileFlags: fileFlagUnpSizeUnknown,
+	})
 }
 
 // TestUnknownUnpackedSizeIsRefusedByName checks that a member carrying
