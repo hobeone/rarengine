@@ -77,6 +77,42 @@ block header would not parse, the format is unsupported. A per-member verdict
 member failing does not end the archive: `NextEntry` is still safe to call
 again to reach the members behind it.
 
+### Cancellation and cleanup
+
+`Close` releases a `Reader`: it closes the volume currently open, closes every
+volume still queued on the channel, and makes later calls return
+`ErrReaderClosed`. It is idempotent.
+
+It is also the **one** method safe to call from another goroutine while a read
+is in progress — everything else needs the caller's own serialisation. That
+asymmetry is deliberate: a `Reader` waiting for a volume that will never
+arrive cannot rescue itself, since the only other thing that ends that wait is
+the producer closing the channel, and a stalled producer is exactly when you
+want to give up.
+
+That is how a `context.Context` reaches this library, and why nothing here
+takes one:
+
+```go
+r := rarengine.NewReader(volumes)
+defer r.Close()
+context.AfterFunc(ctx, func() { r.Close() })
+```
+
+`Entry.Read` reaches the same volume receive through the multi-volume splice
+and has to satisfy `io.Reader`, so a context parameter could never have
+covered it — the long operation would have stayed uncancellable while the
+short one gained the ceremony.
+
+One limit: `Close` synchronises the volume pointer, not the volume's contents.
+Closing while another goroutine is mid-read of a payload races on the aliased
+body, and making that safe would mean a lock per read. The two stalls have
+different cures — a stalled *volume channel* is what `Close` is for, and a
+stalled *underlying stream* is cured by closing that stream, which you own.
+
+After `Close`, `Reset` revives the reader for another archive: `Close` ends an
+archive, not the 32 MB window.
+
 ### High-Throughput Reuse (Zero-Allocation Reset)
 
 ```go
