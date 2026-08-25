@@ -274,7 +274,7 @@ func TestRealRAR7ArchiveIsRefused(t *testing.T) {
 // continuation's bytes with a nil error.
 func TestContinuationChangingUnpackVersionIsRefused(t *testing.T) {
 	v1 := rar5Archive(t, false, rar5Member(t, memberSpec{
-		name: "split.bin", content: "aaaa", unpackedSz: 8, packedSz: 4, notLast: true,
+		name: "split.bin", content: "aaaa", unpackedSz: new(int64(8)), packedSz: new(int64(4)), notLast: true,
 	}))
 	v2 := rar5Archive(t, false, rar5Member(t, memberSpec{
 		name: "split.bin", content: "bbbb", notFirst: true, unpackVersion: 1,

@@ -167,8 +167,8 @@ func TestRefusedMemberWithTruncatedPayloadDoesNotFabricateNextEntry(t *testing.T
 	bomb := rar5Member(t, memberSpec{
 		name:       "bomb.bin",
 		content:    "",
-		unpackedSz: 2 << 30, // 2 GiB declared, so the bomb guard fires
-		packedSz:   declaredPacked,
+		unpackedSz: new(int64(2 << 30)), // 2 GiB declared, so the bomb guard fires
+		packedSz:   new(declaredPacked),
 	})
 	archive := rar5Archive(t, false, bomb)
 	stream := append(append([]byte{}, archive...), planted...)
@@ -210,8 +210,8 @@ func rarBombArchive(t testing.TB) []byte {
 	return rar5Archive(t, false, rar5Member(t, memberSpec{
 		name:       "bomb.bin",
 		content:    "x",
-		unpackedSz: 2 << 30, // 2 GiB declared
-		packedSz:   1,       // from 1 byte packed
+		unpackedSz: new(int64(2 << 30)), // 2 GiB declared
+		packedSz:   new(int64(1)),       // from 1 byte packed
 	}))
 }
 
@@ -225,7 +225,7 @@ func archiveWithBadFileHeaderThen(t testing.TB, name, content string) []byte {
 func truncatedThenSolidArchive(t testing.TB) []byte {
 	return rar5Archive(t, true,
 		// Declares 100 bytes of output but carries 5, so it ends short.
-		rar5Member(t, memberSpec{name: "short.bin", content: "short", unpackedSz: 100}),
+		rar5Member(t, memberSpec{name: "short.bin", content: "short", unpackedSz: new(int64(100))}),
 		rar5Member(t, memberSpec{name: "solid.bin", content: "after", solid: true, withCRC: true}),
 	)
 }
@@ -549,7 +549,7 @@ func TestResetSeversARetainedEntry(t *testing.T) {
 // too late, which is precisely the fabrication the latch exists to stop.
 func TestFatalLatchedMidCallOutrunsNoEntry(t *testing.T) {
 	v1 := rar5Archive(t, true, rar5Member(t, memberSpec{
-		name: "solid.bin", content: "aaaa", unpackedSz: 8, packedSz: 4,
+		name: "solid.bin", content: "aaaa", unpackedSz: new(int64(8)), packedSz: new(int64(4)),
 		solid: true, notLast: true,
 	}))
 	v2 := malformedArchiveHeaderStream(t, "SHOULD_NEVER_BE_REACHABLE.txt")
@@ -597,7 +597,7 @@ func TestFatalLatchedMidCallOutrunsNoEntry(t *testing.T) {
 // volume from the second archive.
 func TestResetSeversAMemberThatWouldReachForTheNextVolume(t *testing.T) {
 	v1 := rar5Archive(t, false, rar5Member(t, memberSpec{
-		name: "split.bin", content: "aaaa", unpackedSz: 8, packedSz: 4, notLast: true,
+		name: "split.bin", content: "aaaa", unpackedSz: new(int64(8)), packedSz: new(int64(4)), notLast: true,
 	}))
 	v2 := rar5Archive(t, false, rar5Member(t, memberSpec{
 		name: "split.bin", content: "bbbb", notFirst: true, withCRC: true, crcOf: "aaaabbbb",
@@ -703,11 +703,11 @@ func TestArchiveHeaderSolidFlagReachesTheReader(t *testing.T) {
 		half := len(content) / 2
 		v1 := rar5Archive(t, false, rar5Member(t, memberSpec{
 			name: "split.bin", content: content[:half],
-			unpackedSz: int64(len(content)), packedSz: int64(half), notLast: true,
+			unpackedSz: new(int64(len(content))), packedSz: new(int64(half)), notLast: true,
 		}))
 		v2 := rar5Archive(t, true, rar5Member(t, memberSpec{
 			name: "split.bin", content: content[half:],
-			unpackedSz: int64(len(content)), packedSz: int64(len(content) - half),
+			unpackedSz: new(int64(len(content))), packedSz: new(int64(len(content) - half)),
 			notFirst: true, withCRC: true, crcOf: content,
 		}))
 

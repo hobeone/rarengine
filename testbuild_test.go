@@ -98,14 +98,22 @@ type memberSpec struct {
 	name    string
 	content string
 
-	// unpackedSz and packedSz default to len(content). Set them to make the
-	// header lie about the size, which is how the bomb and truncation
-	// fixtures are built. They are independent of each other and of the
-	// payload actually written, so a block whose declared payload outlives
-	// its declared content -- the fabricated-header attack -- is expressible
-	// here.
-	unpackedSz int64
-	packedSz   int64
+	// unpackedSz and packedSz default to len(content) when nil. Set them to
+	// make the header lie about the size, which is how the bomb and
+	// truncation fixtures are built. They are independent of each other and
+	// of the payload actually written, so a block whose declared payload
+	// outlives its declared content -- the fabricated-header attack -- is
+	// expressible here.
+	//
+	// Pointers rather than a zero-means-absent int64, because ZERO IS A
+	// VALUE these fixtures need: a member declaring UnpackedSize 0 while
+	// carrying a payload is precisely the shape whose leftover bytes get
+	// parsed as the next block header. Read as "absent", that declaration
+	// was silently rewritten to len(content) and the attack stopped being
+	// expressible -- by the one builder that had always been able to state
+	// it. Write new(int64(n)); nil asks for the default.
+	unpackedSz *int64
+	packedSz   *int64
 
 	solid   bool
 	isDir   bool
@@ -177,13 +185,13 @@ func rar5Member(t testing.TB, s memberSpec) []byte {
 func buildRAR5Member(s memberSpec) []byte {
 	content := []byte(s.content)
 
-	unpacked := s.unpackedSz
-	if unpacked == 0 {
-		unpacked = int64(len(content))
+	unpacked := int64(len(content))
+	if s.unpackedSz != nil {
+		unpacked = *s.unpackedSz
 	}
-	packed := s.packedSz
-	if packed == 0 {
-		packed = int64(len(content))
+	packed := int64(len(content))
+	if s.packedSz != nil {
+		packed = *s.packedSz
 	}
 
 	hasCRC := s.withCRC || s.rawCRC != nil
@@ -325,7 +333,8 @@ func rar5EntryFlags(name string, compFlags uint64, blockFlags uint64, unpackedSi
 	return buildRAR5Member(memberSpec{
 		name:            name,
 		content:         string(payload),
-		unpackedSz:      int64(unpackedSize),
+		unpackedSz:      new(int64(unpackedSize)),
+		packedSz:        new(int64(len(payload))),
 		rawCRC:          &declaredCRC,
 		hostOS:          1,
 		extraCompFlags:  compFlags,
@@ -341,4 +350,69 @@ func volumesOf(parts ...[]byte) <-chan io.ReadCloser {
 	}
 	close(ch)
 	return ch
+}
+
+// A declared size of zero must reach the header, from both faces.
+//
+// Zero used to mean "absent, use len(content)", so a member declaring
+// UnpackedSize 0 while carrying a payload -- the shape whose leftover packed
+// bytes are what gets parsed as the next block header -- was silently rewritten
+// into a member declaring its own length, and the packed-remainder fixtures
+// stopped being expressible by the builder that had always been able to state
+// them. No fixture passed zero at the time, so nothing failed; the capability
+// had simply gone.
+//
+// Read back through the parser rather than compared as bytes, because what
+// matters is what the header says once something reads it.
+func TestBuilderPreservesADeclaredZeroSize(t *testing.T) {
+	parse := func(t *testing.T, block []byte) *FileHeader {
+		t.Helper()
+		v, err := openVolume(&mockReadCloser{
+			bytes.NewReader(append(append([]byte{}, rar5Sig...), block...)),
+		})
+		if err != nil {
+			t.Fatalf("openVolume: %v", err)
+		}
+		h, err := v.next()
+		if err != nil {
+			t.Fatalf("next: %v", err)
+		}
+		fh, err := parseFileHeader(h)
+		if err != nil {
+			t.Fatalf("parseFileHeader: %v", err)
+		}
+		return fh
+	}
+
+	t.Run("positional", func(t *testing.T) {
+		fh := parse(t, rar5FileEntry("zero.bin", 0, 0xabcd, []byte("carried anyway")))
+		if fh.UnpackedSize != 0 {
+			t.Fatalf("UnpackedSize = %d, want the declared 0", fh.UnpackedSize)
+		}
+		if fh.PackedSize != int64(len("carried anyway")) {
+			t.Fatalf("PackedSize = %d, want %d", fh.PackedSize, len("carried anyway"))
+		}
+	})
+
+	t.Run("memberSpec", func(t *testing.T) {
+		fh := parse(t, rar5Member(t, memberSpec{
+			name: "zero.bin", content: "carried anyway",
+			unpackedSz: new(int64(0)), packedSz: new(int64(0)),
+		}))
+		if fh.UnpackedSize != 0 {
+			t.Fatalf("UnpackedSize = %d, want the declared 0", fh.UnpackedSize)
+		}
+		if fh.PackedSize != 0 {
+			t.Fatalf("PackedSize = %d, want the declared 0", fh.PackedSize)
+		}
+	})
+
+	// And the default still derives from content when nothing is declared.
+	t.Run("absent", func(t *testing.T) {
+		fh := parse(t, rar5Member(t, memberSpec{name: "d.bin", content: "eight!!!"}))
+		if fh.UnpackedSize != 8 || fh.PackedSize != 8 {
+			t.Fatalf("sizes = %d/%d, want 8/8 derived from content",
+				fh.UnpackedSize, fh.PackedSize)
+		}
+	})
 }

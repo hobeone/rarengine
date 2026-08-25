@@ -60,7 +60,7 @@ func TestCloseUnblocksAMemberWaitingForItsContinuation(t *testing.T) {
 	// One volume holding a member that says it continues, and a channel that
 	// never delivers the next part.
 	v1 := rar5Archive(t, false, rar5Member(t, memberSpec{
-		name: "split.bin", content: "aaaa", unpackedSz: 8, packedSz: 4, notLast: true,
+		name: "split.bin", content: "aaaa", unpackedSz: new(int64(8)), packedSz: new(int64(4)), notLast: true,
 	}))
 	synctest.Test(t, func(t *testing.T) {
 		// Inside the bubble, as above.

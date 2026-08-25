@@ -539,8 +539,8 @@ func TestBombRatioSurvivesAnAbsurdPackedSize(t *testing.T) {
 	member := rar5Member(t, memberSpec{
 		name:       "honest.bin",
 		content:    "payload",
-		unpackedSz: 2 << 20,                // over the 1 MB floor the guard applies above
-		packedSz:   math.MaxInt64/1000 + 1, // one past where the product wraps
+		unpackedSz: new(int64(2 << 20)),                // over the 1 MB floor the guard applies above
+		packedSz:   new(int64(math.MaxInt64/1000 + 1)), // one past where the product wraps
 	})
 	r := NewReader(volumesOf(rar5Archive(t, false, member)))
 
