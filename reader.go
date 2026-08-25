@@ -392,9 +392,131 @@ func (r *Reader) severActive() {
 //
 // A nil Entry with a nil error means the block held nothing the caller wants
 // and scanning continues. Nothing here discards payload: volume.next() does
-// that on the way to the following header, unconditionally, whether or not any
-// case below looked at the block.
+// that on the way to the following header, unconditionally, whether or not
+// anything below looked at the block.
+//
+// Only the file case lives here. Every other block type means the same thing
+// to this path as it does to the splice, so it is settled by
+// handleNonFileBlock rather than restated -- see that function for why that
+// is not a stylistic preference.
 func (r *Reader) dispatch(h *blockHeader) (*Entry, error) {
+	if h.Type != headerTypeFile {
+		// Returned unlatched: NextEntry latches every error this scan loop
+		// reports. A volume closed by an end header leaves r.vol nil, which
+		// nextEntry's loop reads at the top of its next iteration as "open
+		// the next one".
+		return nil, r.handleNonFileBlock(h)
+	}
+	fh, err := parseFileHeader(h)
+	if err != nil {
+		// A member whose identity survived the failure is refused by NAME,
+		// so the caller learns the archive held something it could not
+		// read. One that failed before its name was decoded has nothing to
+		// report and is skipped as before. Either way volume.next() drops
+		// the block's declared payload on the way to the next header.
+		if fh != nil && fh.FirstBlock {
+			r.win.MarkIncomplete()
+			return terminalEntry(fh, err), nil
+		}
+		// Damage is recorded from what happened to the file, never from
+		// what the caller is told about it. A member skipped here is one
+		// whose name was never decoded, so nothing can be reported -- but
+		// it still contributed no bytes, and a solid successor's
+		// back-references assume otherwise. Marking only the named path
+		// left exactly the unreportable failures decoding a successor
+		// against history nobody wrote.
+		if fh == nil {
+			r.win.MarkIncomplete()
+		}
+		return nil, nil
+	}
+	// A continuation block belongs to a member already announced. Reaching
+	// one here means that member was abandoned, so it is skipped like any
+	// other unclaimed block.
+	if !fh.FirstBlock {
+		return nil, nil
+	}
+	// Refused before the bomb ratio and before BeginFile: a member whose
+	// compression algorithm this library does not implement cannot be
+	// reasoned about at all, so nothing downstream should touch the
+	// window on its behalf.
+	//
+	// RAR 7.0 raised this field and changed nothing a traversal can see
+	// from outside a file header -- the signature, block framing and vint
+	// encoding are identical -- so detectVersion cannot separate them and
+	// every member with a nonzero method was handed to the RAR5 decoder.
+	// That produced garbage rather than an error, and the CRC32 caught it
+	// only after the whole member had been decompressed and delivered.
+	//
+	// ErrUnsupportedFormat rather than a new sentinel: it already means
+	// "an archive this library cannot decode", which is exactly this, and
+	// a caller can do nothing different for a RAR7 member than for a RAR3
+	// signature. The version is named in the message.
+	if fh.UnpackVersion != unpackVersionRAR5 {
+		r.win.MarkIncomplete()
+		return terminalEntry(fh, fmt.Errorf(
+			"%w: file %q declares unpack version %d, this library decodes "+
+				"version %d (RAR 5.0)", ErrUnsupportedFormat, fh.Name,
+			fh.UnpackVersion, unpackVersionRAR5)), nil
+	}
+	// The multiplication is guarded, not replaced by a division: a
+	// division floors, so it would let a member declaring exactly one
+	// byte past the ratio through, and this guard must not be weakened.
+	// A packed size above MaxInt64/1000 cannot reach the ratio at all --
+	// no unpacked size fits -- so it is not a bomb, whereas the
+	// unguarded product wrapped negative there and refused every member
+	// over 1 MB.
+	expands := fh.PackedSize == 0 ||
+		(fh.PackedSize <= math.MaxInt64/1000 && fh.UnpackedSize > 1000*fh.PackedSize)
+	if fh.UnpackedSize > 1024*1024 && expands {
+		r.win.MarkIncomplete()
+		return terminalEntry(fh, ErrRarBombDetected), nil
+	}
+	if err := r.win.BeginFile(fh.Solid); err != nil {
+		r.win.MarkIncomplete()
+		return terminalEntry(fh, err), nil
+	}
+	// e is built before the splicer, and the splicer before the decode
+	// chain, because the splicer consults e through lastBlock() while
+	// reading -- both must exist before the chain's first Read. e.src is
+	// filled in only once the chain is known to build successfully.
+	e := newEntry(fh, nil)
+	splicer := &multiVolumePayloadReader{r: r, e: e, src: r.vol.payload()}
+	src, err := r.buildChain(fh, splicer)
+	if err != nil {
+		r.win.MarkIncomplete()
+		return terminalEntry(fh, err), nil
+	}
+	e.src = src
+	r.entry = e
+	return e, nil
+}
+
+// handleNonFileBlock applies the archive-wide effect of a block that is not a
+// file header, and is the only place those effects are written down.
+//
+// The two header-reading paths -- Reader.dispatch and nextVolumePayload
+// (splice.go) -- differ only in what they do with a FILE block. They used to
+// restate the other arms each, and disagreed about them three separate times
+// in one change: an archive-header failure latched in one path and not the
+// other, HEAD_CRYPT armed in dispatch alone (header-encrypted multi-volume
+// archives were unreadable across a boundary), and a corrupt continuation
+// header ending the whole archive in one path while costing one member in the
+// other. Two of those were data loss. Sharing the arms is what makes a fourth
+// disagreement unrepresentable rather than merely unlikely.
+//
+// Nothing here discards payload: volume.next() does that on the way to the
+// following header, unconditionally, whether or not any case below looked at
+// the block. That is why no arm needs to report whether it "handled" the
+// block -- a case that does nothing is already correct.
+//
+// A nil r.vol on return means an end header closed this volume and the caller
+// must move to the next one. nextEntry's loop already does that at the top of
+// every iteration; the splice, which owns its own loop, acts on it explicitly.
+//
+// Every error returned is archive-level and UNLATCHED, so a call site can
+// wrap it in latchArchive in one expression.
+func (r *Reader) handleNonFileBlock(h *blockHeader) error {
 	switch h.Type {
 	case headerTypeArchive:
 		ah, err := parseArchiveHeader(h)
@@ -407,103 +529,19 @@ func (r *Reader) dispatch(h *blockHeader) (*Entry, error) {
 			// proceeding with unknown archive-wide semantics. Wrapped so a
 			// caller can alarm on ErrCorruptArchiveHeader specifically while
 			// errors.Is still reaches the underlying parse failure -- see
-			// ErrCorruptArchiveHeader's doc comment. NextEntry latches this
-			// (see Reader.fatal) so a second call cannot resume past it.
-			return nil, fmt.Errorf("%w: %w", ErrCorruptArchiveHeader, err)
+			// ErrCorruptArchiveHeader's doc comment. Both call sites latch
+			// this (see Reader.fatal) so a second call cannot resume past it.
+			return fmt.Errorf("%w: %w", ErrCorruptArchiveHeader, err)
 		}
 		r.solid = r.solid || ah.Solid
-		return nil, nil
-
-	case headerTypeFile:
-		fh, err := parseFileHeader(h)
-		if err != nil {
-			// A member whose identity survived the failure is refused by NAME,
-			// so the caller learns the archive held something it could not
-			// read. One that failed before its name was decoded has nothing to
-			// report and is skipped as before. Either way volume.next() drops
-			// the block's declared payload on the way to the next header.
-			if fh != nil && fh.FirstBlock {
-				r.win.MarkIncomplete()
-				return terminalEntry(fh, err), nil
-			}
-			// Damage is recorded from what happened to the file, never from
-			// what the caller is told about it. A member skipped here is one
-			// whose name was never decoded, so nothing can be reported -- but
-			// it still contributed no bytes, and a solid successor's
-			// back-references assume otherwise. Marking only the named path
-			// left exactly the unreportable failures decoding a successor
-			// against history nobody wrote.
-			if fh == nil {
-				r.win.MarkIncomplete()
-			}
-			return nil, nil
-		}
-		// A continuation block belongs to a member already announced. Reaching
-		// one here means that member was abandoned, so it is skipped like any
-		// other unclaimed block.
-		if !fh.FirstBlock {
-			return nil, nil
-		}
-		// Refused before the bomb ratio and before BeginFile: a member whose
-		// compression algorithm this library does not implement cannot be
-		// reasoned about at all, so nothing downstream should touch the
-		// window on its behalf.
-		//
-		// RAR 7.0 raised this field and changed nothing a traversal can see
-		// from outside a file header -- the signature, block framing and vint
-		// encoding are identical -- so detectVersion cannot separate them and
-		// every member with a nonzero method was handed to the RAR5 decoder.
-		// That produced garbage rather than an error, and the CRC32 caught it
-		// only after the whole member had been decompressed and delivered.
-		//
-		// ErrUnsupportedFormat rather than a new sentinel: it already means
-		// "an archive this library cannot decode", which is exactly this, and
-		// a caller can do nothing different for a RAR7 member than for a RAR3
-		// signature. The version is named in the message.
-		if fh.UnpackVersion != unpackVersionRAR5 {
-			r.win.MarkIncomplete()
-			return terminalEntry(fh, fmt.Errorf(
-				"%w: file %q declares unpack version %d, this library decodes "+
-					"version %d (RAR 5.0)", ErrUnsupportedFormat, fh.Name,
-				fh.UnpackVersion, unpackVersionRAR5)), nil
-		}
-		// The multiplication is guarded, not replaced by a division: a
-		// division floors, so it would let a member declaring exactly one
-		// byte past the ratio through, and this guard must not be weakened.
-		// A packed size above MaxInt64/1000 cannot reach the ratio at all --
-		// no unpacked size fits -- so it is not a bomb, whereas the
-		// unguarded product wrapped negative there and refused every member
-		// over 1 MB.
-		expands := fh.PackedSize == 0 ||
-			(fh.PackedSize <= math.MaxInt64/1000 && fh.UnpackedSize > 1000*fh.PackedSize)
-		if fh.UnpackedSize > 1024*1024 && expands {
-			r.win.MarkIncomplete()
-			return terminalEntry(fh, ErrRarBombDetected), nil
-		}
-		if err := r.win.BeginFile(fh.Solid); err != nil {
-			r.win.MarkIncomplete()
-			return terminalEntry(fh, err), nil
-		}
-		// e is built before the splicer, and the splicer before the decode
-		// chain, because the splicer consults e through lastBlock() while
-		// reading -- both must exist before the chain's first Read. e.src is
-		// filled in only once the chain is known to build successfully.
-		e := newEntry(fh, nil)
-		splicer := &multiVolumePayloadReader{r: r, e: e, src: r.vol.payload()}
-		src, err := r.buildChain(fh, splicer)
-		if err != nil {
-			r.win.MarkIncomplete()
-			return terminalEntry(fh, err), nil
-		}
-		e.src = src
-		r.entry = e
-		return e, nil
 
 	case headerTypeEncryption:
-		if err := r.armHeaderDecryption(h); err != nil {
-			return nil, err
-		}
-		return nil, nil
+		// Every volume of a header-encrypted archive repeats its own
+		// HEAD_CRYPT in plaintext, and each volume is a fresh value whose
+		// header decryptor starts nil. Skipping this block left the rest of
+		// that volume's headers read as plaintext when they are ciphertext,
+		// which surfaced as ErrBadHeaderCRC partway through a member.
+		return r.armHeaderDecryption(h)
 
 	case headerTypeEnd:
 		// The end header is the archive saying this volume holds no further
@@ -512,20 +550,18 @@ func (r *Reader) dispatch(h *blockHeader) (*Entry, error) {
 		// default case left the volume open and read whatever followed:
 		// trailing padding or sector alignment failed its CRC and ended the
 		// archive with ErrBadHeaderCRC after every member had been delivered
-		// intact. Closing here leaves r.vol nil, which is nextEntry's signal
-		// to open the next volume -- or, if there is none, to report the
-		// archive over.
+		// intact.
 		_ = r.vol.Close()
 		r.vol = nil
-		return nil, nil
 
 	default:
-		// Everything the caller never sees, including service records -- quick
-		// open, comment, recovery, ACL, stream. Those reuse the file-header
-		// layout, so routing them to the file case would surface one as a
-		// member named after the record and hand its bytes over as content.
-		return nil, nil
+		// Everything the caller never sees, including service records --
+		// quick open, comment, recovery, ACL, stream. Those reuse the
+		// file-header layout, so routing them to the file case would surface
+		// one as a member named after the record and hand its bytes over as
+		// content.
 	}
+	return nil
 }
 
 // resolvePassword picks the candidate that matches the member's password check

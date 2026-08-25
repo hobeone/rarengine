@@ -91,15 +91,9 @@ func (r *Reader) nextVolumePayload(e *Entry) (io.Reader, error) {
 			// archive header, or an end header) dies here instead of
 			// advancing to volume 3. NextEntry treats io.EOF/
 			// io.ErrUnexpectedEOF from vol.next() as "this volume is spent,
-			// open the next one and keep scanning" -- so this must too. The
-			// old engine got this for free from an explicit headerTypeEnd
-			// case in processVolumePayloadHeader that called nextVolume()
-			// itself; that case does not exist here, because end headers
-			// now fall through the same generic "not a file header, keep
-			// scanning" path as everything else. That is correct for
-			// payload accounting (volume.next() already dropped the
-			// declared bytes) but it silently dropped the volume advance
-			// the old case also provided.
+			// open the next one and keep scanning" -- so this must too.
+			// Running out of headers is the volume being spent; it is not the
+			// end header, which handleNonFileBlock settles below.
 			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 				// A volume cut inside some OTHER block -- an end header
 				// claiming a payload it does not carry, say -- is spent, not
@@ -132,48 +126,24 @@ func (r *Reader) nextVolumePayload(e *Entry) (io.Reader, error) {
 			return nil, r.latchArchive(err)
 		}
 		if h.Type != headerTypeFile {
-			if h.Type == headerTypeEnd {
-				// Same rule the scan follows: no block after this one belongs
-				// to the archive, so the continuation is not in this volume
-				// and reading further here would parse whatever padding
-				// follows.
-				_ = r.vol.Close()
-				r.vol = nil
+			// Settled by the same function Reader.dispatch calls, so the two
+			// header-reading paths cannot disagree about what a block that is
+			// not a file means. Latched here because this loop runs below
+			// NextEntry's own latching: an attacker gets to choose which path
+			// parses a truncated archive header, so both must be wired to the
+			// same latch.
+			if err := r.handleNonFileBlock(h); err != nil {
+				return nil, r.latchArchive(err)
+			}
+			// A nil volume means an end header closed it. No block after that
+			// header belongs to the archive, so the continuation is not in
+			// this volume and reading on here would parse whatever padding
+			// follows. nextEntry reaches the same conclusion from the same nil
+			// at the top of its loop; this loop owns its own advance.
+			if r.vol == nil {
 				if verr := r.openNextVolume(); verr != nil {
 					return nil, r.latchArchive(verr)
 				}
-				continue
-			}
-			if h.Type == headerTypeEncryption {
-				// Every volume of a header-encrypted archive repeats its own
-				// HEAD_CRYPT in plaintext, and each volume is a fresh value
-				// whose header decryptor starts nil. Skipping this block left
-				// the rest of the volume's headers -- including the
-				// continuation this loop is looking for -- read as plaintext
-				// when they are ciphertext, which surfaced as
-				// ErrBadHeaderCRC partway through a member that spanned the
-				// boundary. Archive-level, so it latches like the archive
-				// header below.
-				if aerr := r.armHeaderDecryption(h); aerr != nil {
-					return nil, r.latchArchive(aerr)
-				}
-				continue
-			}
-			if h.Type == headerTypeArchive {
-				ah, aerr := parseArchiveHeader(h)
-				if aerr != nil {
-					// Consistent with the identical failure reached
-					// through NextEntry's own dispatch (reader.go): a
-					// corrupt archive header is archive-level, not a
-					// per-member outcome, and must end traversal the
-					// same way whichever path finds it. Left lenient
-					// here, an attacker could choose which path parses a
-					// truncated archive header by putting it in a volume
-					// a member continues into, rather than one NextEntry
-					// scans directly.
-					return nil, r.latchArchive(fmt.Errorf("%w: %w", ErrCorruptArchiveHeader, aerr))
-				}
-				r.solid = r.solid || ah.Solid
 			}
 			continue
 		}

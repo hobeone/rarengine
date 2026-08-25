@@ -845,3 +845,60 @@ func TestTrailingPaddingAfterTheEndHeaderIsNotParsed(t *testing.T) {
 		t.Fatalf("NextEntry past the end header = %v, want io.EOF", err)
 	}
 }
+
+// The archive header's Solid flag must reach r.solid from BOTH paths that read
+// block headers.
+//
+// r.solid decides whether abandoning a member decodes its remainder to keep the
+// window valid for a solid successor (Reader.finishActive). Nothing the public
+// API reports separates the two choices: a solid successor after a skip may
+// legitimately decode cleanly OR be refused, and
+// TestSolidArchiveSkipStillMaintainsWindow accepts either for exactly that
+// reason -- so deleting the assignment survived the entire suite. Pinned
+// white-box, because the flag's effect is a decision rather than an output.
+func TestArchiveHeaderSolidFlagReachesTheReader(t *testing.T) {
+	t.Run("scan", func(t *testing.T) {
+		for _, solid := range []bool{false, true} {
+			r := NewReader(volumesOf(rar5Archive(t, solid,
+				rar5Member(t, memberSpec{name: "a.bin", content: "hello", withCRC: true}))))
+			if _, err := r.NextEntry(); err != nil {
+				t.Fatalf("solid=%v: NextEntry: %v", solid, err)
+			}
+			if r.solid != solid {
+				t.Fatalf("archive header declared Solid=%v, r.solid = %v", solid, r.solid)
+			}
+		}
+	})
+
+	// Volume 1 declares a non-solid archive, so a set flag can only have come
+	// from volume 2's archive header -- which the scan never reads, because
+	// the member in progress is what pulls that volume in.
+	t.Run("splice", func(t *testing.T) {
+		const content = "hello world"
+		half := len(content) / 2
+		v1 := rar5Archive(t, false, rar5Member(t, memberSpec{
+			name: "split.bin", content: content[:half],
+			unpackedSz: int64(len(content)), packedSz: int64(half), notLast: true,
+		}))
+		v2 := rar5Archive(t, true, rar5Member(t, memberSpec{
+			name: "split.bin", content: content[half:],
+			unpackedSz: int64(len(content)), packedSz: int64(len(content) - half),
+			notFirst: true, withCRC: true, crcOf: content,
+		}))
+
+		r := NewReader(volumesOf(v1, v2))
+		e, err := r.NextEntry()
+		if err != nil {
+			t.Fatalf("NextEntry: %v", err)
+		}
+		if r.solid {
+			t.Fatal("r.solid set before the second volume was reached")
+		}
+		if _, err := io.ReadAll(e); err != nil {
+			t.Fatalf("ReadAll: %v", err)
+		}
+		if !r.solid {
+			t.Fatal("volume 2's archive header declared Solid, r.solid = false")
+		}
+	})
+}
