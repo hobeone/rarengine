@@ -41,13 +41,6 @@ func buildSingleFileRAR5ArchiveFlags(t *testing.T, name string, content []byte, 
 	return &buf
 }
 
-func newSingleVolumeChan(buf *bytes.Buffer) <-chan io.ReadCloser {
-	volumes := make(chan io.ReadCloser, 1)
-	volumes <- &mockReadCloser{buf}
-	close(volumes)
-	return volumes
-}
-
 // readAllAndEOFErr reads e to completion, returning the first non-io.EOF
 // error encountered (nil if the stream ended cleanly).
 func readAllAndEOFErr(e *Entry) error {
@@ -75,7 +68,7 @@ func TestCRCVerification_DefaultDetectsMismatch(t *testing.T) {
 	wrongCRC := crc32.ChecksumIEEE(content) ^ 0xFFFFFFFF // deliberately wrong
 	buf := buildSingleFileRAR5Archive(t, "hello.txt", content, wrongCRC)
 
-	r := NewReader(newSingleVolumeChan(buf))
+	r := NewReader(volumesOf(buf.Bytes()))
 	e, err := r.NextEntry()
 	if err != nil {
 		t.Fatalf("NextEntry() failed: %v", err)
@@ -94,7 +87,7 @@ func TestCRCVerification_DefaultHappyPath(t *testing.T) {
 	correctCRC := crc32.ChecksumIEEE(content)
 	buf := buildSingleFileRAR5Archive(t, "hello.txt", content, correctCRC)
 
-	r := NewReader(newSingleVolumeChan(buf))
+	r := NewReader(volumesOf(buf.Bytes()))
 	e, err := r.NextEntry()
 	if err != nil {
 		t.Fatalf("NextEntry() failed: %v", err)
@@ -114,7 +107,7 @@ func TestCRCVerification_UnconditionalOnMismatch(t *testing.T) {
 	wrongCRC := crc32.ChecksumIEEE(content) ^ 0xFFFFFFFF
 	buf := buildSingleFileRAR5Archive(t, "hello.txt", content, wrongCRC)
 
-	r := NewReader(newSingleVolumeChan(buf))
+	r := NewReader(volumesOf(buf.Bytes()))
 	e, err := r.NextEntry()
 	if err != nil {
 		t.Fatalf("NextEntry() failed: %v", err)

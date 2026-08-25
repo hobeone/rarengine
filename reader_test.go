@@ -244,7 +244,7 @@ func malformedArchiveHeaderStream(t testing.TB, plantedName string) []byte {
 	p.Write(encodeVint(arcFlagVolNum))
 
 	var archive bytes.Buffer
-	archive.Write(rar5Sig)
+	archive.Write(rar5Signature)
 	archive.Write(rar5Block(p.Bytes()))
 
 	planted := rar5Member(t, memberSpec{name: plantedName, content: "payload", withCRC: true})

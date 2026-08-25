@@ -373,7 +373,7 @@ func TestSkipDamagedFile_AbandonedAdvanceNeverFabricates(t *testing.T) {
 	// fails its CRC, followed by an entry the archive would like surfaced.
 	pwned := []byte("ATTACKER CONTROLLED BYTES")
 	var vol2 bytes.Buffer
-	vol2.Write(rar5Sig)
+	vol2.Write(rar5Signature)
 	// Sized so the parser consumes exactly these 8 bytes and stops ON the
 	// planted entry: readBlockHeader reads 7, decodes a 1-byte size vint of 3,
 	// then reads bufSize-3 = 1 more. The CRC then fails. An oversized vint

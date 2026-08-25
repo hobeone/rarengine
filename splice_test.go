@@ -351,7 +351,7 @@ func TestNewMemberWithABadHeaderSurvivesTheContinuationScan(t *testing.T) {
 		name: "split.bin", content: "aaaa", unpackedSz: new(int64(8)), packedSz: new(int64(4)), notLast: true,
 	}))
 	v2 := rar5Archive(t, false, rar5Member(t, memberSpec{
-		name: "refused.bin", content: "bbbb", badEncVersion: true,
+		name: "refused.bin", content: "bbbb", encRecord: encodeVint(99),
 	}))
 
 	r := NewReader(volumesOf(v1, v2))

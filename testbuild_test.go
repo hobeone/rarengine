@@ -3,6 +3,7 @@ package rarengine
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"hash/crc32"
 	"io"
 	"testing"
@@ -27,9 +28,6 @@ import (
 //     independent of any entry, which is what the payload-discard tests exist
 //     to attack. It is not a member builder and does not become one.
 
-// rar5Sig is the RAR5 signature, "Rar!\x1a\x07\x01\x00".
-var rar5Sig = []byte{0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x01, 0x00}
-
 // rar5Block frames a header payload: the size vint, then the payload, with a
 // CRC32 over both prepended. Every header in this file is built with it.
 func rar5Block(payload []byte) []byte {
@@ -37,8 +35,10 @@ func rar5Block(payload []byte) []byte {
 	var hashed bytes.Buffer
 	hashed.Write(sizeV)
 	hashed.Write(payload)
+	var crcBuf [4]byte
+	binary.LittleEndian.PutUint32(crcBuf[:], crc32.ChecksumIEEE(hashed.Bytes()))
 	var out bytes.Buffer
-	_ = binary.Write(&out, binary.LittleEndian, crc32.ChecksumIEEE(hashed.Bytes()))
+	out.Write(crcBuf[:])
 	out.Write(hashed.Bytes())
 	return out.Bytes()
 }
@@ -52,7 +52,7 @@ func rar5ArchiveHeaderFlags(flags uint64) []byte {
 	p.Write(encodeVint(flags))
 
 	var out bytes.Buffer
-	out.Write(rar5Sig)
+	out.Write(rar5Signature)
 	out.Write(rar5Block(p.Bytes()))
 	return out.Bytes()
 }
@@ -85,7 +85,7 @@ func rar5BlockDeclaring(blockType uint64, dataSize int, extra []byte, withSig bo
 
 	var out bytes.Buffer
 	if withSig {
-		out.Write(rar5Sig)
+		out.Write(rar5Signature)
 	}
 	out.Write(rar5Block(p.Bytes()))
 	return out.Bytes()
@@ -158,18 +158,16 @@ type memberSpec struct {
 	// CRC-valid. That is the case the traversal must skip rather than stop on.
 	badName bool
 
-	// badEncVersion attaches a file-encryption extra record declaring an
-	// unsupported version. It fails LATER than badName does -- inside
-	// parseExtraRecords, after the name has been decoded -- which is the
-	// only failure that yields a header alongside its error, so the member
-	// can be refused by name instead of vanishing from the listing.
-	badEncVersion bool
-
 	// encRecord attaches a raw file-encryption extra record body (everything
-	// after the record-type vint). Unlike badEncVersion, which builds one
-	// specific malformed record, this lets a test state the encryption
-	// metadata it needs -- notably an encrypted member with no check value,
-	// which rar never produces but the format permits.
+	// after the record-type vint), letting a test state the encryption
+	// metadata it needs: an encrypted member with no check value, which rar
+	// never produces but the format permits, or -- as encodeVint(99) -- a
+	// record declaring an unsupported version. That second one fails LATER
+	// than badName does, inside parseExtraRecords and after the name has been
+	// decoded, which is the only failure yielding a header alongside its
+	// error, so the member can be refused by name instead of vanishing from
+	// the listing. A dedicated badEncVersion flag built exactly that record
+	// and nothing else, so it was this field with one value hard-coded.
 	encRecord []byte
 }
 
@@ -194,7 +192,9 @@ func buildRAR5Member(s memberSpec) []byte {
 		packed = *s.packedSz
 	}
 
-	hasCRC := s.withCRC || s.rawCRC != nil
+	// crcOf counts: it states WHAT to checksum, so reading it as "no checksum
+	// unless withCRC is also set" made a stated field a silent no-op.
+	hasCRC := s.withCRC || s.rawCRC != nil || s.crcOf != ""
 
 	var fileFlags uint64
 	if s.isDir {
@@ -231,6 +231,16 @@ func buildRAR5Member(s memberSpec) []byte {
 	// Masked with a literal, not fileCompVersion: a test that builds its
 	// input with the same constant the parser reads it with moves whenever
 	// that constant is wrong, and agrees with it either way.
+	//
+	// A version the field cannot hold is refused rather than masked. The
+	// field is six bits, so 64 came out as 0 -- unpackVersionRAR5 -- and a
+	// fixture built to be refused for its version was emitted as an ordinary
+	// RAR5 member that decoded cleanly. Same rule as the sizes above: a
+	// builder does not quietly rewrite what its caller declared.
+	if s.unpackVersion > 0x3f {
+		panic(fmt.Sprintf("memberSpec.unpackVersion %d does not fit the "+
+			"6-bit field; the format cannot express it", s.unpackVersion))
+	}
 	compFlags |= s.unpackVersion & 0x3f
 	compFlags |= s.extraCompFlags
 	f.Write(encodeVint(compFlags))
@@ -257,14 +267,6 @@ func buildRAR5Member(s memberSpec) []byte {
 	// declared before the data size -- so it has to be built before the block
 	// header fields are written.
 	var extra bytes.Buffer
-	if s.badEncVersion {
-		var rec bytes.Buffer
-		rec.Write(encodeVint(1))  // record type: encryption
-		rec.Write(encodeVint(99)) // version: not 0, so unsupported
-		extra.Write(encodeVint(uint64(rec.Len())))
-		extra.Write(rec.Bytes())
-		blockFlags |= headerFlagHasExtra
-	}
 	if s.encRecord != nil {
 		var rec bytes.Buffer
 		rec.Write(encodeVint(1)) // record type: encryption
@@ -277,7 +279,14 @@ func buildRAR5Member(s memberSpec) []byte {
 	var p bytes.Buffer
 	p.Write(encodeVint(headerTypeFile))
 	p.Write(encodeVint(blockFlags))
-	if extra.Len() > 0 {
+	// Gated on the flag, not on extra.Len(): the parser reads this vint
+	// whenever headerFlagHasExtra is set (header.go), so a fixture setting
+	// that bit through extraBlockFlags with no records to go with it -- a
+	// header claiming an extra area it does not carry, which is a thing an
+	// attacker writes -- had the vint omitted, and every field after it read
+	// one position early. The declared payload size became the extra size and
+	// the header parsed as something nobody wrote.
+	if blockFlags&headerFlagHasExtra != 0 {
 		p.Write(encodeVint(uint64(extra.Len())))
 	}
 	p.Write(encodeVint(uint64(packed)))
@@ -352,6 +361,31 @@ func volumesOf(parts ...[]byte) <-chan io.ReadCloser {
 	return ch
 }
 
+// parseBuiltMember reads one built member back through the real parser.
+//
+// The builders' own tests assert on what a header SAYS once something reads
+// it, rather than on the bytes -- a byte comparison against a hand-written
+// expectation is a second copy of the layout, which is the thing this file
+// exists to have one of.
+func parseBuiltMember(t *testing.T, block []byte) *FileHeader {
+	t.Helper()
+	v, err := openVolume(&mockReadCloser{
+		bytes.NewReader(append(append([]byte{}, rar5Signature...), block...)),
+	})
+	if err != nil {
+		t.Fatalf("openVolume: %v", err)
+	}
+	h, err := v.next()
+	if err != nil {
+		t.Fatalf("next: %v", err)
+	}
+	fh, err := parseFileHeader(h)
+	if err != nil {
+		t.Fatalf("parseFileHeader: %v", err)
+	}
+	return fh
+}
+
 // A declared size of zero must reach the header, from both faces.
 //
 // Zero used to mean "absent, use len(content)", so a member declaring
@@ -365,27 +399,8 @@ func volumesOf(parts ...[]byte) <-chan io.ReadCloser {
 // Read back through the parser rather than compared as bytes, because what
 // matters is what the header says once something reads it.
 func TestBuilderPreservesADeclaredZeroSize(t *testing.T) {
-	parse := func(t *testing.T, block []byte) *FileHeader {
-		t.Helper()
-		v, err := openVolume(&mockReadCloser{
-			bytes.NewReader(append(append([]byte{}, rar5Sig...), block...)),
-		})
-		if err != nil {
-			t.Fatalf("openVolume: %v", err)
-		}
-		h, err := v.next()
-		if err != nil {
-			t.Fatalf("next: %v", err)
-		}
-		fh, err := parseFileHeader(h)
-		if err != nil {
-			t.Fatalf("parseFileHeader: %v", err)
-		}
-		return fh
-	}
-
 	t.Run("positional", func(t *testing.T) {
-		fh := parse(t, rar5FileEntry("zero.bin", 0, 0xabcd, []byte("carried anyway")))
+		fh := parseBuiltMember(t, rar5FileEntry("zero.bin", 0, 0xabcd, []byte("carried anyway")))
 		if fh.UnpackedSize != 0 {
 			t.Fatalf("UnpackedSize = %d, want the declared 0", fh.UnpackedSize)
 		}
@@ -395,7 +410,7 @@ func TestBuilderPreservesADeclaredZeroSize(t *testing.T) {
 	})
 
 	t.Run("memberSpec", func(t *testing.T) {
-		fh := parse(t, rar5Member(t, memberSpec{
+		fh := parseBuiltMember(t, rar5Member(t, memberSpec{
 			name: "zero.bin", content: "carried anyway",
 			unpackedSz: new(int64(0)), packedSz: new(int64(0)),
 		}))
@@ -409,10 +424,65 @@ func TestBuilderPreservesADeclaredZeroSize(t *testing.T) {
 
 	// And the default still derives from content when nothing is declared.
 	t.Run("absent", func(t *testing.T) {
-		fh := parse(t, rar5Member(t, memberSpec{name: "d.bin", content: "eight!!!"}))
+		fh := parseBuiltMember(t, rar5Member(t, memberSpec{name: "d.bin", content: "eight!!!"}))
 		if fh.UnpackedSize != 8 || fh.PackedSize != 8 {
 			t.Fatalf("sizes = %d/%d, want 8/8 derived from content",
 				fh.UnpackedSize, fh.PackedSize)
 		}
+	})
+}
+
+// The builder must not silently rewrite what a fixture declared.
+//
+// Three ways it did. Each is the same defect wearing different clothes: a
+// field the caller stated was read as a hint, and the archive that came out
+// was not the archive the test asked for. None had a caller at the time --
+// which is exactly why they had to be found by reading rather than by a
+// failure.
+func TestBuilderDoesNotRewriteWhatAFixtureDeclared(t *testing.T) {
+	// A header may claim an extra area it does not carry: that is a thing an
+	// attacker writes. The parser reads the extra-size vint from the FLAG, so
+	// gating the vint on len(extra) omitted it, and every field after it was
+	// read one position early -- the declared payload size arrived as the
+	// extra size, and the header parsed as something nobody wrote.
+	t.Run("an empty extra area still declares its size", func(t *testing.T) {
+		fh := parseBuiltMember(t, rar5Member(t, memberSpec{
+			name: "claims.bin", content: "eight!!!",
+			extraBlockFlags: headerFlagHasExtra,
+		}))
+		if fh.Name != "claims.bin" {
+			t.Fatalf("Name = %q, want claims.bin -- the fields shifted", fh.Name)
+		}
+		if fh.UnpackedSize != 8 || fh.PackedSize != 8 {
+			t.Fatalf("sizes = %d/%d, want 8/8 -- the fields shifted",
+				fh.UnpackedSize, fh.PackedSize)
+		}
+	})
+
+	// crcOf says WHAT to checksum. Requiring withCRC alongside it made a
+	// stated field a no-op: no flag, no CRC32, and a fixture built to carry a
+	// deliberately wrong checksum carried none at all.
+	t.Run("crcOf alone still writes a checksum", func(t *testing.T) {
+		fh := parseBuiltMember(t, rar5Member(t, memberSpec{
+			name: "wrong.bin", content: "real content", crcOf: "something else",
+		}))
+		if !fh.HasCRC32 {
+			t.Fatal("HasCRC32 = false; crcOf was stated and ignored")
+		}
+		if want := crc32.ChecksumIEEE([]byte("something else")); fh.CRC32 != want {
+			t.Fatalf("CRC32 = %#x, want %#x (the checksum of crcOf)", fh.CRC32, want)
+		}
+	})
+
+	// The version field is six bits. Masking 64 produced 0 -- unpackVersionRAR5
+	// -- so a fixture built to be refused for its version was emitted as an
+	// ordinary member that decoded cleanly.
+	t.Run("a version the field cannot hold is refused", func(t *testing.T) {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("unpackVersion 64 built a member instead of panicking")
+			}
+		}()
+		_ = buildRAR5Member(memberSpec{name: "v.bin", content: "x", unpackVersion: 64})
 	})
 }

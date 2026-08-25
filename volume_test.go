@@ -149,7 +149,7 @@ func TestVolumeUseEncryptedHeadersDecryptsAndDoesNotCarryAcrossVolumes(t *testin
 	stream.Write(iv)
 	stream.Write(ciphertext)
 
-	v, err := openVolume(&mockReadCloser{bytes.NewReader(append(append([]byte{}, rar5Sig...), stream.Bytes()...))})
+	v, err := openVolume(&mockReadCloser{bytes.NewReader(append(append([]byte{}, rar5Signature...), stream.Bytes()...))})
 	if err != nil {
 		t.Fatalf("openVolume: %v", err)
 	}
@@ -171,7 +171,7 @@ func TestVolumeUseEncryptedHeadersDecryptsAndDoesNotCarryAcrossVolumes(t *testin
 	// misread as ciphertext, and its CRC32 would not validate. Asserting that
 	// next() succeeds AND returns the correct block type is a check the
 	// no-carry-over guarantee can fail.
-	other, err := openVolume(&mockReadCloser{bytes.NewReader(append(append([]byte{}, rar5Sig...), rar5EndHeader()...))})
+	other, err := openVolume(&mockReadCloser{bytes.NewReader(append(append([]byte{}, rar5Signature...), rar5EndHeader()...))})
 	if err != nil {
 		t.Fatalf("openVolume: %v", err)
 	}
