@@ -72,6 +72,15 @@ func offsetSlotRange(slot int) (lo, hi int64) {
 // build rejects -- the same archive read as content on one platform and as an
 // error on the other.
 //
+// A wrapped offset also survives into d.offset[], the four-entry history that
+// the repeated-match symbols reuse -- sym 257 and decodeLength both hand
+// d.offset[0] straight to CopyBytes. That costs nothing here: those paths copy
+// a stored offset verbatim and never do arithmetic on it, so a value that was
+// non-positive when computed is still non-positive when replayed, and the same
+// guard turns it away. Worth stating because the store happens BEFORE the
+// CopyBytes call that rejects it, so the bad value is in the history either
+// way; what stops it mattering is that the decode aborts on the error.
+//
 // Written against explicit int64/int32 models rather than the host's int, for
 // the reason the E8 sign tests give: a property about a 32-bit type must not
 // be checked by arithmetic that only has that width on the platform running
