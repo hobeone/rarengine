@@ -59,7 +59,7 @@ jobs:
       run: go test -bench=. -benchmem ./...
 
   crossbuild:
-    name: 32-bit Build
+    name: 32-bit Build & Test
     runs-on: ubuntu-latest
 
     steps:
@@ -74,11 +74,24 @@ jobs:
     # Values parsed from an archive are sized against int, so a stream can
     # produce a negative where int is 32 bits. Vet rather than build: build
     # skips test files, which is how a set of 32-bit regression tests once
-    # passed while failing to compile for the platform they cover. There is no
-    # 32-bit runner here, so this checks compilation only.
+    # passed while failing to compile for the platform they cover.
     - name: Vet on 32-bit targets
       run: |
         for arch in 386 arm; do
           echo "== GOARCH=$arch =="
           GOARCH=$arch go vet ./...
         done
+
+    # linux/386 binaries execute on an amd64 Linux runner, so the platform this
+    # job exists for can actually run its own assertions rather than only
+    # compiling them. Every 32-bit claim in CLAUDE.md was reasoning nobody had
+    # executed until this step existed.
+    #
+    # No -race: the detector is not supported on linux/386, and the 64-bit job
+    # above already runs it. GOARCH=arm stays vet-only above -- those binaries
+    # need qemu, which is more setup than the coverage is worth while 386
+    # exercises the same int width.
+    - name: Test on linux/386
+      env:
+        GOARCH: "386"
+      run: go test -count=1 -shuffle=on ./...
