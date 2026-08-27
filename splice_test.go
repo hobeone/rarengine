@@ -3,6 +3,7 @@ package rarengine
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -426,5 +427,77 @@ func TestNilVolumeStreamIsReportedNotDereferenced(t *testing.T) {
 	}
 	if errors.Is(err, io.EOF) {
 		t.Fatalf("NextEntry reported a clean end of archive for a nil volume")
+	}
+}
+
+// wrappedEOFReadCloser ends with an io.EOF that is WRAPPED rather than bare.
+//
+// io.Reader permits it -- nothing requires a reader to return io.EOF by
+// identity -- and a consumer supplying volumes over the network has every
+// reason to annotate the end of one ("volume 3: %w"). io.LimitedReader passes
+// that value through verbatim, so it reaches the splice exactly as written.
+type wrappedEOFReadCloser struct {
+	r io.Reader
+}
+
+func (w *wrappedEOFReadCloser) Read(p []byte) (int, error) {
+	n, err := w.r.Read(p)
+	if errors.Is(err, io.EOF) {
+		return n, fmt.Errorf("volume feed ended: %w", io.EOF)
+	}
+	return n, err
+}
+func (w *wrappedEOFReadCloser) Close() error { return nil }
+
+// A volume cut inside a member's declared payload is refused whether its
+// reader ends with a bare io.EOF or a wrapped one.
+//
+// The splice classified that EOF by identity while the arm three lines above
+// it used errors.Is, so the same value was read two ways depending on whether
+// bytes arrived with it. A wrapped EOF fell out of the bottom of the loop and
+// never reached the bodyShort() check -- the one mechanism that says "this cut
+// is inside THIS member's payload" -- so the traversal returned the volume
+// reader's own error in place of its verdict. Entry.Read does use errors.Is,
+// so the member was still refused; it was refused as ErrTruncatedFile, which
+// says it ran short, rather than as the io.ErrUnexpectedEOF that says the
+// volume ended inside the payload it declared.
+//
+// Volume 1 declares 8 packed bytes and carries 4. Bare or wrapped, that is a
+// cut inside the payload and must be reported as one rather than stitched
+// over with volume 2's continuation.
+func TestVolumeCutInsideItsPayloadIsRefusedThroughAWrappedEOF(t *testing.T) {
+	v1 := rar5Archive(t, false, rar5Member(t, memberSpec{
+		name: "split.bin", content: "aaaa",
+		unpackedSz: new(int64(8)), packedSz: new(int64(8)), // declares 8, carries 4
+		notLast: true,
+	}))
+	v2 := rar5Archive(t, false, rar5Member(t, memberSpec{
+		name: "split.bin", content: "bbbb",
+		unpackedSz: new(int64(8)), packedSz: new(int64(4)),
+		notFirst: true, withCRC: true, crcOf: "aaaabbbb",
+	}))
+
+	ch := make(chan io.ReadCloser, 2)
+	ch <- &wrappedEOFReadCloser{r: bytes.NewReader(v1)}
+	ch <- &mockReadCloser{bytes.NewReader(v2)}
+	close(ch)
+
+	r := NewReader(ch)
+	e, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("NextEntry: %v", err)
+	}
+
+	got, readErr := io.ReadAll(e)
+	if readErr == nil {
+		t.Fatalf("ReadAll returned %q with a nil error; the cut inside "+
+			"volume 1's declared payload was stitched over", got)
+	}
+	if !errors.Is(readErr, io.ErrUnexpectedEOF) {
+		t.Fatalf("ReadAll error = %v, want io.ErrUnexpectedEOF -- the "+
+			"traversal's own verdict, not the volume reader's error", readErr)
+	}
+	if closeErr := e.Close(); !errors.Is(closeErr, io.ErrUnexpectedEOF) {
+		t.Fatalf("Close = %v, want the same durable verdict", closeErr)
 	}
 }

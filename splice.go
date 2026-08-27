@@ -40,7 +40,23 @@ func (s *multiVolumePayloadReader) Read(p []byte) (int, error) {
 			}
 			return n, nil
 		}
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
+			// errors.Is, matching the n > 0 arm above rather than comparing
+			// identity. io.LimitedReader returns a BARE io.EOF once it has
+			// delivered its count, so ordinary splicing worked either way --
+			// but it returns the underlying reader's error VERBATIM when that
+			// reader ends early, and a consumer's io.ReadCloser is free to
+			// wrap io.EOF. An identity check sent that value straight out of
+			// the bottom of this loop, skipping the bodyShort() refusal
+			// below: the one mechanism that reports a volume cut INSIDE this
+			// member's declared payload. Skipping it handed the caller the
+			// volume reader's own error in place of the traversal's verdict:
+			// Entry.Read does use errors.Is, so the member was still refused,
+			// but as ErrTruncatedFile -- "this member ran short" -- where the
+			// archive had declared how many packed bytes to expect and the
+			// volume did not carry them. The wrong cause, reached by
+			// bypassing the guard that exists to name the right one.
+			//
 			// The header in force says whether this is the member's final
 			// block; anything else means the payload continues in the next
 			// volume, so an inner EOF is a boundary rather than an end.
