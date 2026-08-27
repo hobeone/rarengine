@@ -7,8 +7,8 @@ import (
 // ErrWindowOffsetBounds is returned when copying bytes from an invalid history distance.
 var ErrWindowOffsetBounds = errors.New("rarengine: window offset out of bounds")
 
-// Window implements a zero-allocation, circular sliding window ring buffer for LZ77 decompression.
-type Window struct {
+// window implements a zero-allocation, circular sliding window ring buffer for LZ77 decompression.
+type window struct {
 	buf  []byte // Circular buffer slice
 	size int    // Capacity of the circular buffer
 	r    int    // Read index (beginning of unread data)
@@ -26,25 +26,40 @@ type Window struct {
 	// that advances w must therefore maintain it. In non-test code there are
 	// exactly three: writeByte, writeBytes, and CopyBytes.
 	wrapped bool
+
+	// incomplete records that the history holds something other than what a
+	// solid successor's back-references assume: bytes missing because a member
+	// ended short, wrong because it failed its CRC32, or absent because a
+	// member was refused and never decoded at all.
+	//
+	// It lives here rather than beside the traversal because that is the
+	// question it answers -- is this window still what a solid file may build
+	// on. Previously the same state had four writers and a comment warning
+	// that a fifth would have to answer the same question they did.
+	//
+	// The shortfall it describes sits INSIDE what CopyBytes bounds by: a
+	// successor reads an earlier member's bytes rather than reading past the
+	// written history, so the distance guard cannot catch it.
+	incomplete bool
 }
 
 // historyLen returns the number of bytes of valid LZ77 history behind the write
 // pointer. It is derived from w and wrapped rather than counted separately; see
 // the wrapped field for why that is sound.
-func (w *Window) historyLen() int {
+func (w *window) historyLen() int {
 	if w.wrapped {
 		return w.size
 	}
 	return w.w
 }
 
-// NewWindow creates a new sliding window of the specified size.
-func NewWindow(size int) *Window {
+// newWindow creates a new sliding window of the specified size.
+func newWindow(size int) *window {
 	// Minimum window size is 256KB (0x40000) per RAR spec.
 	if size < 0x40000 {
 		size = 0x40000
 	}
-	return &Window{
+	return &window{
 		buf:  make([]byte, size),
 		size: size,
 	}
@@ -59,7 +74,7 @@ func NewWindow(size int) *Window {
 // the previous file's bytes, which are still physically present in buf.
 // A keepHistory reset leaves wrapped alone, so a solid group continues the
 // preceding file's dictionary.
-func (w *Window) Reset(keepHistory bool) {
+func (w *window) Reset(keepHistory bool) {
 	if !keepHistory {
 		w.w = 0
 		w.r = 0
@@ -71,7 +86,7 @@ func (w *Window) Reset(keepHistory bool) {
 }
 
 // writeByte writes a single byte to the window.
-func (w *Window) writeByte(c byte) {
+func (w *window) writeByte(c byte) {
 	w.buf[w.w] = c
 	w.w++
 	if w.w >= w.size {
@@ -86,7 +101,7 @@ func (w *Window) writeByte(c byte) {
 // writeBytes writes p to the window using bulk copy, handling ring wraparound.
 // Semantics match repeated writeByte calls: full is set when w lands on r at a
 // chunk boundary. Callers must drain via Read before w overruns r.
-func (w *Window) writeBytes(p []byte) {
+func (w *window) writeBytes(p []byte) {
 	for len(p) > 0 {
 		n := min(w.size-w.w, len(p))
 		copy(w.buf[w.w:w.w+n], p[:n])
@@ -100,6 +115,29 @@ func (w *Window) writeBytes(p []byte) {
 		}
 		p = p[n:]
 	}
+}
+
+// recordHistory adds p to the LZ77 history without staging it for Read.
+//
+// It exists for the stored path. A stored member's bytes reach the caller
+// straight from the source and never pass through this buffer, but a solid
+// successor may back-reference them, so they still have to enter the history.
+// writeBytes is the wrong primitive for that: it stages bytes as unread and
+// documents that the caller must "drain via Read before w overruns r", which a
+// caller with no drain step cannot do. Once w lapped r, full and Available
+// stopped describing the buffer.
+//
+// Syncing r to w says what is actually true -- these bytes are history, and
+// nothing is pending -- so the ring's invariant holds by construction rather
+// than by a caller remembering to drain. It is deliberately not Reset(true):
+// that is a member-boundary transition, and this is not one.
+//
+// The history itself is unaffected: historyLen and CopyBytes are derived from
+// w and wrapped, neither of which r participates in.
+func (w *window) recordHistory(p []byte) {
+	w.writeBytes(p)
+	w.r = w.w
+	w.full = false
 }
 
 // CopyBytes copies 'length' bytes from 'distance' bytes back in history to the
@@ -123,7 +161,7 @@ func (w *Window) writeBytes(p []byte) {
 // file's plaintext. Out-of-range distances return ErrWindowOffsetBounds and
 // copy nothing. Callers driving the window directly should note this contract
 // is narrower than a plain buffer-size bound.
-func (w *Window) CopyBytes(length int, distance int) error {
+func (w *window) CopyBytes(length int, distance int) error {
 	// distance is attacker-controlled: it comes straight off the compressed
 	// stream. historyLen never exceeds size, so this also keeps srcIdx in range.
 	if distance <= 0 || distance > w.historyLen() {
@@ -157,7 +195,7 @@ func (w *Window) CopyBytes(length int, distance int) error {
 }
 
 // Available returns the number of unread bytes in the window.
-func (w *Window) Available() int {
+func (w *window) Available() int {
 	if w.full {
 		return w.size
 	}
@@ -168,7 +206,7 @@ func (w *Window) Available() int {
 }
 
 // Read copies unread bytes from the window into p, advancing the read pointer.
-func (w *Window) Read(p []byte) (int, error) {
+func (w *window) Read(p []byte) (int, error) {
 	avail := w.Available()
 	if avail == 0 {
 		return 0, nil
@@ -187,6 +225,24 @@ func (w *Window) Read(p []byte) (int, error) {
 			end = w.size
 		}
 		chunk := copy(p[copied:n], w.buf[w.r:end])
+		if chunk == 0 {
+			// Available() promised n bytes the ring cannot produce, which
+			// means full was set while w and r do not describe a full
+			// buffer. Without this the loop recomputes the same empty
+			// range forever: nothing in the body moves a pointer when
+			// chunk is 0, and there was no other exit.
+			//
+			// Reported as a short read rather than an error because Read's
+			// signature has never produced one and callers do not check it
+			// -- an error here would be discarded and the bad state would
+			// go back to being invisible. A count lower than Available()
+			// promised is something a caller acts on whether or not it
+			// looks at the error.
+			//
+			// This is a backstop, not the fix. The state is prevented at
+			// its source by recordHistory; see storeReader.
+			break
+		}
 		w.r += chunk
 		copied += chunk
 		if w.r >= w.size {
@@ -195,3 +251,37 @@ func (w *Window) Read(p []byte) (int, error) {
 	}
 	return copied, nil
 }
+
+// BeginFile prepares the window for a member.
+//
+// A non-solid member resets the history, so it and everything built on it are
+// unaffected by earlier damage -- which is what clears the flag. A solid
+// member after damage cannot be decoded correctly and is refused: its
+// back-references reach into bytes its predecessors did not write, producing
+// plausible-looking output with nothing in the format to mark it.
+//
+// It returns an error rather than a bool so that errcheck makes handling the
+// refusal compulsory rather than customary.
+func (w *window) BeginFile(solid bool) error {
+	if solid {
+		if w.incomplete {
+			return ErrSolidStreamBroken
+		}
+		w.Reset(true)
+		return nil
+	}
+	w.incomplete = false
+	w.Reset(false)
+	return nil
+}
+
+// MarkIncomplete records that the member just finished left the history in a
+// state a solid successor's back-references do not assume.
+//
+// Called from what happened to the member -- it ended short, or failed its
+// checksum, or was refused before decoding -- and never from the error a
+// caller received. Those answer different questions: the caller's error asks
+// "may traversal continue?", this asks "is the window intact?", and deriving
+// one from the other left every non-continuable short member recorded as
+// undamaged.
+func (w *window) MarkIncomplete() { w.incomplete = true }

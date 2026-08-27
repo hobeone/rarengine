@@ -16,7 +16,7 @@ var (
 	ErrInvalidLengthTable = errors.New("rarengine: invalid huffman code length table")
 )
 
-type HuffmanDecoder struct {
+type huffmanDecoder struct {
 	limit     [maxCodeLength + 1]uint16
 	pos       [maxCodeLength + 1]uint16
 	symbol    []uint16
@@ -28,7 +28,7 @@ type HuffmanDecoder struct {
 
 // Init initializes the Huffman tables using the given code symbol bitlengths.
 // It returns an error if the Huffman code length table defines an over-subscribed (invalid) tree.
-func (h *HuffmanDecoder) Init(codeLengths []byte) error {
+func (h *huffmanDecoder) Init(codeLengths []byte) error {
 	var count [maxCodeLength + 1]uint16
 
 	for _, n := range codeLengths {
@@ -105,7 +105,7 @@ func (h *HuffmanDecoder) Init(codeLengths []byte) error {
 }
 
 // ReadSym decodes a single symbol from the bit stream using direct lookup tables.
-func (h *HuffmanDecoder) ReadSym(r *BitReader) (int, error) {
+func (h *huffmanDecoder) ReadSym(r *bitReader) (int, error) {
 	if h.min == 0 {
 		return 0, ErrHuffDecodeFailed
 	}
@@ -147,10 +147,10 @@ func (h *HuffmanDecoder) ReadSym(r *BitReader) (int, error) {
 	return int(h.symbol[pos]), nil
 }
 
-// ReadCodeLengthTable reads a dynamic code length table from the bit stream.
-// The scratch HuffmanDecoder is used to decode the 20-symbol bit-length table;
+// readCodeLengthTable reads a dynamic code length table from the bit stream.
+// The scratch huffmanDecoder is used to decode the 20-symbol bit-length table;
 // callers should reuse a single scratch across calls to avoid per-block allocations.
-func ReadCodeLengthTable(br *BitReader, codeLength []byte, addOld bool, scratch *HuffmanDecoder) error {
+func readCodeLengthTable(br *bitReader, codeLength []byte, scratch *huffmanDecoder) error {
 	var bitlength [20]byte
 	for i := 0; i < len(bitlength); i++ {
 		n, err := br.ReadBits(4)
@@ -181,11 +181,7 @@ func ReadCodeLengthTable(br *BitReader, codeLength []byte, addOld bool, scratch 
 		}
 
 		if l < 16 {
-			if addOld {
-				codeLength[i] = (codeLength[i] + byte(l)) & 0xf
-			} else {
-				codeLength[i] = byte(l)
-			}
+			codeLength[i] = byte(l)
 			continue
 		}
 

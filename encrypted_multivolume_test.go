@@ -6,7 +6,6 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"errors"
-	"hash/crc32"
 	"io"
 	"path/filepath"
 	"testing"
@@ -67,18 +66,18 @@ func TestEncryptedMultiVolume_DecodesEveryVolume(t *testing.T) {
 		{"store", "rar5_encrypted_multi_store"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			sd := NewStreamDecompressor(encryptedMultiVolumeChan(t, tc.prefix))
-			sd.SetPassword("test")
+			r := NewReader(encryptedMultiVolumeChan(t, tc.prefix))
+			r.SetPasswords([]string{"test"})
 
-			fh, err := sd.Next()
+			e, err := r.NextEntry()
 			if err != nil {
-				t.Fatalf("Next: %v", err)
+				t.Fatalf("NextEntry: %v", err)
 			}
-			if !fh.Encrypted {
+			if !e.Header.Encrypted {
 				t.Fatal("fixture is not encrypted, so it cannot exercise this path")
 			}
 
-			got, err := io.ReadAll(sd)
+			got, err := io.ReadAll(e)
 			// These fixtures record a key-derived MAC on their last part, so
 			// completion is reported as unverifiable rather than as a match.
 			// That is another test's subject; here it must simply not be a
@@ -86,8 +85,8 @@ func TestEncryptedMultiVolume_DecodesEveryVolume(t *testing.T) {
 			if err != nil && !errors.Is(err, ErrChecksumUnsupported) {
 				t.Fatalf("reading: %v", err)
 			}
-			if int64(len(got)) != fh.UnpackedSize {
-				t.Fatalf("read %d of %d declared bytes", len(got), fh.UnpackedSize)
+			if int64(len(got)) != e.Header.UnpackedSize {
+				t.Fatalf("read %d of %d declared bytes", len(got), e.Header.UnpackedSize)
 			}
 			decoded[tc.name] = got
 		})
@@ -125,13 +124,14 @@ func TestEncryptedMultiVolume_DecodesEveryVolume(t *testing.T) {
 // leaves the caller free to accept the content. ErrCRCMismatch would say the
 // content is wrong, which is false.
 func TestEncryptedMultiVolume_ChecksumIsReportedUnverifiable(t *testing.T) {
-	sd := NewStreamDecompressor(encryptedMultiVolumeChan(t, "rar5_encrypted_multi"))
-	sd.SetPassword("test")
+	r := NewReader(encryptedMultiVolumeChan(t, "rar5_encrypted_multi"))
+	r.SetPasswords([]string{"test"})
 
-	if _, err := sd.Next(); err != nil {
-		t.Fatalf("Next: %v", err)
+	e, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("NextEntry: %v", err)
 	}
-	_, err := io.ReadAll(sd)
+	_, err = io.ReadAll(e)
 	if !errors.Is(err, ErrChecksumUnsupported) {
 		t.Fatalf("reading an encrypted file returned %v; want "+
 			"ErrChecksumUnsupported. ErrCRCMismatch here would report correct "+
@@ -249,62 +249,6 @@ func firstDifference(a, b []byte) int {
 		return n
 	}
 	return -1
-}
-
-// TestRAR3_EncryptedFlagCannotSuppressCRCCheck pins that the RAR3 header's
-// LHD_PASSWORD bit cannot turn checksum verification off.
-//
-// The RAR3 engine does not decrypt: newDecompressionReader never consults the
-// password and never splices a CBC reader, so a file carrying this flag is
-// delivered as-is. Gating verification on FileHeader.Encrypted -- which is set
-// straight from that bit -- therefore handed a crafted archive an off switch,
-// reachable with no password and without the caller ever calling SetPassword:
-// flip the bit, append 8 salt bytes, fix the 16-bit header CRC, and a payload
-// that fails its CRC32 reports as ErrChecksumUnsupported ("cannot check this")
-// instead of ErrCRCMismatch ("this content is wrong"). A caller whose policy is
-// "accept unverifiable, reject mismatch" -- the policy ErrChecksumUnsupported
-// exists to enable -- would accept the tampered bytes.
-//
-// UseMac is the only sanctioned exemption, and RAR3 never sets it.
-func TestRAR3_EncryptedFlagCannotSuppressCRCCheck(t *testing.T) {
-	payload := []byte("content that will not match its recorded checksum")
-	const wrongCRC = 0xdeadbeef
-	if crc32.ChecksumIEEE(payload) == wrongCRC {
-		t.Fatal("the recorded CRC must not match, or neither case can mismatch")
-	}
-
-	for _, tc := range []struct {
-		name  string
-		flags uint16
-	}{
-		{"plain", 0},
-		{"encrypted flag set", 0x0400},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			var archive bytes.Buffer
-			archive.Write(rar3ArchiveHeader())
-			archive.Write(rar3StoreEntry("victim.bin", tc.flags,
-				uint32(len(payload)), wrongCRC, payload))
-
-			sd := decompressorFor(archive.Bytes())
-			fh, err := sd.Next()
-			if err != nil {
-				t.Fatalf("Next: %v", err)
-			}
-			// Guards the test rather than the code: if the builder stopped
-			// setting the bit, both subtests would trivially agree.
-			if want := tc.flags&0x0400 > 0; fh.Encrypted != want {
-				t.Fatalf("fh.Encrypted = %v, want %v; the flag under test is "+
-					"not reaching the header", fh.Encrypted, want)
-			}
-
-			_, err = io.ReadAll(sd)
-			if !errors.Is(err, ErrCRCMismatch) {
-				t.Fatalf("got %v; want ErrCRCMismatch. RAR3 does not decrypt, "+
-					"so this flag must not affect verification", err)
-			}
-		})
-	}
 }
 
 // errAfterBytes hands out data, fails once with a non-EOF error, and reports

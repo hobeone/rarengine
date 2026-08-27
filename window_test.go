@@ -7,7 +7,7 @@ import (
 )
 
 func TestWindow_WriteAndRead(t *testing.T) {
-	w := NewWindow(256 * 1024) // 256KB
+	w := newWindow(256 * 1024) // 256KB
 	w.Reset(false)
 
 	// Write 4 bytes
@@ -34,7 +34,7 @@ func TestWindow_WriteAndRead(t *testing.T) {
 }
 
 func TestWindow_CopyBytes_Overlapping(t *testing.T) {
-	w := NewWindow(256 * 1024)
+	w := newWindow(256 * 1024)
 	w.Reset(false)
 
 	// Write 'X'
@@ -58,7 +58,7 @@ func TestWindow_CopyBytes_Overlapping(t *testing.T) {
 }
 
 func TestWindow_CopyBytes_InvalidOffset(t *testing.T) {
-	w := NewWindow(256 * 1024)
+	w := newWindow(256 * 1024)
 	w.Reset(false)
 
 	// Copy from distance 0 (invalid)
@@ -97,25 +97,25 @@ func TestWindow_CopyBytes_HistoryEdge(t *testing.T) {
 		// build produces some history and returns its depth in bytes. It takes
 		// the subtest's own *testing.T: Fatalf calls FailNow, which must run on
 		// the goroutine of the test it is failing.
-		build func(t *testing.T, w *Window) int
+		build func(t *testing.T, w *window) int
 	}{
 		{
 			name: "byte at a time",
-			build: func(_ *testing.T, w *Window) int {
+			build: func(_ *testing.T, w *window) int {
 				w.writeByte('A')
 				return 1
 			},
 		},
 		{
 			name: "bulk write",
-			build: func(_ *testing.T, w *Window) int {
+			build: func(_ *testing.T, w *window) int {
 				w.writeBytes([]byte("STORED"))
 				return 6
 			},
 		},
 		{
 			name: "output of an earlier copy",
-			build: func(t *testing.T, w *Window) int {
+			build: func(t *testing.T, w *window) int {
 				w.writeBytes([]byte("AB"))
 				if err := w.CopyBytes(2, 2); err != nil {
 					t.Fatalf("setup copy failed: %v", err)
@@ -127,7 +127,7 @@ func TestWindow_CopyBytes_HistoryEdge(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			w := NewWindow(0x40000)
+			w := newWindow(0x40000)
 			w.Reset(false)
 
 			depth := tc.build(t, w)
@@ -148,7 +148,7 @@ func TestWindow_CopyBytes_HistoryEdge(t *testing.T) {
 }
 
 // drainAll reads the window empty, discarding the contents.
-func drainAll(w *Window) {
+func drainAll(w *window) {
 	buf := make([]byte, 4096)
 	for {
 		n, _ := w.Read(buf)
@@ -165,7 +165,7 @@ func drainAll(w *Window) {
 //
 // The marker is deliberately greppable so a leak shows up as readable text in a
 // failure message rather than as an opaque byte count.
-func fillWindowWithPriorFile(w *Window) {
+func fillWindowWithPriorFile(w *window) {
 	w.writeBytes(bytes.Repeat([]byte("SECRET-A"), w.size/8))
 	drainAll(w)
 }
@@ -175,7 +175,7 @@ func fillWindowWithPriorFile(w *Window) {
 // has written used to return the previous file's decompressed bytes, because
 // Reset(false) deliberately does not clear the buffer.
 func TestWindow_CopyBytes_DoesNotLeakPriorFile(t *testing.T) {
-	w := NewWindow(0x40000)
+	w := newWindow(0x40000)
 	fillWindowWithPriorFile(w)
 
 	// A new non-solid file begins: pointers reset, buffer deliberately not cleared.
@@ -199,7 +199,7 @@ func TestWindow_CopyBytes_DoesNotLeakPriorFile(t *testing.T) {
 // bound must not reject references a solid file is entitled to make into the
 // preceding file's dictionary.
 func TestWindow_CopyBytes_SolidPreservesHistory(t *testing.T) {
-	w := NewWindow(0x40000)
+	w := newWindow(0x40000)
 	w.Reset(false)
 
 	w.writeBytes([]byte("HISTORY!"))
@@ -247,7 +247,7 @@ func TestWindow_CopyBytes_SolidPreservesHistory(t *testing.T) {
 // historyLen as a setup self-check, which such a refactor may adjust — but
 // their CopyBytes assertions must keep passing unchanged.
 func TestWindow_Reset_ClearsWrapped(t *testing.T) {
-	w := NewWindow(0x40000)
+	w := newWindow(0x40000)
 	w.Reset(false)
 
 	w.writeBytes(bytes.Repeat([]byte("x"), w.size))
@@ -293,11 +293,11 @@ func TestWindow_LapMakesFullDepthReachable(t *testing.T) {
 		// draining as it goes so w never overruns r. It takes the subtest's own
 		// *testing.T: Fatalf calls FailNow, which must run on the goroutine of
 		// the test it is failing.
-		lap func(t *testing.T, w *Window)
+		lap func(t *testing.T, w *window)
 	}{
 		{
 			name: "writeByte",
-			lap: func(_ *testing.T, w *Window) {
+			lap: func(_ *testing.T, w *window) {
 				for range w.size {
 					w.writeByte('z')
 					if w.Available() == 4096 {
@@ -308,7 +308,7 @@ func TestWindow_LapMakesFullDepthReachable(t *testing.T) {
 		},
 		{
 			name: "writeBytes",
-			lap: func(_ *testing.T, w *Window) {
+			lap: func(_ *testing.T, w *window) {
 				chunk := bytes.Repeat([]byte("y"), 4096)
 				for range w.size/len(chunk) + 1 {
 					w.writeBytes(chunk)
@@ -318,7 +318,7 @@ func TestWindow_LapMakesFullDepthReachable(t *testing.T) {
 		},
 		{
 			name: "CopyBytes",
-			lap: func(t *testing.T, w *Window) {
+			lap: func(t *testing.T, w *window) {
 				w.writeBytes(bytes.Repeat([]byte("x"), 4096))
 				drainAll(w)
 				for range w.size/4096 + 1 {
@@ -333,7 +333,7 @@ func TestWindow_LapMakesFullDepthReachable(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			w := NewWindow(0x40000)
+			w := newWindow(0x40000)
 			w.Reset(false)
 
 			tc.lap(t, w)
@@ -357,7 +357,7 @@ func TestWindow_LapMakesFullDepthReachable(t *testing.T) {
 
 func TestWindow_Wraparound(t *testing.T) {
 	// Let's force a small window size (which falls back to minWindowSize = 256KB = 262144 bytes)
-	w := NewWindow(10)
+	w := newWindow(10)
 	w.Reset(false)
 
 	// Write 262140 bytes
@@ -389,7 +389,7 @@ func TestWindow_Wraparound(t *testing.T) {
 }
 
 func TestWindow_CompletelyFull(t *testing.T) {
-	w := NewWindow(10)
+	w := newWindow(10)
 	w.Reset(false)
 	size := w.size
 
@@ -424,5 +424,33 @@ func TestWindow_CompletelyFull(t *testing.T) {
 			t.Errorf("data mismatch at index %d: expected %d, got %d", i, byte(i%256), out[i])
 			break
 		}
+	}
+}
+
+func TestWindowBeginFileRefusesSolidAfterIncomplete(t *testing.T) {
+	w := newWindow(0x40000)
+
+	if err := w.BeginFile(false); err != nil {
+		t.Fatalf("first BeginFile(false): %v", err)
+	}
+	w.writeBytes([]byte("hello"))
+	w.MarkIncomplete()
+
+	if err := w.BeginFile(true); !errors.Is(err, ErrSolidStreamBroken) {
+		t.Fatalf("BeginFile(true) after MarkIncomplete = %v, want ErrSolidStreamBroken", err)
+	}
+}
+
+func TestWindowBeginFileNonSolidClearsIncomplete(t *testing.T) {
+	w := newWindow(0x40000)
+	w.MarkIncomplete()
+
+	// A non-solid file resets the history, so nothing it or its successors
+	// reference depends on what the damaged file failed to write.
+	if err := w.BeginFile(false); err != nil {
+		t.Fatalf("BeginFile(false) after MarkIncomplete: %v", err)
+	}
+	if err := w.BeginFile(true); err != nil {
+		t.Fatalf("BeginFile(true) after a clean non-solid file: %v", err)
 	}
 }

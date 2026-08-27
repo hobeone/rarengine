@@ -13,8 +13,8 @@ func TestVintRoundTrip(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		encoded := EncodeVint(tc)
-		decoded, n, err := DecodeVint(encoded)
+		encoded := encodeVint(tc)
+		decoded, n, err := decodeVint(encoded)
 		if err != nil {
 			t.Errorf("DecodeVint(%d) failed: %v", tc, err)
 			continue
@@ -30,14 +30,14 @@ func TestVintRoundTrip(t *testing.T) {
 
 func TestDecodeVintTruncated(t *testing.T) {
 	// 1. Empty buffer
-	_, _, err := DecodeVint(nil)
+	_, _, err := decodeVint(nil)
 	if !errors.Is(err, ErrTruncatedVint) {
 		t.Errorf("expected ErrTruncatedVint for empty buffer, got %v", err)
 	}
 
 	// 2. Incomplete sequence
 	buf := []byte{0x80, 0x80, 0x80}
-	_, _, err = DecodeVint(buf)
+	_, _, err = decodeVint(buf)
 	if !errors.Is(err, ErrTruncatedVint) {
 		t.Errorf("expected ErrTruncatedVint for incomplete sequence, got %v", err)
 	}
@@ -46,7 +46,7 @@ func TestDecodeVintTruncated(t *testing.T) {
 func TestDecodeVintOversized(t *testing.T) {
 	// 11 bytes of 0x80 (exceeds max length of 10)
 	buf := bytes.Repeat([]byte{0x80}, 11)
-	_, _, err := DecodeVint(buf)
+	_, _, err := decodeVint(buf)
 	if !errors.Is(err, ErrTruncatedVint) {
 		t.Errorf("expected ErrTruncatedVint for 11-byte sequence, got %v", err)
 	}
@@ -58,7 +58,7 @@ func TestDecodeVint_Padding(t *testing.T) {
 	// Second byte 0x80 (continuation flag set, value 0)
 	// Third byte 0x00 (no continuation flag set, value 0)
 	buf := []byte{0x85, 0x80, 0x00}
-	val, n, err := DecodeVint(buf)
+	val, n, err := decodeVint(buf)
 	if err != nil {
 		t.Fatalf("DecodeVint failed for padded VINT: %v", err)
 	}

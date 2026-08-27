@@ -2,10 +2,8 @@ package rarengine_test
 
 import (
 	"bytes"
-	"errors"
 	"io"
 	"net/http"
-	"strings"
 	"testing"
 	"time"
 
@@ -42,24 +40,17 @@ func TestIntegration_Download_RAR5(t *testing.T) {
 	volumes <- io.NopCloser(bytes.NewReader(data))
 	close(volumes)
 
-	sd := rarengine.NewStreamDecompressor(volumes)
-	fh, err := sd.Next()
+	r := rarengine.NewReader(volumes)
+	e, err := r.NextEntry()
 	if err != nil {
-		t.Fatalf("Next() failed: %v", err)
+		t.Fatalf("NextEntry() failed: %v", err)
 	}
 
-	if sd.Version() != rarengine.VersionRAR5 {
-		t.Errorf("expected version RAR5, got %v", sd.Version())
-	}
-	if sd.Version().String() != "RAR5" {
-		t.Errorf("expected version string 'RAR5', got %q", sd.Version().String())
+	if e.Header.Name != "testfile.txt" {
+		t.Errorf("expected filename 'testfile.txt', got %q", e.Header.Name)
 	}
 
-	if fh.Name != "testfile.txt" {
-		t.Errorf("expected filename 'testfile.txt', got %q", fh.Name)
-	}
-
-	buf, err := io.ReadAll(sd)
+	buf, err := io.ReadAll(e)
 	if err != nil {
 		t.Fatalf("ReadAll failed: %v", err)
 	}
@@ -77,17 +68,17 @@ func TestIntegration_Download_RAR5_Solid(t *testing.T) {
 	volumes <- io.NopCloser(bytes.NewReader(data))
 	close(volumes)
 
-	sd := rarengine.NewStreamDecompressor(volumes)
-	fh, err := sd.Next()
+	r := rarengine.NewReader(volumes)
+	e, err := r.NextEntry()
 	if err != nil {
-		t.Fatalf("Next() failed: %v", err)
+		t.Fatalf("NextEntry() failed: %v", err)
 	}
 
-	if fh.Name != "testfile.txt" {
-		t.Errorf("expected filename 'testfile.txt', got %q", fh.Name)
+	if e.Header.Name != "testfile.txt" {
+		t.Errorf("expected filename 'testfile.txt', got %q", e.Header.Name)
 	}
 
-	buf, err := io.ReadAll(sd)
+	buf, err := io.ReadAll(e)
 	if err != nil {
 		t.Fatalf("ReadAll failed: %v", err)
 	}
@@ -95,36 +86,5 @@ func TestIntegration_Download_RAR5_Solid(t *testing.T) {
 	expectedContent := "Testing 123\n"
 	if string(buf) != expectedContent {
 		t.Errorf("expected content %q, got %q", expectedContent, string(buf))
-	}
-}
-
-func TestIntegration_Download_RAR3_PPMd(t *testing.T) {
-	data := downloadTestFile(t, "testfile.rar3.rar")
-
-	volumes := make(chan io.ReadCloser, 1)
-	volumes <- io.NopCloser(bytes.NewReader(data))
-	close(volumes)
-
-	sd := rarengine.NewStreamDecompressor(volumes)
-	fh, err := sd.Next()
-	if err != nil {
-		t.Fatalf("Next() failed: %v", err)
-	}
-
-	if sd.Version() != rarengine.VersionRAR3 {
-		t.Errorf("expected version RAR3, got %v", sd.Version())
-	}
-
-	if fh.Name != "testfile.txt" {
-		t.Errorf("expected filename 'testfile.txt', got %q", fh.Name)
-	}
-
-	_, err = io.ReadAll(sd)
-	if err == nil {
-		t.Fatalf("expected PPMd stream to return ErrPPMUnsupported, but ReadAll succeeded")
-	}
-
-	if !errors.Is(err, rarengine.ErrPPMUnsupported) && !strings.Contains(err.Error(), "ppmd compression not implemented") {
-		t.Errorf("expected 'ppmd compression not implemented' error, got %q", err.Error())
 	}
 }

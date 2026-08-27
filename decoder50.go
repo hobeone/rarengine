@@ -27,8 +27,8 @@ const (
 	maxFilterBlockSize = 0x400000
 )
 
-// FilterBlock holds parameters for post-processing execution.
-type FilterBlock struct {
+// filterBlock holds parameters for post-processing execution.
+type filterBlock struct {
 	// start is the block's absolute position in this file's output stream,
 	// comparable against tot. Absolute rather than relative to the previous
 	// filter so that draining needs no running decrement, and so a filter
@@ -42,23 +42,22 @@ type FilterBlock struct {
 // decoder50 manages the LZ77 dynamic decompression state machine.
 type decoder50 struct {
 	r          io.Reader
-	br         *BitReader // points to bitReader when a block is loaded; nil between blocks
-	bitReader  BitReader  // reusable bit reader (embedded to avoid per-block allocations)
+	br         *bitReader // points to bitReader when a block is loaded; nil between blocks
+	bitReader  bitReader  // reusable bit reader (embedded to avoid per-block allocations)
 	payloadBuf []byte     // reusable scratch buffer for compressed block payload
 	codeLength [tableSize5]byte
 	lastBlock  bool
-	offsetSize int
 
-	mainDecoder      HuffmanDecoder
-	offsetDecoder    HuffmanDecoder
-	lowoffsetDecoder HuffmanDecoder
-	lengthDecoder    HuffmanDecoder
-	bitlenDecoder    HuffmanDecoder // scratch for ReadCodeLengthTable
+	mainDecoder      huffmanDecoder
+	offsetDecoder    huffmanDecoder
+	lowoffsetDecoder huffmanDecoder
+	lengthDecoder    huffmanDecoder
+	bitlenDecoder    huffmanDecoder // scratch for ReadCodeLengthTable
 
 	offset [4]int
 	length int
 
-	fl           []FilterBlock
+	fl           []filterBlock
 	outbuf       []byte // Leftover filter output that didn't fit in the caller's buffer
 	filterBuf    []byte // Reusable scratch for filter input; reused once outbuf drains
 	filterOutBuf []byte // Reusable scratch for filter output
@@ -73,8 +72,7 @@ type decoder50 struct {
 
 func newDecoder50() *decoder50 {
 	return &decoder50{
-		offsetSize: offsetSize5,
-		fl:         make([]FilterBlock, 0, maxQueuedFilters),
+		fl: make([]filterBlock, 0, maxQueuedFilters),
 	}
 }
 
@@ -82,7 +80,15 @@ func newDecoder50() *decoder50 {
 func (d *decoder50) init(r io.Reader, reset bool) {
 	d.r = r
 	d.lastBlock = false
-	d.offsetSize = offsetSize5
+	// Pointing the decoder at a new reader invalidates whatever bits the last
+	// one left buffered. A member larger than half the window is not decoded
+	// to the end of its block before the caller can abandon it, so d.br
+	// survives non-nil, and fill() reads d.br != nil as "still inside a
+	// block" -- resuming the next member from the previous member's bits,
+	// against the Huffman tables it left behind. It is not conditional on
+	// reset: a new source always means the buffered bits belong to a stream
+	// this decoder is no longer reading.
+	d.br = nil
 	if reset {
 		for i := range d.offset {
 			d.offset[i] = 0
@@ -152,7 +158,7 @@ func (d *decoder50) readBlockHeader() error {
 	d.lastBlock = flags&0x40 > 0
 
 	if flags&0x80 > 0 {
-		err = ReadCodeLengthTable(d.br, d.codeLength[:], false, &d.bitlenDecoder)
+		err = readCodeLengthTable(d.br, d.codeLength[:], &d.bitlenDecoder)
 		if err != nil {
 			return err
 		}
@@ -161,10 +167,10 @@ func (d *decoder50) readBlockHeader() error {
 			return err
 		}
 		cl = cl[mainSize5:]
-		if err = d.offsetDecoder.Init(cl[:d.offsetSize]); err != nil {
+		if err = d.offsetDecoder.Init(cl[:offsetSize5]); err != nil {
 			return err
 		}
-		cl = cl[d.offsetSize:]
+		cl = cl[offsetSize5:]
 		if err = d.lowoffsetDecoder.Init(cl[:lowoffsetSize5]); err != nil {
 			return err
 		}
@@ -177,7 +183,7 @@ func (d *decoder50) readBlockHeader() error {
 	return nil
 }
 
-func slotToLength(br *BitReader, n int) (int, error) {
+func slotToLength(br *bitReader, n int) (int, error) {
 	if n >= 8 {
 		bits := uint8(n/4 - 1)
 		n = (4 | (n & 3)) << bits
@@ -200,7 +206,7 @@ func slotToLength(br *BitReader, n int) (int, error) {
 // stay positive on 32-bit platforms. As an int they would be negative, and a
 // negative length reaches a slice expression while a negative offset places a
 // filter behind the emission cursor.
-func readFilter5Data(br *BitReader) (int64, error) {
+func readFilter5Data(br *bitReader) (int64, error) {
 	bytesVal, err := br.ReadBits(2)
 	if err != nil {
 		return 0, err
@@ -218,7 +224,7 @@ func readFilter5Data(br *BitReader) (int64, error) {
 	return data, nil
 }
 
-func (d *decoder50) readFilter(win *Window) error {
+func (d *decoder50) readFilter(win *window) error {
 	if len(d.fl) >= maxQueuedFilters {
 		return ErrTooManyFilters
 	}
@@ -256,7 +262,7 @@ func (d *decoder50) readFilter(win *Window) error {
 		return ErrInvalidFilter
 	}
 
-	fb := FilterBlock{
+	fb := filterBlock{
 		start: start,
 		// Safe on every platform: the bound above caps length at 4 MB.
 		length: int(length),
@@ -287,7 +293,7 @@ func (d *decoder50) readFilter(win *Window) error {
 	return nil
 }
 
-func (d *decoder50) decodeLength(win *Window, i int) error {
+func (d *decoder50) decodeLength(win *window, i int) error {
 	offset := d.offset[i]
 	copy(d.offset[1:i+1], d.offset[:i])
 	d.offset[0] = offset
@@ -306,7 +312,7 @@ func (d *decoder50) decodeLength(win *Window, i int) error {
 	return err
 }
 
-func (d *decoder50) decodeOffset(win *Window, i int) error {
+func (d *decoder50) decodeOffset(win *window, i int) error {
 	length, err := slotToLength(d.br, i)
 	if err != nil {
 		return err
@@ -367,7 +373,7 @@ func (d *decoder50) decodeOffset(win *Window, i int) error {
 }
 
 // decodeSymbol maps a decoded symbol to its sliding window or filter action.
-func (d *decoder50) decodeSymbol(win *Window, sym int) error {
+func (d *decoder50) decodeSymbol(win *window, sym int) error {
 	switch {
 	case sym < 256:
 		win.writeByte(byte(sym))
@@ -389,7 +395,7 @@ func (d *decoder50) decodeSymbol(win *Window, sym int) error {
 }
 
 // fill decodes LZ literals and back-references into the circular window.
-func (d *decoder50) fill(win *Window) error {
+func (d *decoder50) fill(win *window) error {
 	for win.Available() < win.size/2 {
 		if d.br == nil {
 			if err := d.readBlockHeader(); err != nil {
@@ -430,7 +436,7 @@ func (d *decoder50) fill(win *Window) error {
 // A block the stream cannot satisfy yields io.ErrUnexpectedEOF. io.EOF must not
 // escape here: the caller would read it as a clean end of file and silently
 // truncate the output.
-func (d *decoder50) stageFilterInput(win *Window, buf []byte) error {
+func (d *decoder50) stageFilterInput(win *window, buf []byte) error {
 	for got := 0; got < len(buf); {
 		n, _ := win.Read(buf[got:])
 		got += n
@@ -451,7 +457,7 @@ func (d *decoder50) stageFilterInput(win *Window, buf []byte) error {
 
 // Read decompresses the stream into p, reading directly from the sliding window
 // when no filter is pending to avoid intermediate staging allocations.
-func (d *decoder50) Read(win *Window, p []byte) (int, error) {
+func (d *decoder50) Read(win *window, p []byte) (int, error) {
 	// Drain any leftover filter output from a previous call first.
 	if len(d.outbuf) > 0 {
 		n := copy(p, d.outbuf)
@@ -473,7 +479,7 @@ func (d *decoder50) Read(win *Window, p []byte) (int, error) {
 		}
 	}
 
-	// Fast path: no filter queued — copy window → p directly. Window.Read
+	// Fast path: no filter queued — copy window → p directly. window.Read
 	// returns at most len(p) bytes; the caller drives further progress.
 	if len(d.fl) == 0 {
 		n, _ := win.Read(p)
@@ -531,13 +537,13 @@ func (d *decoder50) Read(win *Window, p []byte) (int, error) {
 		} else {
 			d.filterOutBuf = d.filterOutBuf[:f.length]
 		}
-		out = FilterDelta(int(f.param), d.filterBuf, d.filterOutBuf)
+		out = filterDelta(int(f.param), d.filterBuf, d.filterOutBuf)
 	case 1:
-		out = FilterE8(0xe8, true, d.filterBuf, d.tot)
+		out = filterE8(0xe8, d.filterBuf, d.tot)
 	case 2:
-		out = FilterE8(0xe9, true, d.filterBuf, d.tot)
+		out = filterE8(0xe9, d.filterBuf, d.tot)
 	case 3:
-		out = FilterArm(d.filterBuf, d.tot)
+		out = filterArm(d.filterBuf, d.tot)
 	default:
 		// readFilter rejects unknown types before queueing, so this is
 		// unreachable. Erroring rather than falling through keeps a future

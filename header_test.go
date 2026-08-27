@@ -3,6 +3,7 @@ package rarengine
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"hash/crc32"
 	"testing"
 )
@@ -10,8 +11,8 @@ import (
 func TestReadBlockHeader_CorruptCRC(t *testing.T) {
 	// A block header has format: [CRC32 (4 bytes)] [size VINT] [payload...]
 	// Let's build a size VINT of 2 (representing block size of 2, plus VINT len 1)
-	sizeV := EncodeVint(2)
-	payload := []byte{HeaderTypeArchive, 0} // archive type, no flags
+	sizeV := encodeVint(2)
+	payload := []byte{headerTypeArchive, 0} // archive type, no flags
 
 	var buf bytes.Buffer
 	// Bad CRC
@@ -21,7 +22,7 @@ func TestReadBlockHeader_CorruptCRC(t *testing.T) {
 	buf.Write(sizeV)
 	buf.Write(payload)
 
-	_, err := ReadBlockHeader(&buf)
+	_, err := readBlockHeader(&buf)
 	if err != ErrBadHeaderCRC {
 		t.Errorf("expected ErrBadHeaderCRC, got %v", err)
 	}
@@ -29,19 +30,19 @@ func TestReadBlockHeader_CorruptCRC(t *testing.T) {
 
 func TestReadAndParseArchiveHeader(t *testing.T) {
 	// Let's build a valid Archive Header block
-	// Archive header has type = 1, flags = ArcFlagMultiVol (0x01) | ArcFlagVolNum (0x02)
+	// Archive header has type = 1, flags = arcFlagMultiVol (0x01) | arcFlagVolNum (0x02)
 	// Payload is: flags (VINT), volume number (VINT)
-	flagsV := EncodeVint(ArcFlagMultiVol | ArcFlagVolNum)
-	volNumV := EncodeVint(4)
+	flagsV := encodeVint(arcFlagMultiVol | arcFlagVolNum)
+	volNumV := encodeVint(4)
 
 	var payload bytes.Buffer
-	payload.Write(EncodeVint(HeaderTypeArchive)) // Header type
-	payload.Write(EncodeVint(0))                 // Header flags (no extra, no data)
+	payload.Write(encodeVint(headerTypeArchive)) // Header type
+	payload.Write(encodeVint(0))                 // Header flags (no extra, no data)
 	payload.Write(flagsV)                        // Archive flags
 	payload.Write(volNumV)                       // Volume number
 
 	size := payload.Len()
-	sizeV := EncodeVint(uint64(size))
+	sizeV := encodeVint(uint64(size))
 
 	// Hashed portion is: sizeV + payload
 	var hashed bytes.Buffer
@@ -58,17 +59,17 @@ func TestReadAndParseArchiveHeader(t *testing.T) {
 	headerBuf.Write(hashed.Bytes())
 
 	// Read block header
-	h, err := ReadBlockHeader(&headerBuf)
+	h, err := readBlockHeader(&headerBuf)
 	if err != nil {
 		t.Fatalf("ReadBlockHeader failed: %v", err)
 	}
 
-	if h.Type != HeaderTypeArchive {
-		t.Errorf("expected Type %d, got %d", HeaderTypeArchive, h.Type)
+	if h.Type != headerTypeArchive {
+		t.Errorf("expected Type %d, got %d", headerTypeArchive, h.Type)
 	}
 
 	// Parse archive header
-	ah, err := ParseArchiveHeader(h)
+	ah, err := parseArchiveHeader(h)
 	if err != nil {
 		t.Fatalf("ParseArchiveHeader failed: %v", err)
 	}
@@ -83,7 +84,7 @@ func TestReadAndParseArchiveHeader(t *testing.T) {
 
 func TestReadAndParseFileHeader(t *testing.T) {
 	// Let's build a valid File Header block
-	// File flags: FileFlagHasCRC32 (0x04)
+	// File flags: fileFlagHasCRC32 (0x04)
 	// Unpacked size: 100
 	// Attributes: 0
 	// CRC32: 0x98765432
@@ -91,25 +92,25 @@ func TestReadAndParseFileHeader(t *testing.T) {
 	// Host OS: 1 (Unix)
 	// Name: "test.txt" (len 8)
 	var filePayload bytes.Buffer
-	filePayload.Write(EncodeVint(FileFlagHasCRC32)) // File flags
-	filePayload.Write(EncodeVint(100))              // Unpacked size
-	filePayload.Write(EncodeVint(0))                // Attributes
+	filePayload.Write(encodeVint(fileFlagHasCRC32)) // File flags
+	filePayload.Write(encodeVint(100))              // Unpacked size
+	filePayload.Write(encodeVint(0))                // Attributes
 	if err := binary.Write(&filePayload, binary.LittleEndian, uint32(0x98765432)); err != nil {
 		t.Fatal(err)
 	} // CRC32
-	filePayload.Write(EncodeVint(0))    // Comp flags
-	filePayload.Write(EncodeVint(1))    // Host OS: Unix
-	filePayload.Write(EncodeVint(8))    // Name len
+	filePayload.Write(encodeVint(0))    // Comp flags
+	filePayload.Write(encodeVint(1))    // Host OS: Unix
+	filePayload.Write(encodeVint(8))    // Name len
 	filePayload.WriteString("test.txt") // Name
 
 	var headerPayload bytes.Buffer
-	headerPayload.Write(EncodeVint(HeaderTypeFile))    // Header type
-	headerPayload.Write(EncodeVint(HeaderFlagHasData)) // Header flags (has data, no extra)
-	headerPayload.Write(EncodeVint(50))                // Packed data size (VINT)
+	headerPayload.Write(encodeVint(headerTypeFile))    // Header type
+	headerPayload.Write(encodeVint(headerFlagHasData)) // Header flags (has data, no extra)
+	headerPayload.Write(encodeVint(50))                // Packed data size (VINT)
 	headerPayload.Write(filePayload.Bytes())           // File payload
 
 	size := headerPayload.Len()
-	sizeV := EncodeVint(uint64(size))
+	sizeV := encodeVint(uint64(size))
 
 	// Hashed portion
 	var hashed bytes.Buffer
@@ -124,7 +125,7 @@ func TestReadAndParseFileHeader(t *testing.T) {
 	}
 	headerBuf.Write(hashed.Bytes())
 
-	h, err := ReadBlockHeader(&headerBuf)
+	h, err := readBlockHeader(&headerBuf)
 	if err != nil {
 		t.Fatalf("ReadBlockHeader failed: %v", err)
 	}
@@ -133,9 +134,9 @@ func TestReadAndParseFileHeader(t *testing.T) {
 		t.Errorf("expected DataSize 50, got %d", h.DataSize)
 	}
 
-	fh, err := ParseFileHeader(h)
+	fh, err := parseFileHeader(h)
 	if err != nil {
-		t.Fatalf("ParseFileHeader failed: %v", err)
+		t.Fatalf("parseFileHeader failed: %v", err)
 	}
 
 	if fh.Name != "test.txt" {
@@ -177,7 +178,7 @@ func TestSanitizePath(t *testing.T) {
 
 func TestFileHeader_ModeAndMTime(t *testing.T) {
 	// Build a file header with:
-	// File flags: FileFlagHasUnixMtime (0x02) | FileFlagHasCRC32 (0x04)
+	// File flags: fileFlagHasUnixMtime (0x02) | fileFlagHasCRC32 (0x04)
 	// Unpacked size: 50
 	// Attributes: 0o755 (493)
 	// Unix Mtime: 1700000000 (2023-11-14T22:13:20Z)
@@ -185,28 +186,28 @@ func TestFileHeader_ModeAndMTime(t *testing.T) {
 	// Host OS: 1 (Unix)
 	// Name: "exec.sh" (len 7)
 	var filePayload bytes.Buffer
-	filePayload.Write(EncodeVint(FileFlagHasUnixMtime | FileFlagHasCRC32)) // flags
-	filePayload.Write(EncodeVint(50))                                      // unpacked size
-	filePayload.Write(EncodeVint(0o755))                                   // attributes (unix permissions)
+	filePayload.Write(encodeVint(fileFlagHasUnixMtime | fileFlagHasCRC32)) // flags
+	filePayload.Write(encodeVint(50))                                      // unpacked size
+	filePayload.Write(encodeVint(0o755))                                   // attributes (unix permissions)
 	if err := binary.Write(&filePayload, binary.LittleEndian, uint32(1700000000)); err != nil {
 		t.Fatal(err)
 	} // modification time
 	if err := binary.Write(&filePayload, binary.LittleEndian, uint32(0x11223344)); err != nil {
 		t.Fatal(err)
 	} // CRC32
-	filePayload.Write(EncodeVint(0))   // comp flags
-	filePayload.Write(EncodeVint(1))   // host OS (Unix)
-	filePayload.Write(EncodeVint(7))   // name len
+	filePayload.Write(encodeVint(0))   // comp flags
+	filePayload.Write(encodeVint(1))   // host OS (Unix)
+	filePayload.Write(encodeVint(7))   // name len
 	filePayload.WriteString("exec.sh") // name
 
 	var headerPayload bytes.Buffer
-	headerPayload.Write(EncodeVint(HeaderTypeFile))
-	headerPayload.Write(EncodeVint(HeaderFlagHasData))
-	headerPayload.Write(EncodeVint(20))
+	headerPayload.Write(encodeVint(headerTypeFile))
+	headerPayload.Write(encodeVint(headerFlagHasData))
+	headerPayload.Write(encodeVint(20))
 	headerPayload.Write(filePayload.Bytes())
 
 	size := headerPayload.Len()
-	sizeV := EncodeVint(uint64(size))
+	sizeV := encodeVint(uint64(size))
 
 	var hashed bytes.Buffer
 	hashed.Write(sizeV)
@@ -220,14 +221,14 @@ func TestFileHeader_ModeAndMTime(t *testing.T) {
 	}
 	headerBuf.Write(hashed.Bytes())
 
-	h, err := ReadBlockHeader(&headerBuf)
+	h, err := readBlockHeader(&headerBuf)
 	if err != nil {
 		t.Fatalf("ReadBlockHeader failed: %v", err)
 	}
 
-	fh, err := ParseFileHeader(h)
+	fh, err := parseFileHeader(h)
 	if err != nil {
-		t.Fatalf("ParseFileHeader failed: %v", err)
+		t.Fatalf("parseFileHeader failed: %v", err)
 	}
 
 	if fh.HostOS != 1 {
@@ -269,7 +270,7 @@ func TestParseHashRecord(t *testing.T) {
 		}
 	}
 
-	// Test DecodeVint error (truncated)
+	// Test decodeVint error (truncated)
 	err = parseHashRecord(&FileHeader{}, []byte{})
 	if err == nil {
 		t.Errorf("expected error for empty data")
@@ -283,5 +284,60 @@ func TestParseHashRecord(t *testing.T) {
 	}
 	if fhShort.HasBlake2sp {
 		t.Errorf("expected HasBlake2sp to be false for short hash record")
+	}
+}
+
+// TestParseFileHeader_RejectsUnknownUnpackedSize covers the flag that makes
+// the declared size meaningless. Detecting truncation depends on that size,
+// so a header declining to state it is refused rather than decoded against a
+// value that means nothing.
+//
+// The rejection now fires from a validation block placed after fh.Name is
+// decoded (identity-first validation), not immediately after the flags vint,
+// so the fixture must be a complete, well-formed header through the name --
+// differing from a valid header ONLY in carrying the flag -- or it fails on
+// an earlier bounds/vint error instead of genuinely reaching the check.
+func TestParseFileHeader_RejectsUnknownUnpackedSize(t *testing.T) {
+	var payload bytes.Buffer
+	payload.Write(encodeVint(fileFlagUnpSizeUnknown))
+	payload.Write(encodeVint(0)) // UnpackedSize -- meaningless per the flag, but still decoded
+	payload.Write(encodeVint(0)) // attributes
+	payload.Write(encodeVint(0)) // comp flags: store
+	payload.Write(encodeVint(0)) // host OS
+	name := "unknown-size.bin"
+	payload.Write(encodeVint(uint64(len(name))))
+	payload.WriteString(name)
+
+	h := &blockHeader{
+		Type:    headerTypeFile,
+		Payload: payload.Bytes(),
+	}
+	fh, err := parseFileHeader(h)
+	if !errors.Is(err, ErrUnpSizeUnknown) {
+		t.Fatalf("parseFileHeader returned %v; want ErrUnpSizeUnknown", err)
+	}
+	// Negative assertion: without it, a regression that made this fixture
+	// fail EARLIER (e.g. the check moving back to right after the flags
+	// vint, or an unrelated bounds error) would still satisfy a bare
+	// errors.Is(err, ErrUnpSizeUnknown)-only check if that regression
+	// happened to preserve the sentinel, but a regression that instead
+	// misrouted this fixture into ErrCorruptFileHeader would slip past a
+	// test that never checked for it. Pin that this fixture reaches
+	// EXACTLY the UnpSizeUnknown check, not the corrupt-header path.
+	if errors.Is(err, ErrCorruptFileHeader) {
+		t.Fatalf("parseFileHeader error %v also satisfies ErrCorruptFileHeader; want ONLY ErrUnpSizeUnknown", err)
+	}
+	// The header IS returned alongside the error, and deliberately so: the
+	// name is already decoded by this point, so Reader.dispatch can refuse
+	// the member by name rather than dropping it from the listing with no
+	// trace. The exported wrapper that used to stand here flattened this to
+	// a nil header, which made an unknown-size member indistinguishable from
+	// one whose header never parsed at all.
+	if fh == nil {
+		t.Fatal("parseFileHeader returned a nil header; the member's name is " +
+			"already decoded here and is what lets dispatch refuse it by name")
+	}
+	if fh.Name != name {
+		t.Fatalf("returned header names %q, want %q", fh.Name, name)
 	}
 }

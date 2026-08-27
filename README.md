@@ -8,11 +8,10 @@ Designed specifically for high-throughput Usenet downloaders (like `gonzbd`), `r
 
 ## Key Features
 
-- **Zero-Allocation Pipeline**: Reuses single `StreamDecompressor` instances and pre-allocated 32MB sliding windows across streams, slashing memory allocations to **under 2 KB per run**.
-- **Automatic Volume Unpacker**: Unpacks directory-based multi-volume archives automatically via `UnpackDir`, discovering and ordering `.partX.rar` files dynamically.
+- **Zero-Allocation Pipeline**: Reuses a single `Reader` instance and its pre-allocated 32MB sliding window across streams via `Reset`, keeping steady-state allocations minimal.
 - **Process In-Process**: Runs entirely within Go—no slow C++ `unrar` binary subprocess forks or shell pipeline parsing.
 - **Spec Conformance**: Fully audited and tested for strict conformance to the official RAR 5.0 technote specifications.
-- **Differential Oracle Tested**: Verified byte-for-byte against the system-installed canonical `unrar` binary for standard, compressed, solid, and password-encrypted archives.
+- **Differential Oracle Tested**: Verified byte-for-byte against the system-installed canonical `unrar` binary for standard, compressed, solid, and password-encrypted RAR5 archives.
 - **Robust Security Boundaries**:
   - **Path Sanitization**: Dynamic, OS-independent path sanitization neutralizes directory traversal exploits (strips relative upward `..` and absolute paths safely).
   - **Rar-Bomb Protection**: Aborts decompression instantly when file expansion ratios exceed `1000x` for files larger than `1MB`.
@@ -33,108 +32,184 @@ go get github.com/hobeone/rarengine
 ### Sequential Streaming Decompression (Tar-like Reader)
 
 ```go
-package main
+r := rarengine.NewReader(volumes)
+r.SetPasswords([]string{"first-guess", "second-guess"})
 
-import (
-	"fmt"
-	"io"
-	"os"
-
-	"github.com/hobeone/rarengine"
-)
-
-func main() {
-	// 1. Open your RAR file (or multi-volume channel)
-	f, err := os.Open("archive.rar")
+for {
+	e, err := r.NextEntry()
 	if err != nil {
-		panic(err)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		return err // the archive stopped being parseable
 	}
-	defer f.Close()
-
-	volumes := make(chan io.ReadCloser, 1)
-	volumes <- f
-	close(volumes)
-
-	// 2. Initialize the decompressor
-	sd := rarengine.NewStreamDecompressor(volumes)
-	sd.SetPassword("my-safe-password") // Configure if archive is encrypted
-
-	// 3. Process files sequentially
-	for {
-		fh, err := sd.Next()
-		if err != nil {
-			if err == io.EOF || err == rarengine.ErrNoNextVolume {
-				break
-			}
-			panic(err)
-		}
-
-		if fh.IsDir {
-			fmt.Printf("Directory: %s\n", fh.Name)
-			continue
-		}
-
-		fmt.Printf("Extracting: %s (%d bytes)\n", fh.Name, fh.UnpackedSize)
-
-		// 4. Stream payload directly
-		data := make([]byte, fh.UnpackedSize)
-		_, err = io.ReadFull(sd, data)
-		if err != nil {
-			panic(err)
-		}
-
-		fmt.Printf("File Content: %q\n", string(data))
+	if e.Header.IsDir {
+		_ = e.Close()
+		continue
+	}
+	// This example's policy accepts content the library could not verify --
+	// see "Unverifiable checksums" below. It has to be filtered at both sites:
+	// io.Copy surfaces the verdict from Read, so without the first filter a
+	// fully delivered member is logged as skipped.
+	//
+	// Note what "skipping" can and cannot mean here. Read returns its verdict
+	// alongside the final bytes, and io.Copy writes those bytes before it
+	// returns the error -- so by the time you see ErrCRCMismatch or
+	// ErrChecksumUnsupported, dst already holds the whole member. Rejecting it
+	// means truncating, deleting, or otherwise rolling back dst yourself.
+	if _, err := io.Copy(dst, e); err != nil &&
+		!errors.Is(err, rarengine.ErrChecksumUnsupported) {
+		log.Printf("skipping %s: %v", e.Header.Name, err)
+	}
+	// Close reports the member's verdict. A member that failed does not end
+	// the archive: call NextEntry again.
+	if err := e.Close(); err != nil &&
+		!errors.Is(err, rarengine.ErrChecksumUnsupported) {
+		log.Printf("%s: %v", e.Header.Name, err)
 	}
 }
 ```
+
+`NextEntry`'s errors are archive-level only — the volumes channel closed, a
+block header would not parse, the format is unsupported. A per-member verdict
+(a short read, a CRC mismatch, a rar-bomb refusal) never comes back from
+`NextEntry`; it comes from the `Entry` itself, via `Read` or `Close`. One
+member failing does not end the archive: `NextEntry` is still safe to call
+again to reach the members behind it.
+
+### Cancellation and cleanup
+
+`Close` releases a `Reader`: it closes the volume currently open, closes every
+volume still queued on the channel, and makes later calls return
+`ErrReaderClosed`. It is idempotent.
+
+It is also the **one** method safe to call from another goroutine while a read
+is in progress — everything else needs the caller's own serialisation. That
+asymmetry is deliberate: a `Reader` waiting for a volume that will never
+arrive cannot rescue itself, since the only other thing that ends that wait is
+the producer closing the channel, and a stalled producer is exactly when you
+want to give up.
+
+That is how a `context.Context` reaches this library, and why nothing here
+takes one:
+
+```go
+r := rarengine.NewReader(volumes)
+defer r.Close()
+context.AfterFunc(ctx, func() { r.Close() })
+```
+
+`Entry.Read` reaches the same volume receive through the multi-volume splice
+and has to satisfy `io.Reader`, so a context parameter could never have
+covered it — the long operation would have stayed uncancellable while the
+short one gained the ceremony.
+
+One limit: `Close` synchronises the volume pointer, not the volume's contents.
+Closing while another goroutine is mid-read of a payload races on the aliased
+body, and making that safe would mean a lock per read. The two stalls have
+different cures — a stalled *volume channel* is what `Close` is for, and a
+stalled *underlying stream* is cured by closing that stream, which you own.
+
+After `Close`, `Reset` revives the reader for another archive: `Close` ends an
+archive, not the 32 MB window.
 
 ### High-Throughput Reuse (Zero-Allocation Reset)
 
 ```go
-// Reset the stream decompressor to process a new set of volumes
-// reusing the existing 32MB sliding window memory:
-sd.Reset(newVolumesChan)
+// Reset the reader to process a new set of volumes, reusing the existing
+// 32MB sliding window memory:
+r.Reset(newVolumesChan)
 ```
 
-### High-Level Directory Decompression (Automatic Volume Discovery & Extraction)
+### Inspecting an archive without decoding it
 
-For standard extraction directly to a target directory, `rarengine` provides a robust, sandboxed `UnpackDir` utility. It automatically discovers other volumes (e.g., `.part1.rar`, `.part2.rar`), sorts them by internal headers, sandboxes file generation inside the target directory, and unpacks the contents.
+Two read-only entry points answer questions traversal cannot. Both take a
+reader positioned at the start of the archive and consume the signature
+themselves; neither decompresses or decrypts anything.
 
 ```go
-package main
+// Does this password match the archive's embedded check value?
+verified, hasCheckValue, err := rarengine.VerifyPassword(r, "guess")
+```
 
-import (
-	"context"
-	"fmt"
-	"log/slog"
-	"os"
+`verified` is meaningful only when `hasCheckValue` is true. RAR5 records a
+check value optionally, and an archive carrying none cannot be tested this way
+at all — treating a bare `verified == false` as "wrong password" would reject
+every archive written without one.
 
-	"github.com/hobeone/rarengine"
-)
+```go
+// Where does this volume sit in its set?
+index, multiVolume, err := rarengine.VolumeNumber(r)
+```
 
-func main() {
-	ctx := context.Background()
-	firstVolume := "archive.part1.rar"
-	outputDir := "./extracted"
+`index` is 0-based. RAR5 omits the volume-number field on the first volume of
+a set, reported here as `0` rather than as an absence, so a set can be ordered
+without special-casing its head. This is for naming a volume whose on-disk
+filename lost its numbering — the archive header is the only place the number
+survives.
 
-	opts := rarengine.UnpackOptions{
-		Password:       "my-secret-password",             // If password-encrypted
-		Logger:         slog.New(slog.NewTextHandler(os.Stdout, nil)), // Enable internal trace logging
-		OneFolder:      false,                            // Retain internal folder structures
-		OverwriteFiles: true,                             // Overwrite existing files in output directory
-	}
+### Encryption
 
-	files, err := rarengine.UnpackDir(ctx, firstVolume, outputDir, opts)
-	if err != nil {
-		panic(err)
-	}
+Encryption is supported for RAR5 only. The two failures it can produce differ
+in blast radius. An archive whose block headers are themselves encrypted, and
+whose password cannot be resolved, ends the traversal: the headers that would
+name the remaining members are ciphertext, so there is nothing to continue to.
+A member whose *continuation* block claims encryption its first block did not
+costs only that member (`ErrCorruptFileHeader`) — the stream is still standing
+on a real block boundary, so the archive stays readable past it.
 
-	fmt.Printf("Successfully extracted %d files:\n", len(files))
-	for _, file := range files {
-		fmt.Println("-", file)
-	}
+### Unverifiable checksums
+
+Every member that produces bytes is verified against the CRC32 its header
+records. Three archive classes carry no CRC32 to compare against — an
+encrypted file whose digest is a key-derived MAC (`UseMac`), an archive
+written with `rar -htb` (BLAKE2sp only), and a header recording no digest at
+all — and all three report `ErrChecksumUnsupported` from `Read`/`Close`.
+
+The content is still delivered; the error says a check could not be made, not
+that the bytes are wrong. The error message names which of the three it was, so
+a log line distinguishes `rar -htb` from a header with no digest at all.
+
+A caller whose policy accepts unverifiable content filters the sentinel at
+**both** call sites. `Entry.Read` returns the verdict alongside the member's
+final bytes, so `io.Copy` and `io.ReadAll` surface it too — filtering only at
+`Close` fails the copy instead:
+
+```go
+if _, err := io.Copy(dst, e); err != nil &&
+	!errors.Is(err, rarengine.ErrChecksumUnsupported) {
+	return err
+}
+if err := e.Close(); err != nil &&
+	!errors.Is(err, rarengine.ErrChecksumUnsupported) {
+	return err
 }
 ```
+
+A caller that *rejects* unverifiable content drops both filters — and must
+then roll `dst` back. `io.Copy` writes the bytes it was given before returning
+the error that came with them, so `dst` holds the complete member by the time
+any verification failure is visible. This is true of `ErrCRCMismatch` as well:
+no verdict in this library can be delivered before the content it describes.
+
+There is no way to switch verification off and get the content regardless.
+
+### RAR7 archives
+
+RAR 7.0 raised the unpack-version field in each file header and changed nothing
+else a reader can see from outside it — the signature, block framing and vint
+encoding are identical to RAR5. A member declaring any version other than 0
+(RAR 5.0) is refused with `ErrUnsupportedFormat`, naming the version.
+
+That refusal is per-member, not archive-level: it arrives through the `Entry`,
+and `NextEntry` is still safe to call again for the members behind it.
+
+### RAR3 archives
+
+`rarengine` is RAR5 only. A RAR3 signature is recognised so it can be refused
+by name — `ErrUnsupportedFormat`, before any per-member parsing runs — and
+nothing past the signature is parsed. A caller that needs to inspect a RAR3
+archive should hand it to `unrar`.
 
 ---
 
@@ -148,12 +223,14 @@ go test -bench=. -benchmem
 On an **AMD Ryzen 9 9950X3D** CPU, the decompressor achieves the following performance metrics:
 
 ```
-BenchmarkDecompress_Store-32       2751678     425.5 ns/op   35.25 MB/s      848 B/op   22 allocs/op
-BenchmarkDecompress_Compress-32    1547181     782.9 ns/op   48.54 MB/s     1440 B/op   37 allocs/op
-BenchmarkDecompress_Solid-32        274993    4230.0 ns/op    8.98 MB/s     1704 B/op   48 allocs/op
+BenchmarkFilterExecution-32          1397302      866.8 ns/op                    0 B/op    0 allocs/op
+BenchmarkDecompress_Store-32         2262195      525.2 ns/op   28.56 MB/s    1000 B/op   22 allocs/op
+BenchmarkDecompress_Compress-32      1259260      956.2 ns/op   39.74 MB/s    1696 B/op   37 allocs/op
+BenchmarkDecompress_Solid-32              100  11412298 ns/op  459.41 MB/s    3454 B/op  141 allocs/op
+BenchmarkReaderResetReusesWindow-32  1777514      680.2 ns/op                1096 B/op   26 allocs/op
 ```
 
-*(By reusing the sliding window and `StreamDecompressor` instance via `Reset`, allocations during processing dropped from **33.5 MB** to **under 2 KB** per session, unleashing extreme execution throughput).*
+*(`BenchmarkReaderResetReusesWindow` reuses a single `Reader` and its 32MB sliding window across archives via `Reset`, instead of allocating a fresh window per archive.)*
 
 ---
 
