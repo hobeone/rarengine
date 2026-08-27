@@ -457,8 +457,10 @@ func (w *wrappedEOFReadCloser) Close() error { return nil }
 // bytes arrived with it. A wrapped EOF fell out of the bottom of the loop and
 // never reached the bodyShort() check -- the one mechanism that says "this cut
 // is inside THIS member's payload" -- so the traversal returned the volume
-// reader's own error in place of its verdict, and Entry.classify, which does
-// use errors.Is, read it as a clean end.
+// reader's own error in place of its verdict. Entry.Read does use errors.Is,
+// so the member was still refused; it was refused as ErrTruncatedFile, which
+// says it ran short, rather than as the io.ErrUnexpectedEOF that says the
+// volume ended inside the payload it declared.
 //
 // Volume 1 declares 8 packed bytes and carries 4. Bare or wrapped, that is a
 // cut inside the payload and must be reported as one rather than stitched

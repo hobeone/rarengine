@@ -49,11 +49,13 @@ func (s *multiVolumePayloadReader) Read(p []byte) (int, error) {
 			// wrap io.EOF. An identity check sent that value straight out of
 			// the bottom of this loop, skipping the bodyShort() refusal
 			// below: the one mechanism that reports a volume cut INSIDE this
-			// member's declared payload. Skipping it meant the traversal
-			// handed the caller a raw wrapped EOF in place of its own
-			// verdict, and Entry.classify -- which does use errors.Is -- then
-			// read that as a clean end for a member that had already produced
-			// its declared size.
+			// member's declared payload. Skipping it handed the caller the
+			// volume reader's own error in place of the traversal's verdict:
+			// Entry.Read does use errors.Is, so the member was still refused,
+			// but as ErrTruncatedFile -- "this member ran short" -- where the
+			// archive had declared how many packed bytes to expect and the
+			// volume did not carry them. The wrong cause, reached by
+			// bypassing the guard that exists to name the right one.
 			//
 			// The header in force says whether this is the member's final
 			// block; anything else means the payload continues in the next
