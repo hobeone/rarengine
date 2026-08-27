@@ -40,7 +40,21 @@ func (s *multiVolumePayloadReader) Read(p []byte) (int, error) {
 			}
 			return n, nil
 		}
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
+			// errors.Is, matching the n > 0 arm above rather than comparing
+			// identity. io.LimitedReader returns a BARE io.EOF once it has
+			// delivered its count, so ordinary splicing worked either way --
+			// but it returns the underlying reader's error VERBATIM when that
+			// reader ends early, and a consumer's io.ReadCloser is free to
+			// wrap io.EOF. An identity check sent that value straight out of
+			// the bottom of this loop, skipping the bodyShort() refusal
+			// below: the one mechanism that reports a volume cut INSIDE this
+			// member's declared payload. Skipping it meant the traversal
+			// handed the caller a raw wrapped EOF in place of its own
+			// verdict, and Entry.classify -- which does use errors.Is -- then
+			// read that as a clean end for a member that had already produced
+			// its declared size.
+			//
 			// The header in force says whether this is the member's final
 			// block; anything else means the payload continues in the next
 			// volume, so an inner EOF is a boundary rather than an end.
