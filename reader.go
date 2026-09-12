@@ -18,9 +18,19 @@ import (
 type Reader struct {
 	volumes <-chan io.ReadCloser
 
-	// vol is nil whenever no volume is open, including after every failure.
-	// Because an advance constructs a new volume rather than repointing one, a
-	// failed advance cannot leave a partially consumed volume reachable.
+	// vol is the open volume, or nil when none is. An advance constructs a new
+	// volume rather than repointing one, so a failed advance cannot leave a
+	// partially consumed volume reachable -- nextVolume assigns the result.
+	//
+	// One exception, and it is deliberate: after Close this field keeps
+	// pointing at a volume that has been CLOSED, because Close no longer
+	// writes it. That is weaker than this codebase's usual preference for
+	// unrepresentable over unreachable, and it buys the field a single writing
+	// goroutine -- which is what made every unlocked read of it safe and what
+	// removed a reachable nil dereference from dispatch. A traversal that
+	// reaches the stale pointer reads a closed stream and gets that stream's
+	// error, which Entry.finish and NextEntry both translate; it does not
+	// panic, and it is not a data race.
 	vol *volume
 
 	win   *window
@@ -56,21 +66,23 @@ type Reader struct {
 	// ends that wait is the producer closing the channel.
 	done chan struct{}
 
-	// volMu guards every field Close touches -- r.vol and r.done -- against
-	// Close, which is the one method another goroutine may call. It is taken
-	// at volume transitions only, once per volume and never per byte, so it
-	// costs nothing on any path that moves data.
+	// volMu orders the fields Close shares with the traversal: r.done,
+	// r.volumes, and r.vol -- which Close only READS. Every write of r.vol is
+	// on the traversal goroutine and inside takeVolume or publishVolume, so
+	// the field has one writer rather than two synchronised ones. Taken at
+	// volume transitions only, once per volume and never per byte.
 	//
 	// r.done is in here because Reset REPLACES it: a plain sync.Once would be
 	// copied out from under a Close already inside its Do, letting a second Do
-	// body run and close an already-closed channel, which panics. Closing it
-	// under this lock instead, with a select/default rather than a Once, means
-	// the field can never be copied at the wrong moment, so the hazard stops
-	// existing rather than being synchronised around.
+	// body run and close an already-closed channel, which panics. A field
+	// replaced under a lock cannot be copied at the wrong moment, so the
+	// hazard stops existing rather than being synchronised around. That is
+	// also why Close tests the channel with chanClosed under this lock instead
+	// of using the sync.Once io.Pipe uses -- a pipe is never reset.
 	//
-	// It does not make the volume's CONTENTS concurrently safe, and cannot:
-	// the splice holds &v.body and reads through it, so guarding that would
-	// mean a lock per read. See Close for what that means for a caller.
+	// It does not make a volume's CONTENTS safe and does not need to: v.rc is
+	// immutable after construction and v.body is written only by the
+	// traversal, because volume.Close stopped mutating both.
 	volMu sync.Mutex
 
 	// damaged remembers a volume that ended somewhere this traversal cannot
@@ -856,20 +868,34 @@ func (r *Reader) closeCurrentVolume() {
 // context parameter could never have covered it -- the long operation would
 // have stayed uncancellable while the short one gained a ceremony.
 //
-// Close does not nil the open volume, it closes it: volume.Close zeroes the
-// aliased body, so a read already in flight sees EOF rather than a nil
-// dereference. A caller that closes from another goroutine gets errors and
-// unwinds; it does not get a panic.
+// Close does not nil the open volume and does not touch its fields. It reads
+// the pointer under volMu and closes the underlying stream; the traversal
+// alone writes r.vol, v.rc is immutable after construction, and v.body is
+// written only by the traversal.
 //
-// One limit, stated because the race detector will find it otherwise. Close
-// synchronises the volume POINTER, not the volume's contents. Closing while
-// another goroutine is mid-read of a payload races on the volume's aliased
-// body, and making that safe would mean a lock per read on a library whose
-// point is that there is none. In practice the two stalls have different
-// cures: a stalled VOLUME CHANNEL is what Close is for, and a stalled
-// underlying stream is cured by closing that stream, which the caller owns
-// and which types like net.Conn already make safe. This is the same division
-// io.Pipe and net.Conn draw.
+// An earlier version of this comment claimed the volume's body was zeroed so
+// an in-flight read "sees EOF rather than a nil dereference", and the same
+// commit assigned r.vol = nil three lines below. Both halves were false: the
+// assignment was the nil dereference. The zeroing was also below decoder50's
+// window, so it did not stop a compressed member anyway.
+//
+// What Close guarantees an in-flight reader is a VERDICT, not silence. A
+// sequential Close-then-read touches the stream not at all: NextEntry and
+// Entry.Read both refuse on the done channel before reading. A Close landing
+// concurrently, mid-call, does reach the stream -- refusing that would mean a
+// lock per read -- and what it gets back is translated rather than reported:
+// Entry.finish overrides a short member's verdict and NextEntry translates the
+// scan's, so the caller is told ErrReaderClosed and never os.ErrClosed or
+// ErrTruncatedFile. This is os.File.wrapErr's arrangement, which turns
+// poll.ErrFileClosing into ErrClosed at the same boundary.
+//
+// One limit remains, and it is the caller's rather than this library's.
+// Unblocking a read that is stalled inside the underlying stream depends on
+// that stream's own Close being safe to call while a Read is in flight, and so
+// does the mid-call case above. os.File and net.Conn are; a type doing its own
+// buffering may not be. This is the same division io.Pipe and net.Conn draw,
+// and it is why Close closes the stream rather than trying to interrupt a read
+// it does not own.
 //
 // After Close, Reset revives the Reader for a different archive. Close ends
 // an archive, not the 32 MB window.
