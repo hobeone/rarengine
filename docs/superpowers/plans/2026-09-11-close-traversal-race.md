@@ -886,18 +886,22 @@ func TestRetainedEntrySurvivesCloseThenReset(t *testing.T) {
 }
 ```
 
-- [ ] **Step 8: Mutation-check all four mechanisms, in one pass**
+- [ ] **Step 8: Mutation-check the two mechanisms that are observable here**
 
-Delete each in turn, run `go test -race -count=1 ./...`, confirm the named test fails, **restore before the next**:
+The full four-way table lives in **Task 5 Step 5**, because two of its rows cannot reproduce until `Close` stops nilling `r.vol`. Run only these two now:
 
 | delete | expect to fail | measured failure text |
 |---|---|---|
-| `NextEntry`'s pre-check | `TestClosedReaderReadsNothingFromItsVolume` | `NextEntry after Close = <nil>` — the second `NextEntry` *succeeds* |
-| `Entry.Read`'s entrance guard | `TestCloseCancelsAnInFlightEntry` (and the above) | `returned 20 bytes ("HELLOHELLOHELLOHELLO")` |
-| `NextEntry`'s translation | `TestCloseDuringTraversalIsRaceFree` | `NextEntry: file already closed` |
+| `Entry.Read`'s entrance guard | `TestCloseCancelsAnInFlightEntry` **and** `TestClosedReaderReadsNothingFromItsVolume` | `returned 20 bytes ("HELLOHELLOHELLOHELLO")` |
 | `Entry.finish`'s override | `TestRetainedEntrySurvivesCloseThenReset` | the `ErrTruncatedFile` text |
 
-**If any deletion changes nothing, stop and report it.** An unpinned check is one a later refactor deletes. Three of these four predictions were wrong in an earlier draft — two optimistic, one pessimistic — so they are measurements to reproduce, not reasoning to trust. Note the second row fails two tests, not one.
+Both are `Entry`-local and unaffected by the traversal's state, which is why they are measurable here. Restore each before the next.
+
+**Why the other two are deferred, measured rather than assumed.** With `Close` still executing `r.vol = nil` (Task 5 deletes it), deleting `NextEntry`'s pre-check leaves `nextEntry` seeing a nil volume, so it reaches `nextVolume`'s `select` on `done` and returns `ErrReaderClosed` by a different route entirely — the test passes and the row proves nothing. And `NextEntry`'s translation cannot be measured against `TestCloseDuringTraversalIsRaceFree` while that test is still failing on the nil-dereference Task 5 fixes; the panic arrives before the verdict does.
+
+This is the second instance in this plan of a mutation measured on the finished tree being transcribed into a step that runs before the mechanism it depends on — see the note in Task 3 Step 10. The general rule: **a mutation check belongs in the task after the last change that affects its outcome, not the task that introduces its mechanism.**
+
+**If either deletion above changes nothing, stop and report it.**
 
 - [ ] **Step 9: Measure the regression this task introduces**
 
@@ -911,20 +915,23 @@ Expected: **+32 B/op on every benchmark, allocation count unchanged**, from `uns
 
 This is the benchmark CLAUDE.md's rule asks for and the justification it must carry: the growth is one `volume` per volume *advance* — not per byte, not per member — and the allocation count does not move, so the archive-level cost is 32 bytes times the number of parts.
 
-**Expect an ns/op cost too, and record it rather than explaining it away.** Two reviewers measured this differently and the second isolated it properly, so the numbers below are the ones to reproduce. On a quiet box (baseline-vs-baseline ≤0.7%, `p=0.618`), HEAD → full plan on the fixed selection:
+**The ns/op cost is machine-dependent and did NOT reproduce on the development machine.** Three measurements exist and they disagree, so here is all of it:
 
-| benchmark | ns/op |
-|---|---|
-| `Decompress_Store` | **+7.9%** |
-| `Decompress_Compress` | **+5.5%** |
-| `Decompress_Solid` | **+2.5%** |
-| `ReaderResetReusesWindow` | **+6.3%** |
+| | `Store` | `Compress` | `Solid` | `Reset` |
+|---|---|---|---|---|
+| review round 4 (full `-bench=.`) | +2.99% | +3.85% | — | +3.08% |
+| review round 5 (fixed selection, quiet box) | +7.9% | +5.5% | +2.5% | +6.3% |
+| **implementation (Ryzen 9 9950X3D, `-count=10`)** | **~ (p=0.066)** | **+0.39% (p=0.045)** | **~ (p=0.436)** | **~ (p=0.342)** |
 
-Bisected: roughly half is `volume`'s 32-byte growth (`Store +4.9%` with *only* `closeOnce`/`closeErr` applied and no test-file changes, so no layout confound), and roughly half is `Entry.Read`'s `chanClosed` (`Store +3.9%`, `Solid +2.4%`, on trees differing by four lines). A `select`/`default` compiles to a `selectnbrecv` runtime call, not the inlined load an `atomic.Bool` would give — that is the price of the single-signal design, and it is a deliberate trade, not a surprise.
+Round 5 bisected its figures — roughly half to `volume`'s 32-byte growth, half to `Entry.Read`'s `chanClosed`, on the theory that a `select`/`default` compiles to a `selectnbrecv` call where an `atomic.Bool` would inline to a load. That theory is sound and the effect is evidently below noise on a modern desktop part. **Treat the latency cost as unproven**: it is real on some hardware, absent on the machine this ships from, and nowhere near large enough to have changed the design choice.
 
-**Do not use `-bench=.`.** An earlier reviewer running the full set saw `BenchmarkFilterExecution` — pure assembly, untouched by any task — move −15%, which is binary layout and swamps the real signal. The fixed selection above is what to trust.
+**The B/op cost is real, exact and reproducible on all three** — `+31.7 B/op` on `Store` and `Compress`, `+31.3` on `Reset`, consistent with the predicted flat +32 from `volume` 64 → 96, with allocation counts unchanged (`p=1.000`, all samples equal). `Solid`'s B/op delta does not reach significance (`p=0.260`), swamped by decoder allocation noise. That is the number to quote.
 
-If your numbers differ materially from the table, report them; do not proceed on the assumption that a difference is noise.
+**Do not use `-bench=.`.** An earlier reviewer running the full set saw `BenchmarkFilterExecution` — pure assembly, untouched by any task — move −15% on binary layout alone, which swamps the real signal.
+
+**Add `-run '^$'` to both benchmark commands.** `TestCloseDuringTraversalIsRaceFree` is still red at this point and panics the test binary before any benchmark executes.
+
+If your numbers differ materially from all three rows above, report them.
 
 - [ ] **Step 10: Run**
 
@@ -1061,6 +1068,19 @@ Run: `grep -n 'r\.vol = ' reader.go splice.go` — exactly two lines, in `takeVo
 - [ ] **Step 5: The race test must now PASS**
 
 Run: `go test -race -count=1 -run TestCloseDuringTraversalIsRaceFree ./...` — PASS, no `WARNING: DATA RACE`, and no mis-named verdict from the assertions Task 4 added.
+
+- [ ] **Step 5a: Now run the full four-way mutation table**
+
+Every mechanism's outcome is finally settled — this is the state the table was measured against. Delete each in turn, run `go test -race -count=1 ./...`, confirm the named test fails, **restore before the next**:
+
+| delete | expect to fail | measured failure text |
+|---|---|---|
+| `NextEntry`'s pre-check (Task 3 Step 3) | `TestClosedReaderReadsNothingFromItsVolume` | `NextEntry after Close = <nil>` — the second `NextEntry` *succeeds*, because `recordingVolume` keeps serving after its own `Close`; the `readsAfterClose` assertion may fire too |
+| `Entry.Read`'s entrance guard (Task 3 Step 6) | `TestCloseCancelsAnInFlightEntry` **and** `TestClosedReaderReadsNothingFromItsVolume` | `returned 20 bytes ("HELLOHELLOHELLOHELLO")` |
+| `NextEntry`'s translation (Task 3 Step 3) | `TestCloseDuringTraversalIsRaceFree` | `NextEntry: file already closed` |
+| `Entry.finish`'s override (Task 3 Step 7) | `TestRetainedEntrySurvivesCloseThenReset` | the `ErrTruncatedFile` text |
+
+Rows 2 and 4 already reproduced at Task 4 Step 8; rows 1 and 3 could not, because both are masked while `Close` still nils `r.vol`, and this step is where they were always measured. **If any row changes nothing here, stop and report it** — an unpinned check is one a later refactor deletes, and that is the whole reason this table exists.
 
 - [ ] **Step 6: Hunt the panic without the race detector**
 
@@ -1282,6 +1302,6 @@ Facts established before this plan existed, from the premise audit, the adversar
 | 20 | **`Entry.finish`'s override is a no-op on every racing path** — 108–122 firings per 400 iterations, always with `err` already `ErrReaderClosed`. Its one reachable productive path is `Close`→`Reset`→retained `Entry`. | Soundness, round 3 |
 | 21 | **`mockReadCloser` cannot pin `NextEntry`'s translation** — it keeps serving after `Close`, so deleting the translation left the test green across 4000 iterations. With a stream returning `os.ErrClosed` the translation fires 15–23 times per 400 and the deletion turns it red. | Soundness, round 3 |
 | 22 | **`-bench=.` is unusable for this change**: `BenchmarkFilterExecution`, pure assembly untouched by any task, moves **−15%** on binary layout alone and swamps the signal. Always benchmark a fixed selection. Round 4 concluded from a narrow re-run that there was *no* decode delta; round 5 re-measured on a quiet box and found a real one — see row 24. The layout warning stands; the "it was all noise" conclusion does not. | Soundness rounds 4 and 5; round 5 supersedes |
-| 24 | **The change costs decode latency, and it is bisected.** HEAD → full plan on the fixed selection at `-count=10`, baseline-vs-baseline ≤0.7%: `Decompress_Store` **+7.9%**, `Compress` **+5.5%**, `Solid` **+2.5%**, `ReaderReset` **+6.3%**, all `p=0.000`. Roughly half is `volume`'s 32-byte growth (`Store +4.9%` in isolation, no test-file changes); roughly half is `Entry.Read`'s `chanClosed` (`Store +3.9%`, `Solid +2.4%`, trees differing by four lines) — a `select`/`default` is a `selectnbrecv` call where an `atomic.Bool` would inline to a load. | Soundness, round 5, isolated |
+| 24 | **The memory cost is exact and reproducible; the latency cost is machine-dependent and unproven.** `+32 B/op` per volume with allocation count unchanged reproduced on every measurement. ns/op did not: round 4 saw +3-4% on the full bench set, round 5 saw +2.5% to +7.9% on a fixed selection and bisected it half to `volume`'s growth and half to `Entry.Read`'s `select`/`default` (a `selectnbrecv` call where an `atomic.Bool` would inline to a load) — and the implementation run on a Ryzen 9 9950X3D at `-count=10` found **no significant change on three of four benchmarks and +0.39% on the fourth**. The bisection's theory is sound; the effect is below noise on a modern desktop part. Quote the B/op figure; do not quote a latency figure without saying which machine produced it. | Soundness rounds 4 and 5, implementation Task 4 |
 | 25 | **`Entry.Read`'s guard must sit BELOW the `remaining <= 0` arm.** Above it, a zero-length member — an empty file or any directory — reports `ErrReaderClosed` after a `Close` it had already completed before, reachable through the documented `context.AfterFunc` pattern plus a deferred `Entry.Close`. Passing `ErrReaderClosed` in as `err` routes around `finish`'s `short()` gate, which exists precisely to stop a member that produced every declared byte being blamed on a cancellation. | Soundness, round 5, measured and fix verified |
 | 23 | **The standard library carries one cancellation signal, not a signal plus a flag.** `io.Pipe`: `done chan struct{}` closed inside a `sync.Once`, guarded by `select`/`default` at the head of `pipe.read`, reason in `rerr`/`werr`. `context.cancelCtx`: `done` plus `err`, no boolean. `context.Context.Done()` documents `Done may return nil if this context can never be canceled`, and `emptyCtx.Done()` returns nil — so nil-means-never-cancelled is idiomatic. `os.File.wrapErr` classifies at the exit: `if err == poll.ErrFileClosing { err = ErrClosed }`, panicking under `checkWrapErr` if one escapes. | Read from Go 1.27.1 `src/io/pipe.go`, `src/context/context.go`, `src/os/file.go` |
