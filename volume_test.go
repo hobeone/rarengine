@@ -225,21 +225,9 @@ func TestVolumeDoesNotResumeAfterFailedHeaderRead(t *testing.T) {
 	}
 }
 
-// next() after Close() must not dereference the now-nil io.ReadCloser: a
-// caller mistake must produce an error, not a crashed process.
-func TestVolumeNextAfterCloseReturnsError(t *testing.T) {
-	blk := rar5BlockDeclaring(headerTypeFile, 4, nil, true)
-	stream := append(append([]byte{}, blk...), []byte("DATA")...)
-
-	v, err := openVolume(&mockReadCloser{bytes.NewReader(stream)})
-	if err != nil {
-		t.Fatalf("openVolume: %v", err)
-	}
-	if err := v.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-
-	if _, err := v.next(); err == nil {
-		t.Fatalf("next() after Close(): want an error, got nil")
-	}
-}
+// TestVolumeNextAfterCloseReturnsError was deleted here. It asserted that
+// next() after Close() errors rather than dereferencing a nil rc -- a state
+// volume.Close created itself, by nilling rc for idempotency. closeOnce
+// provides idempotency without the write, so rc is immutable after
+// construction and openVolume is the only constructor, which makes the nil it
+// guarded unrepresentable rather than merely unreached.

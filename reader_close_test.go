@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 )
@@ -381,10 +383,24 @@ func TestCloseDuringTraversalIsRaceFree(t *testing.T) {
 	}
 	stream := rar5Archive(t, false, members...)
 
+	// Now that ErrReaderClosed is what a cancelled traversal reports, this
+	// test asserts the verdict as well as race-freedom. The fixture changes
+	// with it: volumesOf's mockReadCloser keeps serving after Close, so no
+	// read ever fails and NextEntry's translation has nothing to translate.
+	acceptable := func(err error) bool {
+		return errors.Is(err, ErrReaderClosed) || errors.Is(err, io.EOF) ||
+			errors.Is(err, ErrNoNextVolume)
+	}
+
 	for range 200 {
-		r := NewReader(volumesOf(stream))
+		vol := &closedStreamVolume{r: bytes.NewReader(stream)}
+		volumes := make(chan io.ReadCloser, 1)
+		volumes <- vol
+		close(volumes)
+		r := NewReader(volumes)
 
 		started := make(chan struct{})
+		var bad error
 		var wg sync.WaitGroup
 		wg.Go(func() {
 			first := true
@@ -395,16 +411,30 @@ func TestCloseDuringTraversalIsRaceFree(t *testing.T) {
 					first = false
 				}
 				if err != nil {
+					if !acceptable(err) && bad == nil {
+						bad = fmt.Errorf("NextEntry: %w", err)
+					}
 					return
 				}
-				_, _ = io.Copy(io.Discard, e)
-				_ = e.Close()
+				if _, rerr := io.Copy(io.Discard, e); rerr != nil &&
+					!acceptable(rerr) && bad == nil {
+					bad = fmt.Errorf("Entry.Read %q: %w", e.Header.Name, rerr)
+				}
+				if cerr := e.Close(); cerr != nil && !acceptable(cerr) &&
+					bad == nil {
+					bad = fmt.Errorf("Entry.Close %q: %w", e.Header.Name, cerr)
+				}
 			}
 		})
 
 		<-started
 		_ = r.Close()
 		wg.Wait()
+
+		if bad != nil {
+			t.Fatalf("a cancelled traversal reported a cause that is not the "+
+				"caller's own Close: %v", bad)
+		}
 	}
 }
 
@@ -480,5 +510,111 @@ func TestZeroLengthMemberIsNotCancelledByALaterClose(t *testing.T) {
 		t.Fatalf("zero-length Entry.Close after Reader.Close = %v, want nil; "+
 			"a member that produced everything it declared was not cancelled",
 			verdict)
+	}
+}
+
+// closedStreamVolume fails reads after its own Close, the way *os.File does --
+// which is what both of this library's consumers actually feed it
+// (constraint 9). recordingVolume and mockReadCloser deliberately keep serving
+// after Close, which is the right fixture for proving the refusal comes from
+// this library; this is the right fixture for proving that a refusal coming
+// from the STREAM is translated rather than reported.
+type closedStreamVolume struct {
+	r      *bytes.Reader
+	closed atomic.Bool
+}
+
+func (v *closedStreamVolume) Read(p []byte) (int, error) {
+	if v.closed.Load() {
+		return 0, os.ErrClosed
+	}
+	return v.r.Read(p)
+}
+
+func (v *closedStreamVolume) Close() error {
+	v.closed.Store(true)
+	return nil
+}
+
+// A sequential Close-then-read must not touch the volume at all.
+//
+// This pins the ENTRANCE guards -- NextEntry's pre-check and Entry.Read's --
+// and nothing more. It deliberately does NOT claim that a closed Reader never
+// reads; a Close landing concurrently does reach the stream, and preventing
+// that would need a lock per read.
+func TestClosedReaderReadsNothingFromItsVolume(t *testing.T) {
+	stream := rar5Archive(t, false,
+		rar5Member(t, memberSpec{name: "a.bin", content: "AAAA", withCRC: true}),
+		rar5Member(t, memberSpec{name: "b.bin", content: "BBBB", withCRC: true}),
+	)
+
+	vol := &recordingVolume{r: bytes.NewReader(stream)}
+	volumes := make(chan io.ReadCloser, 1)
+	volumes <- vol
+	close(volumes)
+
+	r := NewReader(volumes)
+	e, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("NextEntry: %v", err)
+	}
+	if cerr := r.Close(); cerr != nil {
+		t.Fatalf("Close: %v", cerr)
+	}
+
+	// Asserted, not assumed, matching TestPackedRemainder_NoReadAfterVolumeClose:
+	// if Reader.Close ever stops closing the open volume, "no reads after
+	// close" holds trivially and this test stops exercising its own subject.
+	if !vol.closed {
+		t.Fatal("Reader.Close did not close the open volume")
+	}
+
+	if _, err := io.ReadAll(e); !errors.Is(err, ErrReaderClosed) {
+		t.Fatalf("ReadAll after Close = %v, want ErrReaderClosed", err)
+	}
+	if _, err := r.NextEntry(); !errors.Is(err, ErrReaderClosed) {
+		t.Fatalf("NextEntry after Close = %v, want ErrReaderClosed", err)
+	}
+	if vol.readsAfterClose != 0 {
+		t.Fatalf("a sequential Close-then-read hit the volume %d times; want 0",
+			vol.readsAfterClose)
+	}
+}
+
+// An Entry retained across Close+Reset keeps reporting the cancellation.
+//
+// This is the ONLY deterministically reachable path on which Entry.finish's
+// override changes a verdict. Reset calls severActive, which stamps
+// truncated() on an entry that never reached its declared size -- Entry.Read's
+// entrance guard never sees it, because severActive reads nothing -- so
+// without the override the caller is told "archive ended before the file's
+// declared size was produced" for its own cancellation.
+//
+// It stays correct with no ordering rule inside Reset, which is what the done
+// channel buys over a boolean: the Entry captured the channel of ITS archive,
+// and Reset replaces the field rather than reopening the channel, so the
+// entry's copy stays closed however Reset's statements are ordered.
+//
+// Documented pattern, not a contrivance: context.AfterFunc(ctx, r.Close)
+// followed by Reset for the next archive is what Reader.Close's own doc
+// comment describes, and a deferred Entry.Close is enough to reach it.
+func TestRetainedEntrySurvivesCloseThenReset(t *testing.T) {
+	stream := rar5Archive(t, false, rar5Member(t, memberSpec{
+		name: "a.bin", content: "HELLOHELLOHELLOHELLO", withCRC: true,
+	}))
+
+	r := NewReader(volumesOf(stream))
+	e, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("NextEntry: %v", err)
+	}
+	if cerr := r.Close(); cerr != nil {
+		t.Fatalf("Close: %v", cerr)
+	}
+	r.Reset(volumesOf(stream))
+
+	if verdict := e.Close(); !errors.Is(verdict, ErrReaderClosed) {
+		t.Fatalf("retained Entry.Close after Close+Reset = %v, want "+
+			"ErrReaderClosed", verdict)
 	}
 }

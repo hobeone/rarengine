@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 )
 
 // volume owns one RAR volume's byte stream and the position within it.
@@ -51,6 +52,23 @@ type volume struct {
 	// it on every subsequent call, without touching v.rc again, is what keeps
 	// a failed read from being retried into a fabricated header.
 	err error
+
+	// closeOnce makes Close idempotent without mutating rc. The previous
+	// idempotency test was `v.rc == nil`, which required Close to nil rc -- a
+	// write racing every traversal read of that field, from the one method
+	// another goroutine may call. Once, plus an immutable rc, removes the
+	// write instead of synchronising it, and absorbs the concurrent double
+	// Close that Task 5 makes possible by leaving r.vol non-nil.
+	//
+	// sync.Once and not an atomic CAS: Once establishes happens-before for
+	// every caller, so a second caller's read of closeErr is ordered after the
+	// first's write. A CAS would make the flag safe and leave closeErr racy.
+	// (Reader.done is closed under volMu rather than by a Once for the
+	// opposite reason -- Reset replaces it. A volume is never reset.)
+	//
+	// These two fields cost 32 bytes per volume -- Step 9 measures it.
+	closeOnce sync.Once
+	closeErr  error
 }
 
 var rar5Signature = []byte{0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x01, 0x00}
@@ -142,10 +160,6 @@ func (v *volume) next() (*blockHeader, error) {
 			io.ErrUnexpectedEOF, v.body.N)
 		return nil, v.err
 	}
-	if v.rc == nil {
-		v.err = fmt.Errorf("rarengine: next called on a closed volume")
-		return nil, v.err
-	}
 	var (
 		h   *blockHeader
 		err error
@@ -190,12 +204,24 @@ func (v *volume) useEncryptedHeaders(key []byte) {
 	v.hd = &headerDecrypter{key: key}
 }
 
+// Close closes the underlying stream once, and mutates nothing else.
+//
+// It used to nil v.rc and zero v.body, which is what made Reader.Close racy:
+// those are fields the traversal reads and writes, and Reader.Close is the one
+// method another goroutine may call. Leaving rc immutable after construction
+// means a concurrent Close reads it safely, and leaving body alone means only
+// the traversal ever writes it.
+//
+// What the body-zeroing used to guarantee -- that an Entry the caller still
+// holds stops producing content -- is now the Reader's done channel, read
+// through Entry.cancelled. That is strictly more than the zeroing covered: the
+// zeroing sat below decoder50's window, so a compressed member kept delivering
+// buffered plaintext after it.
 func (v *volume) Close() error {
-	if v.rc == nil {
-		return nil
-	}
-	err := v.rc.Close()
-	v.rc = nil
-	v.body = io.LimitedReader{}
-	return err
+	v.closeOnce.Do(func() {
+		if v.rc != nil {
+			v.closeErr = v.rc.Close()
+		}
+	})
+	return v.closeErr
 }
