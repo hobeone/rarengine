@@ -22,6 +22,15 @@ type Reader struct {
 	// volume rather than repointing one, so a failed advance cannot leave a
 	// partially consumed volume reachable -- nextVolume assigns the result.
 	//
+	// Assigned in exactly two places, takeVolume and publishVolume, both on
+	// the traversal goroutine and both under volMu -- so the field has ONE
+	// writing goroutine rather than two synchronised ones, and Close's read is
+	// ordered against every write. The check is
+	// `grep -nE '^\s+r\.vol = ' reader.go splice.go` returning two lines --
+	// anchored so it counts assignments rather than the prose in Close's doc
+	// comment that mentions the one this change removed. volMu's comment and
+	// takeVolume's point here rather than restating it.
+	//
 	// One exception, and it is deliberate: after Close this field keeps
 	// pointing at a volume that has been CLOSED, because Close no longer
 	// writes it. That is weaker than this codebase's usual preference for
@@ -67,10 +76,9 @@ type Reader struct {
 	done chan struct{}
 
 	// volMu orders the fields Close shares with the traversal: r.done,
-	// r.volumes, and r.vol -- which Close only READS. Every write of r.vol is
-	// on the traversal goroutine and inside takeVolume or publishVolume, so
-	// the field has one writer rather than two synchronised ones. Taken at
-	// volume transitions only, once per volume and never per byte.
+	// r.volumes, and r.vol -- which Close only READS; see the vol field for
+	// why that field has one writer rather than two synchronised ones. Taken
+	// at volume transitions only, once per volume and never per byte.
 	//
 	// r.done is in here because Reset REPLACES it: a plain sync.Once would be
 	// copied out from under a Close already inside its Do, letting a second Do
@@ -436,6 +444,15 @@ func (r *Reader) dispatch(h *blockHeader) (*Entry, error) {
 		// the next one".
 		return nil, r.handleNonFileBlock(h)
 	}
+	// Fetched once for the whole function, and handed to every Entry built
+	// below. Only Reset replaces r.done, and Reset is a traversal call that
+	// cannot run while this one is in progress, so the value cannot change
+	// underneath dispatch -- but re-fetching it per call site took volMu again
+	// each time, and did so twice on the one path that builds an Entry and
+	// then refuses it. Hoisting also states the invariant where it can be
+	// read, rather than leaving it to be re-derived from the mutual
+	// exclusivity of six returns.
+	done := r.doneChan()
 	fh, err := parseFileHeader(h)
 	if err != nil {
 		// A member whose identity survived the failure is refused by NAME,
@@ -445,7 +462,7 @@ func (r *Reader) dispatch(h *blockHeader) (*Entry, error) {
 		// the block's declared payload on the way to the next header.
 		if fh != nil && fh.FirstBlock {
 			r.win.MarkIncomplete()
-			return terminalEntry(fh, err, r.doneChan()), nil
+			return terminalEntry(fh, err, done), nil
 		}
 		// Damage is recorded from what happened to the file, never from
 		// what the caller is told about it. A member skipped here is one
@@ -486,7 +503,7 @@ func (r *Reader) dispatch(h *blockHeader) (*Entry, error) {
 		return terminalEntry(fh, fmt.Errorf(
 			"%w: file %q declares unpack version %d, this library decodes "+
 				"version %d (RAR 5.0)", ErrUnsupportedFormat, fh.Name,
-			fh.UnpackVersion, unpackVersionRAR5), r.doneChan()), nil
+			fh.UnpackVersion, unpackVersionRAR5), done), nil
 	}
 	// The multiplication is guarded, not replaced by a division: a
 	// division floors, so it would let a member declaring exactly one
@@ -499,22 +516,22 @@ func (r *Reader) dispatch(h *blockHeader) (*Entry, error) {
 		(fh.PackedSize <= math.MaxInt64/1000 && fh.UnpackedSize > 1000*fh.PackedSize)
 	if fh.UnpackedSize > 1024*1024 && expands {
 		r.win.MarkIncomplete()
-		return terminalEntry(fh, ErrRarBombDetected, r.doneChan()), nil
+		return terminalEntry(fh, ErrRarBombDetected, done), nil
 	}
 	if err := r.win.BeginFile(fh.Solid); err != nil {
 		r.win.MarkIncomplete()
-		return terminalEntry(fh, err, r.doneChan()), nil
+		return terminalEntry(fh, err, done), nil
 	}
 	// e is built before the splicer, and the splicer before the decode
 	// chain, because the splicer consults e through lastBlock() while
 	// reading -- both must exist before the chain's first Read. e.src is
 	// filled in only once the chain is known to build successfully.
-	e := newEntry(fh, nil, r.doneChan())
+	e := newEntry(fh, nil, done)
 	splicer := &multiVolumePayloadReader{r: r, e: e, src: r.vol.payload()}
 	src, err := r.buildChain(fh, splicer)
 	if err != nil {
 		r.win.MarkIncomplete()
-		return terminalEntry(fh, err, r.doneChan()), nil
+		return terminalEntry(fh, err, done), nil
 	}
 	e.src = src
 	r.entry = e
@@ -790,16 +807,16 @@ func (r *Reader) isClosed() bool { return chanClosed(r.doneChan()) }
 // with the done channel in force, leaving the caller to close the volume
 // outside the lock.
 //
-// This and publishVolume are the ONLY two functions that assign r.vol. That is
-// the invariant, expressed as something grep can check rather than as a rule
-// six call sites have to remember: every write is on the traversal goroutine
-// and under volMu, so the field has one writing goroutine and Close's read is
-// ordered against all of them.
+// This and publishVolume are the ONLY two functions that assign r.vol -- see
+// the vol field for the invariant that buys, and why it is expressed as
+// something grep can check rather than as a rule six call sites remember.
+// publishVolume exists for that reason rather than for reuse: it has one
+// caller, and inlining it would put a third r.vol write back into nextVolume.
 //
 // done comes back from the same acquisition because nextVolume needs the pair
 // and a second accessor for one channel read would be a third place this lock
-// is taken.
-func (r *Reader) takeVolume() (*volume, chan struct{}) {
+// is taken. Receive-only, matching doneChan: no caller sends or closes.
+func (r *Reader) takeVolume() (*volume, <-chan struct{}) {
 	r.volMu.Lock()
 	v, done := r.vol, r.done
 	r.vol = nil
