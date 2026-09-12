@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -345,6 +347,63 @@ func TestConcurrentClosesAreSafe(t *testing.T) {
 			})
 		}
 		close(start)
+		wg.Wait()
+	}
+}
+
+// Close concurrent with an active traversal must be race-free and must not
+// panic. This is the contract Reader.Close's doc comment states outright.
+//
+// Task 4 extends this test to assert the VERDICT as well; at this point
+// ErrReaderClosed is not yet what a cancelled traversal reports, so there is
+// nothing to assert but race-freedom.
+//
+// The `started` channel is load-bearing, not decoration. Without it this test
+// passed 6 runs out of 6 at -count=1: Close reaches NextEntry's own closed
+// check before the traversal goroutine is scheduled past it, so NextEntry
+// returns early and never touches r.vol at all, and the race the test exists
+// to catch is never armed. Handing off after the first NextEntry has returned
+// puts Close inside the scan rather than in front of it, which reproduced the
+// race on 3 runs out of 3.
+//
+// Still loops: the window between nextEntry's nil check on r.vol and
+// dispatch's r.vol.payload() is narrow even once the handoff lands. Without
+// -race this same shape produced nil-pointer panics at roughly 9 per 400
+// iterations.
+func TestCloseDuringTraversalIsRaceFree(t *testing.T) {
+	members := make([][]byte, 0, 8)
+	for i := range 8 {
+		members = append(members, rar5Member(t, memberSpec{
+			name:    fmt.Sprintf("m%d.bin", i),
+			content: strings.Repeat("payload bytes ", 64),
+			withCRC: true,
+		}))
+	}
+	stream := rar5Archive(t, false, members...)
+
+	for range 200 {
+		r := NewReader(volumesOf(stream))
+
+		started := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Go(func() {
+			first := true
+			for {
+				e, err := r.NextEntry()
+				if first {
+					close(started)
+					first = false
+				}
+				if err != nil {
+					return
+				}
+				_, _ = io.Copy(io.Discard, e)
+				_ = e.Close()
+			}
+		})
+
+		<-started
+		_ = r.Close()
 		wg.Wait()
 	}
 }
