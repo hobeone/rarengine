@@ -54,19 +54,19 @@ type Reader struct {
 	// which is otherwise unbounded: a Reader waiting for a volume that will
 	// never arrive cannot rescue itself, because the only other thing that
 	// ends that wait is the producer closing the channel.
-	done   chan struct{}
-	closed bool
+	done chan struct{}
 
-	// volMu guards every field Close touches -- r.vol, r.done and r.closed --
-	// against Close, which is the one method another goroutine may call. It is
-	// taken at volume transitions only, once per volume and never per byte, so
-	// it costs nothing on any path that moves data.
+	// volMu guards every field Close touches -- r.vol and r.done -- against
+	// Close, which is the one method another goroutine may call. It is taken
+	// at volume transitions only, once per volume and never per byte, so it
+	// costs nothing on any path that moves data.
 	//
-	// r.done and r.closed are in here because Reset REPLACES them: a plain
-	// sync.Once would be copied out from under a Close already inside its Do,
-	// letting a second Do body run and close an already-closed channel, which
-	// panics. A flag under the same lock cannot be copied at the wrong moment,
-	// so the hazard stops existing rather than being synchronised around.
+	// r.done is in here because Reset REPLACES it: a plain sync.Once would be
+	// copied out from under a Close already inside its Do, letting a second Do
+	// body run and close an already-closed channel, which panics. Closing it
+	// under this lock instead, with a select/default rather than a Once, means
+	// the field can never be copied at the wrong moment, so the hazard stops
+	// existing rather than being synchronised around.
 	//
 	// It does not make the volume's CONTENTS concurrently safe, and cannot:
 	// the splice holds &v.body and reads through it, so guarding that would
@@ -152,7 +152,6 @@ func (r *Reader) Reset(volumes <-chan io.ReadCloser) {
 	// what Reset exists for, and refusing to revive would mean allocating a
 	// new 32 MB window to recover from a cancelled download.
 	r.volMu.Lock()
-	r.closed = false
 	r.done = make(chan struct{})
 	r.volumes = volumes
 	r.volMu.Unlock()
@@ -181,16 +180,11 @@ func (r *Reader) SetPasswords(candidates []string) { r.passwords = candidates }
 // delivered by the Entry, including refusals, which arrive as an Entry that is
 // already terminal.
 func (r *Reader) NextEntry() (*Entry, error) {
-	// Checked before r.fatal and before any read: a closed Reader must not go
-	// on traversing the volume it still holds. That volume is closed, so its
-	// body reads as empty, and without this the scan would report the archive
-	// truncated or ended rather than closed -- describing the caller's own
-	// decision as damage.
-	r.volMu.Lock()
-	closed := r.closed
-	r.volMu.Unlock()
-	// --- no lock held below this line ---
-	if closed {
+	// Checked before r.fatal and before any read, so a sequential
+	// Close-then-NextEntry performs no read on the caller's stream at all.
+	// A Close landing DURING this call is not caught here -- nothing at the
+	// head of a call can be -- it is caught by the translation below.
+	if r.isClosed() {
 		return nil, ErrReaderClosed
 	}
 	if r.fatal != nil {
@@ -198,6 +192,27 @@ func (r *Reader) NextEntry() (*Entry, error) {
 	}
 	e, err := r.nextEntry()
 	if err != nil {
+		// A Close that landed mid-scan. nextEntry's loop had already passed
+		// the pre-check, so r.vol.next() went on to read a stream the caller
+		// had closed underneath it, and err is whatever that stream said --
+		// os.ErrClosed for an *os.File, which is what this library's consumers
+		// actually feed. Reporting it would name the caller's own decision as
+		// an archive failure AND latch it onto r.fatal for the Reader's life.
+		//
+		// This is os.File.wrapErr's move: translate the internal
+		// "you closed this" into the caller-facing sentinel at the boundary.
+		//
+		// Unconditional, unlike Entry.finish's override, which fires only for
+		// a SHORT member. A member's verdict may still be read after Close, so
+		// it must stay true about the bytes delivered; this verdict only
+		// decides whether traversal continues, and a closed Reader does not.
+		//
+		// A guard at the head of the scan loop was tried instead and removed:
+		// unreachable by any sequential test, and it changed no verdict once
+		// this translation existed. See constraint 16.
+		if r.isClosed() {
+			return nil, ErrReaderClosed
+		}
 		return nil, r.latchArchive(err)
 	}
 	// A latch set DURING this call must not be outrun by whatever the scan
@@ -272,8 +287,18 @@ func (r *Reader) armHeaderDecryption(h *blockHeader) error {
 // MissingFinalVolume's traversal from ending cleanly afterwards -- the next
 // NextEntry call is expected to find the channel closed on its own and
 // report end of archive, not replay a stale fatal error.
+//
+// ErrReaderClosed is likewise never latched, for a different reason:
+// r.fatal exists to stop traversal resuming past an unresolved ARCHIVE
+// failure, and a closed Reader is not an archive failure at all. Nothing
+// observes the latch either way -- NextEntry's closed pre-check runs before
+// its r.fatal check, and Reset clears both -- but leaving it out is what lets
+// r.fatal be described as archive-level without an exception. Load-bearing in
+// one direction: if that pre-check ever moves below the r.fatal check, the
+// latch surfaces.
 func (r *Reader) latchArchive(err error) error {
-	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, ErrNoNextVolume) {
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, ErrNoNextVolume) &&
+		!errors.Is(err, ErrReaderClosed) {
 		r.fatal = err
 	}
 	return err
@@ -416,7 +441,7 @@ func (r *Reader) dispatch(h *blockHeader) (*Entry, error) {
 		// the block's declared payload on the way to the next header.
 		if fh != nil && fh.FirstBlock {
 			r.win.MarkIncomplete()
-			return terminalEntry(fh, err), nil
+			return terminalEntry(fh, err, r.doneChan()), nil
 		}
 		// Damage is recorded from what happened to the file, never from
 		// what the caller is told about it. A member skipped here is one
@@ -457,7 +482,7 @@ func (r *Reader) dispatch(h *blockHeader) (*Entry, error) {
 		return terminalEntry(fh, fmt.Errorf(
 			"%w: file %q declares unpack version %d, this library decodes "+
 				"version %d (RAR 5.0)", ErrUnsupportedFormat, fh.Name,
-			fh.UnpackVersion, unpackVersionRAR5)), nil
+			fh.UnpackVersion, unpackVersionRAR5), r.doneChan()), nil
 	}
 	// The multiplication is guarded, not replaced by a division: a
 	// division floors, so it would let a member declaring exactly one
@@ -470,22 +495,22 @@ func (r *Reader) dispatch(h *blockHeader) (*Entry, error) {
 		(fh.PackedSize <= math.MaxInt64/1000 && fh.UnpackedSize > 1000*fh.PackedSize)
 	if fh.UnpackedSize > 1024*1024 && expands {
 		r.win.MarkIncomplete()
-		return terminalEntry(fh, ErrRarBombDetected), nil
+		return terminalEntry(fh, ErrRarBombDetected, r.doneChan()), nil
 	}
 	if err := r.win.BeginFile(fh.Solid); err != nil {
 		r.win.MarkIncomplete()
-		return terminalEntry(fh, err), nil
+		return terminalEntry(fh, err, r.doneChan()), nil
 	}
 	// e is built before the splicer, and the splicer before the decode
 	// chain, because the splicer consults e through lastBlock() while
 	// reading -- both must exist before the chain's first Read. e.src is
 	// filled in only once the chain is known to build successfully.
-	e := newEntry(fh, nil)
+	e := newEntry(fh, nil, r.doneChan())
 	splicer := &multiVolumePayloadReader{r: r, e: e, src: r.vol.payload()}
 	src, err := r.buildChain(fh, splicer)
 	if err != nil {
 		r.win.MarkIncomplete()
-		return terminalEntry(fh, err), nil
+		return terminalEntry(fh, err, r.doneChan()), nil
 	}
 	e.src = src
 	r.entry = e
@@ -725,6 +750,39 @@ func (s *storeReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
+// chanClosed reports whether ch has been closed, without receiving from it.
+//
+// The shape is io.Pipe's (src/io/pipe.go, pipe.read): a select with a default
+// is how the standard library asks a done channel whether cancellation has
+// happened. A nil ch is never ready and so reports false -- which is
+// context.Context's documented meaning for a nil Done channel, "this can never
+// be cancelled", and is exactly right for an Entry with no Reader behind it.
+func chanClosed(ch <-chan struct{}) bool {
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
+	}
+}
+
+// doneChan returns the done channel in force, under the lock.
+//
+// Under the lock because Reset REPLACES r.done; this is the only way the field
+// is read outside a critical section that already holds volMu, so there is no
+// unsynchronised read of it anywhere. Called once per NextEntry and once per
+// admitted member -- never per byte, which is the cost profile volMu already
+// has.
+func (r *Reader) doneChan() <-chan struct{} {
+	r.volMu.Lock()
+	done := r.done
+	r.volMu.Unlock()
+	return done
+}
+
+// isClosed reports whether Close has been called on the archive in force.
+func (r *Reader) isClosed() bool { return chanClosed(r.doneChan()) }
+
 // Close releases the Reader and unblocks a call waiting for the next volume.
 //
 // It closes the volume currently open and every volume already queued on the
@@ -769,8 +827,10 @@ func (s *storeReader) Read(p []byte) (int, error) {
 // an archive, not the 32 MB window.
 func (r *Reader) Close() error {
 	r.volMu.Lock()
-	if !r.closed {
-		r.closed = true
+	// Idempotent without a sync.Once, deliberately. io.Pipe uses one; a pipe
+	// is never reset, and Reset REPLACES this field, so a Once would be copied
+	// out from under a Close already inside its Do -- see volMu's comment.
+	if !chanClosed(r.done) {
 		close(r.done)
 	}
 	v := r.vol
@@ -892,7 +952,7 @@ func (r *Reader) nextVolume() error {
 	// Under the same lock Close uses, so the two orderings are the only ones
 	// possible: either Close saw this volume, or this sees Close.
 	r.volMu.Lock()
-	if r.closed {
+	if chanClosed(r.done) {
 		r.volMu.Unlock()
 		// --- no lock held below this line ---
 		_ = v.Close()

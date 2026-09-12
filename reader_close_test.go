@@ -455,3 +455,30 @@ func TestCloseCancelsAnInFlightEntry(t *testing.T) {
 			"the verdict must be durable", closeErr)
 	}
 }
+
+// A member with nothing left to produce completes cleanly, even after Close.
+//
+// Entry.Read's guard sits below the remaining <= 0 arm for this reason: a
+// zero-length member -- an empty file, or any directory -- has already
+// produced everything it declared, so a later Close cancels nothing. Reporting
+// ErrReaderClosed there would be the same false accusation finish's short()
+// gate exists to prevent, arriving by the one path that bypasses it.
+func TestZeroLengthMemberIsNotCancelledByALaterClose(t *testing.T) {
+	stream := rar5Archive(t, false, rar5Member(t, memberSpec{
+		name: "empty.bin", content: "", withCRC: true,
+	}))
+
+	r := NewReader(volumesOf(stream))
+	e, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("NextEntry: %v", err)
+	}
+	if cerr := r.Close(); cerr != nil {
+		t.Fatalf("Close: %v", cerr)
+	}
+	if verdict := e.Close(); verdict != nil {
+		t.Fatalf("zero-length Entry.Close after Reader.Close = %v, want nil; "+
+			"a member that produced everything it declared was not cancelled",
+			verdict)
+	}
+}

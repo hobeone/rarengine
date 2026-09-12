@@ -319,7 +319,7 @@ func TestSplicePreservesReadErrorAlongsideBytes(t *testing.T) {
 	wantErr := errors.New("network read failed mid-buffer")
 	src := &erroringReader{data: []byte("partial"), err: wantErr}
 
-	e := newEntry(&FileHeader{Name: "x.bin", UnpackedSize: 64, LastBlock: true}, nil)
+	e := newEntry(&FileHeader{Name: "x.bin", UnpackedSize: 64, LastBlock: true}, nil, nil)
 	s := &multiVolumePayloadReader{r: nil, e: e, src: src}
 
 	buf := make([]byte, 32)

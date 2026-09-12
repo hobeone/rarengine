@@ -40,15 +40,42 @@ type Entry struct {
 	// entry produces nothing further. It is what makes a failure durable
 	// rather than something the next Read can erase.
 	done error
+
+	// cancelled is the done channel of the archive this member belongs to,
+	// closed by Reader.Close. This is context.Context's Done() shape, and a
+	// nil channel carries context's documented meaning: never ready, so this
+	// member has no Reader that can cancel it. That is true of terminalEntry's
+	// refusals and of the hand-built entries in the tests, so nil needs no
+	// guard and is not a footgun.
+	//
+	// A <-chan struct{} rather than a *Reader: reader.go builds entries and
+	// entry.go knows nothing about traversal, so a back-pointer would invert
+	// that to read one signal.
+	//
+	// Captured once at construction and never re-read from the Reader, which
+	// is what makes the verdict durable: Reset REPLACES Reader.done, so a
+	// member the caller retained across a Close/Reset pair still holds the
+	// CLOSED channel of its own archive and cannot be un-cancelled by the next
+	// archive starting. A boolean beside the channel could not do that without
+	// an ordering rule inside Reset.
+	//
+	// Checked at THIS layer rather than lower because the chain buffers.
+	// decoder50.Read serves from its outbuf and then from the window, touching
+	// its source only when Available() hits zero, so a compressed member can
+	// hold up to half the window in decoded plaintext below Entry.Read and
+	// above everything else. A check under that buffer keeps delivering real
+	// content with nil errors until it drains.
+	cancelled <-chan struct{}
 }
 
-func newEntry(fh *FileHeader, src io.Reader) *Entry {
+func newEntry(fh *FileHeader, src io.Reader, cancelled <-chan struct{}) *Entry {
 	return &Entry{
 		Header:    fh,
 		cur:       fh,
 		src:       src,
 		size:      fh.UnpackedSize,
 		remaining: fh.UnpackedSize,
+		cancelled: cancelled,
 	}
 }
 
@@ -58,8 +85,8 @@ func newEntry(fh *FileHeader, src io.Reader) *Entry {
 // file header, an unresolvable password -- so that every per-member outcome
 // reaches the caller through the Entry and NextEntry's error set stays
 // archive-level only, rather than archive-level-with-exceptions.
-func terminalEntry(fh *FileHeader, cause error) *Entry {
-	return &Entry{Header: fh, cur: fh, done: cause}
+func terminalEntry(fh *FileHeader, cause error, cancelled <-chan struct{}) *Entry {
+	return &Entry{Header: fh, cur: fh, done: cause, cancelled: cancelled}
 }
 
 // advanceVolume replaces the header in force when the member continues into
@@ -95,6 +122,30 @@ func (e *Entry) Read(p []byte) (int, error) {
 	// completing it here is what gives it a terminal state at all.
 	if e.remaining <= 0 {
 		return 0, e.finish(nil)
+	}
+	// The caller closed the Reader. This is the ENTRANCE guard, and it is the
+	// only thing standing between a sequential cancellation and full, clean
+	// delivery of the member: without it the read reaches a source that is
+	// still serving (a caller's ReadCloser need not fail after Close), the
+	// member meets its declared size, and finish reports success with a
+	// passing CRC. finish's override does NOT cover this -- there is no error
+	// for it to reclassify. See constraint 1.
+	//
+	// BELOW the remaining <= 0 arm, and that is the whole of why this block is
+	// not three lines higher. finish's override is gated on short() precisely
+	// so a member that produced every byte it declared is never blamed on a
+	// cancellation -- and passing ErrReaderClosed in from HERE routes around
+	// that gate, because finish takes it as the incoming err rather than as
+	// something to reclassify. Above the arm, a zero-length member -- an empty
+	// file, or any directory -- reported "reader is closed" after a Close it
+	// had already completed before, reachable through the documented
+	// context.AfterFunc pattern plus a deferred Entry.Close. Below it, a
+	// member with nothing left to produce completes cleanly and only a member
+	// still owed bytes is cancelled, which is the same rule finish applies.
+	//
+	// After the e.done guard so a verdict already recorded is not overwritten.
+	if chanClosed(e.cancelled) {
+		return 0, e.finish(ErrReaderClosed)
 	}
 	if len(p) == 0 {
 		return 0, nil
@@ -173,6 +224,31 @@ func (e *Entry) finish(err error) error {
 	}
 	if err == nil {
 		err = e.verifyChecksum()
+	}
+	// A member that ran SHORT while its archive's Reader was closed ran short
+	// because the caller closed it. Whatever the stream said on the way out --
+	// os.ErrClosed, a bare EOF read as truncation, or the splicer's "volume
+	// ended inside its payload", all true of a closed volume -- names the
+	// archive for the caller's own decision.
+	//
+	// The reachable case is severActive, which stamps truncated() on an Entry
+	// the caller still holds when Reset follows Close -- the documented
+	// context.AfterFunc pattern -- and which Read's entrance guard never sees
+	// because severActive reads nothing. TestRetainedEntrySurvivesCloseThenReset
+	// pins exactly that; a reviewer measured that no other path reaches this
+	// branch with an error it actually changes.
+	//
+	// Gated on short(), not on err != nil alone. A CRC mismatch or a LastBlock
+	// contradiction happens only once every declared byte has been produced,
+	// so it cannot have been caused by a cancellation, and hiding it behind
+	// ErrReaderClosed would be the false-verdict failure in reverse.
+	//
+	// err != nil is redundant against every CURRENT call site -- finish(nil)
+	// is only ever reached when !short() -- and stays as the backstop against
+	// a future call site that breaks that invariant, where dropping it would
+	// silently turn a real success into ErrReaderClosed.
+	if err != nil && e.short() && chanClosed(e.cancelled) {
+		err = ErrReaderClosed
 	}
 	if err == nil {
 		err = io.EOF

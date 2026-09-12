@@ -666,7 +666,7 @@ func TestFinishActive_DamageOnNonCleanOutcome(t *testing.T) {
 				Name: "x.bin", UnpackedSize: int64(len(content)), LastBlock: true,
 				HasCRC32: true, CRC32: crc32.ChecksumIEEE(content),
 			}
-			e := newEntry(fh, &errWithFinalBytes{data: content, err: tc.err})
+			e := newEntry(fh, &errWithFinalBytes{data: content, err: tc.err}, nil)
 			r.entry = e
 
 			_, _ = io.Copy(io.Discard, e)

@@ -10,7 +10,7 @@ import (
 )
 
 func entryOver(content string, fh *FileHeader) *Entry {
-	return newEntry(fh, strings.NewReader(content))
+	return newEntry(fh, strings.NewReader(content), nil)
 }
 
 func headerFor(content string, withCRC bool) *FileHeader {
@@ -102,7 +102,7 @@ func TestEntryTerminalErrorIsDurable(t *testing.T) {
 // archive-level only.
 func TestTerminalEntryReportsItsCause(t *testing.T) {
 	fh := &FileHeader{Name: "bomb.bin"}
-	e := terminalEntry(fh, ErrRarBombDetected)
+	e := terminalEntry(fh, ErrRarBombDetected, nil)
 
 	if e.Header != fh {
 		t.Fatal("terminal entry must carry the header that names the member")
@@ -213,13 +213,13 @@ func TestEntryCloseDoesNotTranslateWrappedEOF(t *testing.T) {
 
 // TestEntryReadBeforeSourceIsSetReportsNoActiveFile covers the entry a
 // dispatched member starts as: Reader.dispatch constructs it with a nil src
-// via newEntry(fh, nil) before the decode chain is known to build
+// via newEntry(fh, nil, cancelled) before the decode chain is known to build
 // successfully, filling e.src in only once it does. A caller that somehow
 // reached Read before that point -- or a future admission path that forgets
 // the fill-in -- must not get a nil-pointer panic or silently produce zero
 // bytes with no error.
 func TestEntryReadBeforeSourceIsSetReportsNoActiveFile(t *testing.T) {
-	e := newEntry(headerFor("hello world", true), nil)
+	e := newEntry(headerFor("hello world", true), nil, nil)
 
 	n, err := e.Read(make([]byte, 8))
 	if n != 0 {
