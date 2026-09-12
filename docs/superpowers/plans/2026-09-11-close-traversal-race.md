@@ -588,7 +588,10 @@ Expected: `TestCloseDuringTraversalIsRaceFree` still FAILS (Task 5 fixes it). Ev
 Only two of the four mechanisms have their pinning test in place at this point; **Task 4 Step 8 checks all four in one pass.** Do not treat this as the complete check.
 
 Delete `Entry.Read`'s entrance guard, re-run `go test -race -count=1 ./...`.
-Expected: `TestCloseCancelsAnInFlightEntry` FAILS reporting **20 bytes delivered** — a reviewer measured that the member completes with a nil error and a passing CRC. `finish` does not catch it. **Restore the guard.**
+
+Expected: **nothing fails.** ~~An earlier version of this step predicted `TestCloseCancelsAnInFlightEntry` would fail reporting 20 bytes delivered.~~ That measurement was taken on the *fully implemented* tree and is wrong here: `volume.Close` still zeroes `v.body` until Task 4, so delivery is stopped anyway, the member ends short, and `finish`'s override reclassifies the truncation to `ErrReaderClosed`. Two mechanisms overlap at this point in the sequence and neither is independently observable. Both become so in Task 4 Step 8, once the body-zeroing is gone. **Restore the guard.**
+
+The general rule this taught, worth applying to the rest of the plan: **a mutation measured on the final tree is not necessarily reproducible mid-sequence.** Task 4 Step 8's table was measured with every task applied and is valid there; this step transcribed one of its rows into a position where a since-removed mechanism still masks it.
 
 Delete the `e.short() && chanClosed(e.cancelled)` override from `finish`, re-run.
 Expected: **nothing fails yet.** A reviewer measured the branch firing 108–122 times per 400 racing iterations and being a no-op every time, because `Entry.Read`'s guard already passed `ErrReaderClosed` in. Its one reachable productive path is `Close`→`Reset`→retained `Entry`, which Task 4 Step 7 tests. **Restore it** and proceed.
@@ -596,9 +599,12 @@ Expected: **nothing fails yet.** A reviewer measured the branch firing 108–122
 - [ ] **Step 11: Commit**
 
 ```bash
-git add reader.go entry.go decoder50_test.go entry_test.go splice_test.go skip_damaged_test.go
+git add reader.go entry.go reader_close_test.go decoder50_test.go entry_test.go \
+	splice_test.go skip_damaged_test.go
 git commit -m "feat(rarengine): name cancellation as the cause, at both choke points"
 ```
+
+`reader_close_test.go` is in the list because Step 6 adds `TestZeroLengthMemberIsNotCancelledByALaterClose` to it; an earlier version of this line omitted the file and would have left that test uncommitted.
 
 ---
 
