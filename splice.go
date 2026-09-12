@@ -120,8 +120,7 @@ func (r *Reader) nextVolumePayload(e *Entry) (io.Reader, error) {
 				if !errors.Is(err, io.EOF) {
 					r.damaged = err
 				}
-				_ = r.vol.Close()
-				r.vol = nil
+				r.closeCurrentVolume()
 				if verr := r.openNextVolume(); verr != nil {
 					// Do not translate to io.EOF: reaching here means a read
 					// already in progress could not find its continuation, so

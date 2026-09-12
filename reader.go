@@ -130,14 +130,7 @@ func (r *Reader) Reset(volumes <-chan io.ReadCloser) {
 	// pulled volumes off the NEW channel and consumed headers the new
 	// traversal had not seen.
 	r.severActive()
-	r.volMu.Lock()
-	prev := r.vol
-	r.vol = nil
-	r.volMu.Unlock()
-	// --- no lock held below this line ---
-	if prev != nil {
-		_ = prev.Close()
-	}
+	r.closeCurrentVolume()
 	// The abandoned channel's queued volumes are closed here, or nothing ever
 	// closes them: Reset is the caller saying it is done with that archive,
 	// and the ReadClosers still sitting on its channel are as much a part of
@@ -342,8 +335,7 @@ func (r *Reader) nextEntry() (*Entry, error) {
 					if !errors.Is(err, io.EOF) {
 						r.damaged = err
 					}
-					_ = r.vol.Close()
-					r.vol = nil
+					r.closeCurrentVolume()
 					continue
 				}
 				return nil, err
@@ -576,8 +568,7 @@ func (r *Reader) handleNonFileBlock(h *blockHeader) error {
 		// trailing padding or sector alignment failed its CRC and ended the
 		// archive with ErrBadHeaderCRC after every member had been delivered
 		// intact.
-		_ = r.vol.Close()
-		r.vol = nil
+		r.closeCurrentVolume()
 
 	default:
 		// Everything the caller never sees, including service records --
@@ -783,6 +774,63 @@ func (r *Reader) doneChan() <-chan struct{} {
 // isClosed reports whether Close has been called on the archive in force.
 func (r *Reader) isClosed() bool { return chanClosed(r.doneChan()) }
 
+// takeVolume removes the open volume from the Reader and returns it together
+// with the done channel in force, leaving the caller to close the volume
+// outside the lock.
+//
+// This and publishVolume are the ONLY two functions that assign r.vol. That is
+// the invariant, expressed as something grep can check rather than as a rule
+// six call sites have to remember: every write is on the traversal goroutine
+// and under volMu, so the field has one writing goroutine and Close's read is
+// ordered against all of them.
+//
+// done comes back from the same acquisition because nextVolume needs the pair
+// and a second accessor for one channel read would be a third place this lock
+// is taken.
+func (r *Reader) takeVolume() (*volume, chan struct{}) {
+	r.volMu.Lock()
+	v, done := r.vol, r.done
+	r.vol = nil
+	r.volMu.Unlock()
+	return v, done
+}
+
+// publishVolume attaches v as the open volume, or reports false if the Reader
+// was closed first -- in which case v is closed here and never becomes
+// reachable.
+//
+// The re-check is under the same lock Close takes, so only two orderings are
+// possible: either Close saw this volume, or this saw Close. The select in
+// nextVolume proves nothing on its own -- when both its cases are ready Go
+// picks at random, so a Close that landed during acquisition can have taken
+// the volumes branch anyway, and by then Close has already read r.vol, drained
+// the queue and returned.
+func (r *Reader) publishVolume(v *volume) bool {
+	r.volMu.Lock()
+	if chanClosed(r.done) {
+		r.volMu.Unlock()
+		// --- no lock held below this line ---
+		_ = v.Close()
+		return false
+	}
+	r.vol = v
+	r.volMu.Unlock()
+	return true
+}
+
+// closeCurrentVolume closes the open volume and clears the pointer, for the
+// four callers that need no done channel.
+//
+// All four are spent-volume closes -- once per volume, never per byte, which
+// is the cost volMu was always documented to have. Three of them wrote r.vol
+// with no lock at all (reader.go twice, splice.go once); the fourth, Reset,
+// was already doing exactly this inline.
+func (r *Reader) closeCurrentVolume() {
+	if v, _ := r.takeVolume(); v != nil {
+		_ = v.Close()
+	}
+}
+
 // Close releases the Reader and unblocks a call waiting for the next volume.
 //
 // It closes the volume currently open and every volume already queued on the
@@ -833,8 +881,16 @@ func (r *Reader) Close() error {
 	if !chanClosed(r.done) {
 		close(r.done)
 	}
+	// Read, never written. This assignment was the second writer of the field,
+	// and it is what every unlocked traversal read raced against -- and what
+	// made dispatch's r.vol.payload() a reachable nil dereference, observed at
+	// 9 panics per 400 iterations without the race detector.
+	//
+	// Dropping it also drops an accidental ownership handoff: with Close
+	// clearing the pointer, whichever goroutine read it first won and the
+	// other saw nil, so only one of them called v.Close(). volume.closeOnce is
+	// what absorbs that now, which is why Task 4 could not come after this.
 	v := r.vol
-	r.vol = nil
 	// Snapshotted for the same reason as r.done: Reset replaces this field,
 	// so draining r.volumes after the unlock would race with a revival and
 	// could drain the NEW archive's channel.
@@ -902,17 +958,9 @@ func (r *Reader) openNextVolume() error {
 // exit, and a volume left standing after a failure was read again at whatever
 // offset the failure stopped at.
 func (r *Reader) nextVolume() error {
-	// Under the lock because Close reads this pointer from another goroutine.
 	// The previous volume is finished with by the time this runs, so closing
 	// it here races with nothing.
-	r.volMu.Lock()
-	prev := r.vol
-	r.vol = nil
-	// Snapshotted, not read at the select: Reset replaces this field, so
-	// reading it there would race with a revival.
-	done := r.done
-	r.volMu.Unlock()
-	// --- no lock held below this line ---
+	prev, done := r.takeVolume()
 	if prev != nil {
 		_ = prev.Close()
 	}
@@ -941,24 +989,8 @@ func (r *Reader) nextVolume() error {
 		_ = rc.Close()
 		return err
 	}
-	// Re-checked under the lock, because the select above proves nothing
-	// about Close. When both its cases are ready Go picks at random, so a
-	// Close that landed during acquisition can have taken the volumes branch
-	// anyway -- and by then Close has already read r.vol (nil, cleared at the
-	// top of this function), drained the queue and returned. Publishing here
-	// would attach a freshly opened volume to a closed Reader that nothing
-	// will ever close, and let traversal carry on reading from it.
-	//
-	// Under the same lock Close uses, so the two orderings are the only ones
-	// possible: either Close saw this volume, or this sees Close.
-	r.volMu.Lock()
-	if chanClosed(r.done) {
-		r.volMu.Unlock()
-		// --- no lock held below this line ---
-		_ = v.Close()
+	if !r.publishVolume(v) {
 		return ErrReaderClosed
 	}
-	r.vol = v
-	r.volMu.Unlock()
 	return nil
 }
