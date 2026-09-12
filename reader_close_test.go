@@ -407,3 +407,51 @@ func TestCloseDuringTraversalIsRaceFree(t *testing.T) {
 		wg.Wait()
 	}
 }
+
+// Close must cancel an Entry that is already in flight, and must say that it
+// was cancelled.
+//
+// A single-volume archive on purpose. Every other Close test uses a member
+// waiting for a continuation, which is blocked in the volume receive and
+// therefore released by the done channel. Nothing covered the case where the
+// bytes are simply THERE and Close has to stop them being delivered -- which
+// is why a candidate fix that removed volume.Close's body-zeroing without a
+// replacement passed the whole suite while turning cancellation into a full,
+// CRC-clean delivery of the member.
+//
+// mockReadCloser's Close does nothing, which is the point: a caller's
+// io.ReadCloser is not required to make an in-flight Read fail, so the refusal
+// has to come from this library. This is also what makes the test a precise
+// pin on Entry.Read's ENTRANCE guard: with that guard deleted, the member
+// completes with a nil error and a passing CRC.
+//
+// ErrReaderClosed rather than ErrTruncatedFile, which is what HEAD reports:
+// "the archive ended before the file's declared size was produced" names the
+// archive as the cause of something the caller did.
+func TestCloseCancelsAnInFlightEntry(t *testing.T) {
+	stream := rar5Archive(t, false, rar5Member(t, memberSpec{
+		name: "a.bin", content: "HELLOHELLOHELLOHELLO", withCRC: true,
+	}))
+
+	r := NewReader(volumesOf(stream))
+	e, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("NextEntry: %v", err)
+	}
+	if cerr := r.Close(); cerr != nil {
+		t.Fatalf("Close: %v", cerr)
+	}
+
+	got, readErr := io.ReadAll(e)
+	if len(got) != 0 {
+		t.Fatalf("ReadAll after Close returned %d bytes (%q); a cancelled "+
+			"read must not deliver the member's content", len(got), got)
+	}
+	if !errors.Is(readErr, ErrReaderClosed) {
+		t.Fatalf("ReadAll after Close = %v, want ErrReaderClosed", readErr)
+	}
+	if closeErr := e.Close(); !errors.Is(closeErr, ErrReaderClosed) {
+		t.Fatalf("Entry.Close after Reader.Close = %v, want ErrReaderClosed; "+
+			"the verdict must be durable", closeErr)
+	}
+}
