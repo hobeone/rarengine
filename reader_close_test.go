@@ -618,3 +618,79 @@ func TestRetainedEntrySurvivesCloseThenReset(t *testing.T) {
 			"ErrReaderClosed", verdict)
 	}
 }
+
+// closeOnScanVolume closes the Reader from inside a Read, once armed, and then
+// reports what a closed *os.File reports.
+//
+// This is the only way to reach NextEntry's exit translation deterministically.
+// The pre-check has already passed by the time the traversal touches the
+// stream, so nothing sequential gets past it -- only a Close landing DURING
+// the scan does, which a concurrent test achieves by luck and this achieves by
+// construction. Single-goroutine, so the plain bool needs no synchronisation.
+type closeOnScanVolume struct {
+	r     *Reader
+	src   *bytes.Reader
+	armed bool
+}
+
+func (v *closeOnScanVolume) Read(p []byte) (int, error) {
+	if v.armed {
+		_ = v.r.Close()
+		return 0, os.ErrClosed
+	}
+	return v.src.Read(p)
+}
+
+func (v *closeOnScanVolume) Close() error { return nil }
+
+// A Close landing mid-scan is reported as the caller's own, not the stream's.
+//
+// This pins NextEntry's exit translation, and it is the only test that does so
+// without depending on the scheduler. TestCloseDuringTraversalIsRaceFree
+// reaches the same code, but only when a concurrent Close happens to land in
+// the window -- it went green on a plain `go test` run with the translation
+// deleted, and only failed under -race. A mechanism whose pin fires on some
+// runs is a mechanism a later refactor deletes on a green local run.
+//
+// os.ErrClosed rather than a made-up error: it is what an *os.File returns
+// after Close, and constraint 9 records that both of this library's consumers
+// feed exactly that.
+func TestCloseDuringScanIsReportedAsCancellation(t *testing.T) {
+	stream := rar5Archive(t, false,
+		rar5Member(t, memberSpec{name: "a.bin", content: "AAAA", withCRC: true}),
+		rar5Member(t, memberSpec{name: "b.bin", content: "BBBB", withCRC: true}),
+	)
+
+	vol := &closeOnScanVolume{src: bytes.NewReader(stream)}
+	volumes := make(chan io.ReadCloser, 1)
+	volumes <- vol
+	close(volumes)
+
+	r := NewReader(volumes)
+	vol.r = r
+
+	e, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("NextEntry#1: %v", err)
+	}
+	if _, err := io.Copy(io.Discard, e); err != nil {
+		t.Fatalf("reading the first member: %v", err)
+	}
+	if err := e.Close(); err != nil {
+		t.Fatalf("Entry.Close: %v", err)
+	}
+
+	// From here the next read of the stream closes the Reader underneath the
+	// scan, exactly as a context cancellation on another goroutine would.
+	vol.armed = true
+
+	_, err = r.NextEntry()
+	if !errors.Is(err, ErrReaderClosed) {
+		t.Fatalf("NextEntry after a Close landing mid-scan = %v, want "+
+			"ErrReaderClosed; the stream's own error must not be reported as "+
+			"the archive's condition", err)
+	}
+	if errors.Is(err, os.ErrClosed) {
+		t.Fatalf("NextEntry leaked the stream's error to the caller: %v", err)
+	}
+}
