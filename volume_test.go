@@ -212,7 +212,7 @@ func TestVolumeDoesNotResumeAfterFailedHeaderRead(t *testing.T) {
 // next() after Close() errors rather than dereferencing a nil rc -- a state
 // volume.Close created itself, by nilling rc for idempotency. closeOnce
 // provides idempotency without the write, so rc is immutable after
-// construction and openVolume is the only constructor, which makes the nil it
+// construction and newVolume is the only constructor, which makes the nil it
 // guarded unrepresentable rather than merely unreached.
 
 // A volume whose signature has not been consumed must refuse to produce a

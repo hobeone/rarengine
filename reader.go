@@ -21,8 +21,13 @@ type Reader struct {
 	// vol is the open volume, or nil when none is. An advance constructs a new
 	// volume rather than repointing one, so a failed advance cannot leave a
 	// partially consumed volume reachable: takeVolume clears the field before
-	// the receive and publishVolume is the only thing that sets it, so there
-	// is nothing for a failure to leave behind.
+	// the receive and publishVolume is the only thing that sets it, so for
+	// most failures there is nothing to leave behind -- a lifetime, not a
+	// rule anyone has to maintain. One exit is the exception: nextVolume
+	// publishes before it validates, so a signature-read failure finds the
+	// field already set and has to restore this nil-on-failure property
+	// itself, by calling closeCurrentVolume. See nextVolume's own doc comment
+	// for why that one exit differs from every other.
 	//
 	// Assigned in exactly two places, takeVolume and publishVolume, both on
 	// the traversal goroutine and both under volMu -- so the field has ONE
@@ -267,7 +272,7 @@ func (r *Reader) NextEntry() (*Entry, error) {
 //
 // Shared by dispatch and nextVolumePayload (splice.go) because EVERY volume of
 // a header-encrypted archive repeats its own HEAD_CRYPT in plaintext, and each
-// volume is a fresh value with its own nil decryptor -- openVolume carries
+// volume is a fresh value with its own nil decryptor -- newVolume carries
 // nothing forward. Handling it in only one of the two header-reading paths
 // left a member spanning a volume boundary reading volume two's ciphertext as
 // plaintext, which surfaced as ErrBadHeaderCRC partway through the file.
@@ -888,12 +893,16 @@ func (r *Reader) publishVolume(v *volume) bool {
 }
 
 // closeCurrentVolume closes the open volume and clears the pointer, for the
-// four callers that need no done channel.
+// five callers that need no done channel.
 //
-// All four are spent-volume closes -- once per volume, never per byte, which
-// is the cost volMu was always documented to have. Three of them wrote r.vol
-// with no lock at all (reader.go twice, splice.go once); the fourth, Reset,
-// was already doing exactly this inline.
+// Four are spent-volume closes -- once per volume, never per byte, which is
+// the cost volMu was always documented to have. Three of them wrote r.vol
+// with no lock at all (reader.go twice, splice.go once); Reset was already
+// doing exactly this inline. The fifth is different in kind: nextVolume's own
+// call, reached when readSignature fails, closes a volume that was published
+// but never validated -- a failed acquisition, not a spent one -- and exists
+// to restore the nil-on-failure property that field assignment alone no
+// longer gives it.
 func (r *Reader) closeCurrentVolume() {
 	if v, _ := r.takeVolume(); v != nil {
 		_ = v.Close()
@@ -902,12 +911,20 @@ func (r *Reader) closeCurrentVolume() {
 
 // Close releases the Reader and unblocks a call waiting for the next volume.
 //
-// It closes the volume currently open and every volume already queued on the
+// It closes the volume currently open -- including one that has been
+// published but whose signature is still being read, which is what makes a
+// stalled acquisition escapable -- and every volume already queued on the
 // channel, and makes every later NextEntry return ErrReaderClosed -- as well
 // as any Entry still owed bytes, from both Read and Close. A member that
 // already produced everything it declared is NOT cancelled by a Close that
 // arrives afterwards; see ErrReaderClosed for the two exceptions and why they
 // are deliberate. It is idempotent.
+//
+// A Close landing during that signature read changes what this method
+// returns, not just what it reaches: it now finds the published volume and
+// returns that volume's own Close error, where it previously found r.vol
+// still nil and returned nil regardless of what the caller's stream would
+// have reported.
 //
 // Close is the ONE method safe to call from another goroutine while a read is
 // in progress. Every other method requires the caller's own serialisation --
@@ -956,6 +973,12 @@ func (r *Reader) closeCurrentVolume() {
 // buffering may not be. This is the same division io.Pipe and net.Conn draw,
 // and it is why Close closes the stream rather than trying to interrupt a read
 // it does not own.
+//
+// That limit is about whether closing the stream unblocks it. It is not a
+// licence to leave a stream unreachable: until the signature read moved
+// behind publishVolume, an os.File-class stream -- one whose Close DOES
+// interrupt an in-flight Read -- was never rescued either, because Close
+// never reached it to try.
 //
 // After Close, Reset revives the Reader for a different archive. Close ends
 // an archive, not the 32 MB window.
@@ -1039,12 +1062,19 @@ func (r *Reader) openNextVolume() error {
 
 // nextVolume closes the current volume and opens the next.
 //
-// Every failure leaves r.vol nil, which is a lifetime rather than a rule:
-// takeVolume clears the field up front and publishVolume is the only thing
-// that sets it again, so a failed advance has nothing to leave behind. Under
-// the previous design this had to be maintained by hand at each exit, and a
-// volume left standing after a failure was read again at whatever offset the
-// failure stopped at.
+// Every failure still leaves r.vol nil, but that is no longer one lifetime
+// covering every exit. For a failure reached before publishVolume it still
+// is: takeVolume clears the field up front and nothing sets it again before
+// such a failure returns, so there is nothing to leave behind. The
+// signature-read failure below is the exception -- publishVolume has already
+// set the field by the time it runs, so that exit restores the
+// nil-on-failure property as a rule it enforces, by calling
+// closeCurrentVolume, rather than getting it for free. A future exit added
+// between publishVolume and this function's final return must call
+// closeCurrentVolume too, or it will be the one place the property no longer
+// holds. Under the previous design the whole thing had to be maintained by
+// hand at every exit, and a volume left standing after a failure was read
+// again at whatever offset the failure stopped at.
 func (r *Reader) nextVolume() error {
 	// The previous volume is finished with by the time this runs, so closing
 	// it here races with nothing.

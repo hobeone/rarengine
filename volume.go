@@ -146,8 +146,9 @@ func (v *volume) readSignature() error {
 // readSignature consumes the RAR signature from r, leaving it positioned on
 // the first block boundary.
 //
-// Split out of openVolume so the inspection entry points in inspect.go reach
-// the stream the same way traversal does. A caller must never be asked to skip
+// Split out as its own function so the inspection entry points in inspect.go
+// reach the stream the same way traversal does, via (*volume).readSignature.
+// A caller must never be asked to skip
 // the signature itself: its length depends on which format the bytes turn out
 // to be -- 7 for RAR3, 8 for RAR5 -- so "skip 8 and start parsing" silently
 // mis-frames every RAR3 archive it is handed.

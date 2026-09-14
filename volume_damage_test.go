@@ -90,14 +90,14 @@ func TestDamagedSetDoesNotEndAsACleanArchive(t *testing.T) {
 // damage, not the end of the set.
 //
 // io.ReadFull reports a stream holding nothing at all as bare io.EOF, and
-// openVolume passed it straight through: it travelled out of NextEntry as
+// readSignature passed it straight through: it travelled out of NextEntry as
 // "the archive is over", so every volume behind the empty one went unread
 // and the caller was told the set was complete. A zero-length part is an
 // ordinary way for a download to fail, which is exactly why it must not be
 // indistinguishable from the end of the archive.
 //
-// Mutation check: return the bare error from openVolume's signature reads
-// and present.bin is never reached.
+// Mutation check: return the bare error from (*volume).readSignature's
+// signature reads and present.bin is never reached.
 func TestEmptyVolumeDoesNotEndTheArchive(t *testing.T) {
 	good := rar5Archive(t, false, rar5Member(t, memberSpec{
 		name: "present.bin", content: "here", withCRC: true,
