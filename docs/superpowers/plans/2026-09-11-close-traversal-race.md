@@ -624,11 +624,12 @@ git commit -m "feat(rarengine): name cancellation as the cause, at both choke po
 This is the task with the allocation regression. An earlier draft benchmarked Task 3 alone and so structurally could not see it.
 
 ```bash
-go test -bench='Decompress_Store|Decompress_Compress|Decompress_Solid|ReaderResetReusesWindow' \
+go test -run '^$' \
+	-bench='Decompress_Store|Decompress_Compress|Decompress_Solid|ReaderResetReusesWindow' \
 	-benchmem -count=10 ./... > "$SCRATCH/bench-before.txt"
 ```
 
-A **fixed** `-bench` selection, not `-bench=.` — see Step 9 for why.
+A **fixed** `-bench` selection, not `-bench=.` — see Step 9 for why. `-run '^$'` is not optional: `TestCloseDuringTraversalIsRaceFree` is still red at this point and panics the test binary before any benchmark executes.
 
 - [ ] **Step 1: Add the fields**
 
@@ -906,7 +907,8 @@ This is the second instance in this plan of a mutation measured on the finished 
 - [ ] **Step 9: Measure the regression this task introduces**
 
 ```bash
-go test -bench='Decompress_Store|Decompress_Compress|Decompress_Solid|ReaderResetReusesWindow' \
+go test -run '^$' \
+	-bench='Decompress_Store|Decompress_Compress|Decompress_Solid|ReaderResetReusesWindow' \
 	-benchmem -count=10 ./... > "$SCRATCH/bench-after.txt"
 benchstat "$SCRATCH/bench-before.txt" "$SCRATCH/bench-after.txt"
 ```
@@ -1219,7 +1221,7 @@ Task 4's benchmark brackets Task 4 alone, so it cannot see Task 3's per-`Read` c
 ```bash
 git stash list   # confirm nothing of yours is here; do NOT stash
 git worktree add "$SCRATCH/head-bench" main
-cd "$SCRATCH/head-bench" && go test \
+cd "$SCRATCH/head-bench" && go test -run '^$' \
 	-bench='Decompress_Store|Decompress_Compress|Decompress_Solid|ReaderResetReusesWindow' \
 	-benchmem -count=10 ./... > "$SCRATCH/bench-head.txt"
 ```

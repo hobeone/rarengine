@@ -616,6 +616,40 @@ func TestRetainedEntrySurvivesCloseThenReset(t *testing.T) {
 	}
 }
 
+// BenchmarkNextEntryAfterClose measures the path a cancelled caller actually
+// spends its time on, which none of the decode benchmarks reach.
+//
+// The cancellation verdict formats its cause into the error, and that formatting
+// allocates -- inside NextEntry, which CLAUDE.md's no-allocation rule names by
+// function. This is the benchmark that rule asks for, and it measures the part
+// that repeats: the wrap happens at most ONCE per archive, on the single call
+// where a Close lands mid-scan, because every call after it returns through the
+// pre-check instead. That steady state is what a cancelled consumer loops on,
+// and it must not allocate.
+//
+// Expect 0 allocs/op. A non-zero result means the pre-check stopped short-
+// circuiting and the wrap moved onto the repeated path.
+func BenchmarkNextEntryAfterClose(b *testing.B) {
+	stream := rar5Archive(b, false, rar5Member(b, memberSpec{
+		name: "a.bin", content: "AAAA", withCRC: true,
+	}))
+	r := NewReader(volumesOf(stream))
+	if _, err := r.NextEntry(); err != nil {
+		b.Fatalf("NextEntry: %v", err)
+	}
+	if err := r.Close(); err != nil {
+		b.Fatalf("Close: %v", err)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		if _, err := r.NextEntry(); !errors.Is(err, ErrReaderClosed) {
+			b.Fatalf("NextEntry after Close = %v, want ErrReaderClosed", err)
+		}
+	}
+}
+
 // closeOnScanVolume closes the Reader from inside a Read, once armed, and then
 // reports what a closed *os.File reports.
 //
