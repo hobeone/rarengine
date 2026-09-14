@@ -127,7 +127,9 @@ func newVolume(rc io.ReadCloser) *volume {
 }
 
 // readSignature consumes and validates the RAR5 signature on v's own stream,
-// leaving v positioned on the first block boundary.
+// leaving v positioned on the first block boundary. A RAR3 signature is
+// recognised only so it can be reported as ErrUnsupportedFormat by name;
+// nothing past the signature is parsed.
 //
 // A failure here does not set v.err: v.err means "v.rc is at an offset next()
 // cannot vouch for", and a volume that failed its signature is discarded by
@@ -139,18 +141,6 @@ func (v *volume) readSignature() error {
 	}
 	v.signed = true
 	return nil
-}
-
-// openVolume reads and validates the RAR5 signature, leaving v positioned on
-// the first block boundary. A RAR3 signature is recognised only so it can be
-// reported as ErrUnsupportedFormat by name; nothing past the signature is
-// parsed.
-func openVolume(rc io.ReadCloser) (*volume, error) {
-	v := newVolume(rc)
-	if err := v.readSignature(); err != nil {
-		return nil, err
-	}
-	return v, nil
 }
 
 // readSignature consumes the RAR signature from r, leaving it positioned on

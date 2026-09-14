@@ -361,6 +361,21 @@ func volumesOf(parts ...[]byte) <-chan io.ReadCloser {
 	return ch
 }
 
+// mustOpenVolume builds a validated volume from rc, the way traversal does.
+//
+// Replaces the production openVolume, which traversal stopped calling when
+// the signature read moved behind publishVolume. A test that wants a volume
+// positioned on its first block wants exactly this; a test that wants an
+// UNVALIDATED volume calls newVolume directly and says why.
+func mustOpenVolume(t *testing.T, rc io.ReadCloser) *volume {
+	t.Helper()
+	v := newVolume(rc)
+	if err := v.readSignature(); err != nil {
+		t.Fatalf("readSignature: %v", err)
+	}
+	return v
+}
+
 // parseBuiltMember reads one built member back through the real parser.
 //
 // The builders' own tests assert on what a header SAYS once something reads
@@ -369,12 +384,9 @@ func volumesOf(parts ...[]byte) <-chan io.ReadCloser {
 // exists to have one of.
 func parseBuiltMember(t *testing.T, block []byte) *FileHeader {
 	t.Helper()
-	v, err := openVolume(&mockReadCloser{
+	v := mustOpenVolume(t, &mockReadCloser{
 		bytes.NewReader(append(append([]byte{}, rar5Signature...), block...)),
 	})
-	if err != nil {
-		t.Fatalf("openVolume: %v", err)
-	}
 	h, err := v.next()
 	if err != nil {
 		t.Fatalf("next: %v", err)
