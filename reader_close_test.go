@@ -4,8 +4,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"os"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 )
@@ -298,7 +302,8 @@ func TestCloseDuringVolumeAcquisitionDoesNotStrandTheVolume(t *testing.T) {
 // in flight. Documenting the hazard instead of fixing it would be documenting
 // something a caller cannot act on.
 //
-// Mutation check: replace the guarded closed flag with an unsynchronised
+// Mutation check: replace the chanClosed(r.done) test under volMu with an
+// unsynchronised
 // sync.Once and this panics with "close of closed channel", or trips the race
 // detector on r.done and r.vol.
 func TestResetIsSafeAgainstAConcurrentClose(t *testing.T) {
@@ -346,5 +351,385 @@ func TestConcurrentClosesAreSafe(t *testing.T) {
 		}
 		close(start)
 		wg.Wait()
+	}
+}
+
+// Close concurrent with an active traversal must be race-free and must not
+// panic. This is the contract Reader.Close's doc comment states outright.
+//
+// The `started` channel is load-bearing, not decoration. Without it this test
+// passed 6 runs out of 6 at -count=1: Close reaches NextEntry's own closed
+// check before the traversal goroutine is scheduled past it, so NextEntry
+// returns early and never touches r.vol at all, and the race the test exists
+// to catch is never armed. Handing off after the first NextEntry has returned
+// puts Close inside the scan rather than in front of it, which reproduced the
+// race on 3 runs out of 3.
+//
+// Still loops: the window between nextEntry's nil check on r.vol and
+// dispatch's r.vol.payload() is narrow even once the handoff lands. Without
+// -race this same shape produced nil-pointer panics at roughly 9 per 400
+// iterations.
+func TestCloseDuringTraversalIsRaceFree(t *testing.T) {
+	members := make([][]byte, 0, 8)
+	for i := range 8 {
+		members = append(members, rar5Member(t, memberSpec{
+			name:    fmt.Sprintf("m%d.bin", i),
+			content: strings.Repeat("payload bytes ", 64),
+			withCRC: true,
+		}))
+	}
+	stream := rar5Archive(t, false, members...)
+
+	// Now that ErrReaderClosed is what a cancelled traversal reports, this
+	// test asserts the verdict as well as race-freedom. The fixture changes
+	// with it: volumesOf's mockReadCloser keeps serving after Close, so no
+	// read ever fails and NextEntry's translation has nothing to translate.
+	acceptable := func(err error) bool {
+		return errors.Is(err, ErrReaderClosed) || errors.Is(err, io.EOF) ||
+			errors.Is(err, ErrNoNextVolume)
+	}
+
+	for range 200 {
+		vol := &closedStreamVolume{r: bytes.NewReader(stream)}
+		volumes := make(chan io.ReadCloser, 1)
+		volumes <- vol
+		close(volumes)
+		r := NewReader(volumes)
+
+		started := make(chan struct{})
+		var bad error
+		var wg sync.WaitGroup
+		wg.Go(func() {
+			first := true
+			for {
+				e, err := r.NextEntry()
+				if first {
+					close(started)
+					first = false
+				}
+				if err != nil {
+					if !acceptable(err) && bad == nil {
+						bad = fmt.Errorf("NextEntry: %w", err)
+					}
+					return
+				}
+				if _, rerr := io.Copy(io.Discard, e); rerr != nil &&
+					!acceptable(rerr) && bad == nil {
+					bad = fmt.Errorf("Entry.Read %q: %w", e.Header.Name, rerr)
+				}
+				if cerr := e.Close(); cerr != nil && !acceptable(cerr) &&
+					bad == nil {
+					bad = fmt.Errorf("Entry.Close %q: %w", e.Header.Name, cerr)
+				}
+			}
+		})
+
+		<-started
+		_ = r.Close()
+		wg.Wait()
+
+		if bad != nil {
+			t.Fatalf("a cancelled traversal reported a cause that is not the "+
+				"caller's own Close: %v", bad)
+		}
+	}
+}
+
+// Close must cancel an Entry that is already in flight, and must say that it
+// was cancelled.
+//
+// A single-volume archive on purpose. Every other Close test uses a member
+// waiting for a continuation, which is blocked in the volume receive and
+// therefore released by the done channel. Nothing covered the case where the
+// bytes are simply THERE and Close has to stop them being delivered -- which
+// is why a candidate fix that removed volume.Close's body-zeroing without a
+// replacement passed the whole suite while turning cancellation into a full,
+// CRC-clean delivery of the member.
+//
+// mockReadCloser's Close does nothing, which is the point: a caller's
+// io.ReadCloser is not required to make an in-flight Read fail, so the refusal
+// has to come from this library. This is also what makes the test a precise
+// pin on Entry.Read's ENTRANCE guard: with that guard deleted, the member
+// completes with a nil error and a passing CRC.
+//
+// ErrReaderClosed rather than ErrTruncatedFile, which is what HEAD reports:
+// "the archive ended before the file's declared size was produced" names the
+// archive as the cause of something the caller did.
+func TestCloseCancelsAnInFlightEntry(t *testing.T) {
+	stream := rar5Archive(t, false, rar5Member(t, memberSpec{
+		name: "a.bin", content: "HELLOHELLOHELLOHELLO", withCRC: true,
+	}))
+
+	r := NewReader(volumesOf(stream))
+	e, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("NextEntry: %v", err)
+	}
+	if cerr := r.Close(); cerr != nil {
+		t.Fatalf("Close: %v", cerr)
+	}
+
+	got, readErr := io.ReadAll(e)
+	if len(got) != 0 {
+		t.Fatalf("ReadAll after Close returned %d bytes (%q); a cancelled "+
+			"read must not deliver the member's content", len(got), got)
+	}
+	if !errors.Is(readErr, ErrReaderClosed) {
+		t.Fatalf("ReadAll after Close = %v, want ErrReaderClosed", readErr)
+	}
+	if closeErr := e.Close(); !errors.Is(closeErr, ErrReaderClosed) {
+		t.Fatalf("Entry.Close after Reader.Close = %v, want ErrReaderClosed; "+
+			"the verdict must be durable", closeErr)
+	}
+
+	// The verdict carries its cause when there is one, and does not restate
+	// itself when there is not. Entry.Read's entrance guard hands finish an
+	// ErrReaderClosed directly, and wrapping that produced "reader is closed:
+	// member ended on: rarengine: reader is closed".
+	if n := strings.Count(readErr.Error(), "reader is closed"); n != 1 {
+		t.Fatalf("verdict names itself %d times, want 1: %v", n, readErr)
+	}
+}
+
+// A member with nothing left to produce completes cleanly, even after Close.
+//
+// Entry.Read's guard sits below the remaining <= 0 arm for this reason: a
+// zero-length member -- an empty file, or any directory -- has already
+// produced everything it declared, so a later Close cancels nothing. Reporting
+// ErrReaderClosed there would be the same false accusation finish's short()
+// gate exists to prevent, arriving by the one path that bypasses it.
+func TestZeroLengthMemberIsNotCancelledByALaterClose(t *testing.T) {
+	stream := rar5Archive(t, false, rar5Member(t, memberSpec{
+		name: "empty.bin", content: "", withCRC: true,
+	}))
+
+	r := NewReader(volumesOf(stream))
+	e, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("NextEntry: %v", err)
+	}
+	if cerr := r.Close(); cerr != nil {
+		t.Fatalf("Close: %v", cerr)
+	}
+	if verdict := e.Close(); verdict != nil {
+		t.Fatalf("zero-length Entry.Close after Reader.Close = %v, want nil; "+
+			"a member that produced everything it declared was not cancelled",
+			verdict)
+	}
+}
+
+// closedStreamVolume fails reads after its own Close, the way *os.File does --
+// which is what both of this library's consumers actually feed it
+// -- an *os.File in both cases. recordingVolume and mockReadCloser keep serving
+// after Close, which is the right fixture for proving the refusal comes from
+// this library; this is the right fixture for proving that a refusal coming
+// from the STREAM is translated rather than reported.
+type closedStreamVolume struct {
+	r      *bytes.Reader
+	closed atomic.Bool
+}
+
+func (v *closedStreamVolume) Read(p []byte) (int, error) {
+	if v.closed.Load() {
+		return 0, os.ErrClosed
+	}
+	return v.r.Read(p)
+}
+
+func (v *closedStreamVolume) Close() error {
+	v.closed.Store(true)
+	return nil
+}
+
+// A sequential Close-then-read must not touch the volume at all.
+//
+// This pins the ENTRANCE guards -- NextEntry's pre-check and Entry.Read's --
+// and nothing more. It deliberately does NOT claim that a closed Reader never
+// reads; a Close landing concurrently does reach the stream, and preventing
+// that would need a lock per read.
+func TestClosedReaderReadsNothingFromItsVolume(t *testing.T) {
+	stream := rar5Archive(t, false,
+		rar5Member(t, memberSpec{name: "a.bin", content: "AAAA", withCRC: true}),
+		rar5Member(t, memberSpec{name: "b.bin", content: "BBBB", withCRC: true}),
+	)
+
+	vol := &recordingVolume{r: bytes.NewReader(stream)}
+	volumes := make(chan io.ReadCloser, 1)
+	volumes <- vol
+	close(volumes)
+
+	r := NewReader(volumes)
+	e, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("NextEntry: %v", err)
+	}
+	if cerr := r.Close(); cerr != nil {
+		t.Fatalf("Close: %v", cerr)
+	}
+
+	// Asserted, not assumed, matching TestPackedRemainder_NoReadAfterVolumeClose:
+	// if Reader.Close ever stops closing the open volume, "no reads after
+	// close" holds trivially and this test stops exercising its own subject.
+	if !vol.closed {
+		t.Fatal("Reader.Close did not close the open volume")
+	}
+
+	if _, err := io.ReadAll(e); !errors.Is(err, ErrReaderClosed) {
+		t.Fatalf("ReadAll after Close = %v, want ErrReaderClosed", err)
+	}
+	if _, err := r.NextEntry(); !errors.Is(err, ErrReaderClosed) {
+		t.Fatalf("NextEntry after Close = %v, want ErrReaderClosed", err)
+	}
+	if vol.readsAfterClose != 0 {
+		t.Fatalf("a sequential Close-then-read hit the volume %d times; want 0",
+			vol.readsAfterClose)
+	}
+}
+
+// An Entry retained across Close+Reset keeps reporting the cancellation.
+//
+// This is the ONLY deterministically reachable path on which Entry.finish's
+// override changes a verdict. Reset calls severActive, which stamps
+// truncated() on an entry that never reached its declared size -- Entry.Read's
+// entrance guard never sees it, because severActive reads nothing -- so
+// without the override the caller is told "archive ended before the file's
+// declared size was produced" for its own cancellation.
+//
+// It stays correct with no ordering rule inside Reset, which is what the done
+// channel buys over a boolean: the Entry captured the channel of ITS archive,
+// and Reset replaces the field rather than reopening the channel, so the
+// entry's copy stays closed however Reset's statements are ordered.
+//
+// Documented pattern, not a contrivance: context.AfterFunc(ctx, r.Close)
+// followed by Reset for the next archive is what Reader.Close's own doc
+// comment describes, and a deferred Entry.Close is enough to reach it.
+func TestRetainedEntrySurvivesCloseThenReset(t *testing.T) {
+	stream := rar5Archive(t, false, rar5Member(t, memberSpec{
+		name: "a.bin", content: "HELLOHELLOHELLOHELLO", withCRC: true,
+	}))
+
+	r := NewReader(volumesOf(stream))
+	e, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("NextEntry: %v", err)
+	}
+	if cerr := r.Close(); cerr != nil {
+		t.Fatalf("Close: %v", cerr)
+	}
+	r.Reset(volumesOf(stream))
+
+	if verdict := e.Close(); !errors.Is(verdict, ErrReaderClosed) {
+		t.Fatalf("retained Entry.Close after Close+Reset = %v, want "+
+			"ErrReaderClosed", verdict)
+	}
+}
+
+// BenchmarkNextEntryAfterClose measures the path a cancelled caller actually
+// spends its time on, which none of the decode benchmarks reach.
+//
+// The cancellation verdict formats its cause into the error, and that formatting
+// allocates -- inside NextEntry, which CLAUDE.md's no-allocation rule names by
+// function. This is the benchmark that rule asks for, and it measures the part
+// that repeats: the wrap happens at most ONCE per archive, on the single call
+// where a Close lands mid-scan, because every call after it returns through the
+// pre-check instead. That steady state is what a cancelled consumer loops on,
+// and it must not allocate.
+//
+// Expect 0 allocs/op. A non-zero result means the pre-check stopped short-
+// circuiting and the wrap moved onto the repeated path.
+func BenchmarkNextEntryAfterClose(b *testing.B) {
+	stream := rar5Archive(b, false, rar5Member(b, memberSpec{
+		name: "a.bin", content: "AAAA", withCRC: true,
+	}))
+	r := NewReader(volumesOf(stream))
+	if _, err := r.NextEntry(); err != nil {
+		b.Fatalf("NextEntry: %v", err)
+	}
+	if err := r.Close(); err != nil {
+		b.Fatalf("Close: %v", err)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		if _, err := r.NextEntry(); !errors.Is(err, ErrReaderClosed) {
+			b.Fatalf("NextEntry after Close = %v, want ErrReaderClosed", err)
+		}
+	}
+}
+
+// closeOnScanVolume closes the Reader from inside a Read, once armed, and then
+// reports what a closed *os.File reports.
+//
+// This is the only way to reach NextEntry's exit translation deterministically.
+// The pre-check has already passed by the time the traversal touches the
+// stream, so nothing sequential gets past it -- only a Close landing DURING
+// the scan does, which a concurrent test achieves by luck and this achieves by
+// construction. Single-goroutine, so the plain bool needs no synchronisation.
+type closeOnScanVolume struct {
+	r     *Reader
+	src   *bytes.Reader
+	armed bool
+}
+
+func (v *closeOnScanVolume) Read(p []byte) (int, error) {
+	if v.armed {
+		_ = v.r.Close()
+		return 0, os.ErrClosed
+	}
+	return v.src.Read(p)
+}
+
+func (v *closeOnScanVolume) Close() error { return nil }
+
+// A Close landing mid-scan is reported as the caller's own, not the stream's.
+//
+// This pins NextEntry's exit translation, and it is the only test that does so
+// without depending on the scheduler. TestCloseDuringTraversalIsRaceFree
+// reaches the same code, but only when a concurrent Close happens to land in
+// the window -- it went green on a plain `go test` run with the translation
+// deleted, and only failed under -race. A mechanism whose pin fires on some
+// runs is a mechanism a later refactor deletes on a green local run.
+//
+// os.ErrClosed rather than a made-up error: it is what an *os.File returns
+// after Close, and both of this library's known consumers
+// feed exactly that.
+func TestCloseDuringScanIsReportedAsCancellation(t *testing.T) {
+	stream := rar5Archive(t, false,
+		rar5Member(t, memberSpec{name: "a.bin", content: "AAAA", withCRC: true}),
+		rar5Member(t, memberSpec{name: "b.bin", content: "BBBB", withCRC: true}),
+	)
+
+	vol := &closeOnScanVolume{src: bytes.NewReader(stream)}
+	volumes := make(chan io.ReadCloser, 1)
+	volumes <- vol
+	close(volumes)
+
+	r := NewReader(volumes)
+	vol.r = r
+
+	e, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("NextEntry#1: %v", err)
+	}
+	if _, err := io.Copy(io.Discard, e); err != nil {
+		t.Fatalf("reading the first member: %v", err)
+	}
+	if err := e.Close(); err != nil {
+		t.Fatalf("Entry.Close: %v", err)
+	}
+
+	// From here the next read of the stream closes the Reader underneath the
+	// scan, exactly as a context cancellation on another goroutine would.
+	vol.armed = true
+
+	_, err = r.NextEntry()
+	if !errors.Is(err, ErrReaderClosed) {
+		t.Fatalf("NextEntry after a Close landing mid-scan = %v, want "+
+			"ErrReaderClosed; the stream's own error must not be reported as "+
+			"the archive's condition", err)
+	}
+	if errors.Is(err, os.ErrClosed) {
+		t.Fatalf("NextEntry leaked the stream's error to the caller: %v", err)
 	}
 }
