@@ -71,7 +71,32 @@ type volume struct {
 	// advance, never per byte, with the allocation count unchanged.
 	closeOnce sync.Once
 	closeErr  error
+
+	// signed records that readSignature has consumed the RAR signature from
+	// rc, so next() may read a block header. nextVolume publishes a volume
+	// BEFORE reading its signature -- that is what lets Reader.Close reach a
+	// stream stalled in that read -- which means r.vol briefly points at a
+	// volume positioned at byte 0.
+	//
+	// Nothing can observe that today: the traversal goroutine is r.vol's only
+	// reader and it is the goroutine blocked inside the read, and Close
+	// touches nothing but Close(). This flag is what makes the guarantee
+	// structural rather than conventional, because the convention is one
+	// concurrency change away from false -- volume prefetch would let a
+	// reader reach r.vol mid-read, and next() would then skip nothing (body.N
+	// is 0) and parse a block header straight out of the signature bytes.
+	//
+	// Written by readSignature only, read by next() only, both on the
+	// traversal goroutine. Not concurrency state: it is never read under
+	// volMu and Reader.Close never touches it.
+	signed bool
 }
+
+// errVolumeNotValidated reports a volume asked for a header before its
+// signature was consumed. Unexported: it is unreachable through the public
+// API by construction, and an exported sentinel would be a contract this
+// library has to hold forever for a state a caller cannot produce.
+var errVolumeNotValidated = errors.New("rarengine: volume used before its signature was read")
 
 var rar5Signature = []byte{0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x01, 0x00}
 
@@ -109,7 +134,11 @@ func newVolume(rc io.ReadCloser) *volume {
 // its caller rather than retried. Setting it would be harmless but would
 // claim a sticky position-level failure this is not.
 func (v *volume) readSignature() error {
-	return readSignature(v.rc)
+	if err := readSignature(v.rc); err != nil {
+		return err
+	}
+	v.signed = true
+	return nil
 }
 
 // openVolume reads and validates the RAR5 signature, leaving v positioned on
@@ -168,6 +197,9 @@ func readSignature(r io.Reader) error {
 // touches v.rc again -- see the err field's comment for why a failed read
 // cannot safely be retried.
 func (v *volume) next() (*blockHeader, error) {
+	if !v.signed {
+		return nil, errVolumeNotValidated
+	}
 	if v.err != nil {
 		return nil, v.err
 	}

@@ -231,3 +231,37 @@ func TestVolumeDoesNotResumeAfterFailedHeaderRead(t *testing.T) {
 // provides idempotency without the write, so rc is immutable after
 // construction and openVolume is the only constructor, which makes the nil it
 // guarded unrepresentable rather than merely unreached.
+
+// A volume whose signature has not been consumed must refuse to produce a
+// header, rather than parse one out of the signature bytes.
+//
+// nextVolume publishes a volume before reading its signature, so r.vol points
+// at an unvalidated volume for the duration of that read. Nothing can observe
+// it today -- the traversal goroutine is the only reader and it is the one
+// blocked inside the read -- but "unreachable by convention" and
+// "unrepresentable" are different guarantees, and the one this codebase asks
+// for is the second. Concurrent volume prefetch is the change that would turn
+// the convention false without touching nextVolume at all.
+//
+// Mutation check: delete the !v.signed arm in next() and this reports a
+// header parsed from the signature bytes (or ErrBadHeaderCRC) instead of
+// ErrVolumeNotValidated.
+func TestUnvalidatedVolumeRefusesToProduceAHeader(t *testing.T) {
+	stream := append(append([]byte{}, rar5Signature...), rar5EndHeader()...)
+	v := newVolume(&mockReadCloser{bytes.NewReader(stream)})
+
+	if _, err := v.next(); !errors.Is(err, errVolumeNotValidated) {
+		t.Fatalf("next() on an unvalidated volume = %v, want "+
+			"errVolumeNotValidated -- it must not read a header out of the "+
+			"signature bytes", err)
+	}
+
+	// And it works normally once validated, so the guard gates the phase
+	// rather than the volume.
+	if err := v.readSignature(); err != nil {
+		t.Fatalf("readSignature: %v", err)
+	}
+	if _, err := v.next(); err != nil {
+		t.Fatalf("next() after readSignature: %v", err)
+	}
+}
