@@ -90,15 +90,38 @@ func signatureReadError(err error) error {
 	return err
 }
 
+// newVolume wraps rc as the Reader's open volume WITHOUT consuming anything
+// from it. The stream is positioned at byte 0 -- v.readSignature must run
+// before v.next(), and v.signed is what enforces that.
+//
+// Split from the signature read so a volume becomes reachable from the Reader
+// at the instant its stream is received, rather than after a blocking read
+// that Reader.Close could not reach. See nextVolume.
+func newVolume(rc io.ReadCloser) *volume {
+	return &volume{rc: rc}
+}
+
+// readSignature consumes and validates the RAR5 signature on v's own stream,
+// leaving v positioned on the first block boundary.
+//
+// A failure here does not set v.err: v.err means "v.rc is at an offset next()
+// cannot vouch for", and a volume that failed its signature is discarded by
+// its caller rather than retried. Setting it would be harmless but would
+// claim a sticky position-level failure this is not.
+func (v *volume) readSignature() error {
+	return readSignature(v.rc)
+}
+
 // openVolume reads and validates the RAR5 signature, leaving v positioned on
 // the first block boundary. A RAR3 signature is recognised only so it can be
 // reported as ErrUnsupportedFormat by name; nothing past the signature is
 // parsed.
 func openVolume(rc io.ReadCloser) (*volume, error) {
-	if err := readSignature(rc); err != nil {
+	v := newVolume(rc)
+	if err := v.readSignature(); err != nil {
 		return nil, err
 	}
-	return &volume{rc: rc}, nil
+	return v, nil
 }
 
 // readSignature consumes the RAR signature from r, leaving it positioned on
