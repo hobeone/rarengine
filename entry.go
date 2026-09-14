@@ -129,7 +129,8 @@ func (e *Entry) Read(p []byte) (int, error) {
 	// still serving (a caller's ReadCloser need not fail after Close), the
 	// member meets its declared size, and finish reports success with a
 	// passing CRC. finish's override does NOT cover this -- there is no error
-	// for it to reclassify. See constraint 1.
+	// for it to reclassify -- see CLAUDE.md, "Cancellation is one channel,
+	// checked above the decode chain".
 	//
 	// BELOW the remaining <= 0 arm, and that is the whole of why this block is
 	// not three lines higher. finish's override is gated on short() precisely
@@ -222,33 +223,42 @@ func (e *Entry) finish(err error) error {
 	if e.done != nil {
 		return e.done
 	}
+	// A member that ran SHORT while its archive's Reader was closed ran short
+	// because the caller closed it, and says so -- but it says what else it
+	// saw, because the caller may still read this verdict after Close and a
+	// member's verdict has to stay true about the bytes it delivered.
+	//
+	// ErrReaderClosed is the matchable identity; the underlying cause rides
+	// along as %v text. That distinction is the whole point of the format
+	// string. Every error reaching here from Read's default arm is
+	// short-eligible, and that set is not only "the stream said you closed
+	// it": it includes nextVolumePayload's continuation-identity refusals
+	// (ErrCorruptFileHeader -- the interleaved-member attack), ErrNoNextVolume
+	// reached mid-member, and decoder failures. An earlier version assigned
+	// ErrReaderClosed outright, so a crafted archive read under a context
+	// deadline reported "reader is closed" and errors.Is(err,
+	// ErrCorruptFileHeader) was false -- a true accusation downgraded to the
+	// caller's own cancellation, which is the mirror of the false accusation
+	// this library already treats as its worst failure.
+	//
+	// %v and NOT %w for the cause: wrapping would make
+	// errors.Is(err, ErrTruncatedFile) true, and truncation not satisfying
+	// that test is load-bearing at its own declaration.
+	//
+	// ABOVE verifyChecksum, which is what makes "a checksum verdict is never
+	// reclassified" structural rather than a property of the call sites. Below
+	// it, a verifyChecksum failure became an incoming err this branch could
+	// then consume -- reachable through Entry.Close, which calls finish(nil)
+	// unconditionally when e.src is nil. Above it, only an error handed IN can
+	// be reclassified, and verifyChecksum's verdicts are final by position.
+	//
+	// err != nil is load-bearing here rather than a backstop: finish(nil) must
+	// not become ErrReaderClosed.
+	if err != nil && e.short() && chanClosed(e.cancelled) {
+		err = fmt.Errorf("%w: member ended on: %v", ErrReaderClosed, err)
+	}
 	if err == nil {
 		err = e.verifyChecksum()
-	}
-	// A member that ran SHORT while its archive's Reader was closed ran short
-	// because the caller closed it. Whatever the stream said on the way out --
-	// os.ErrClosed, a bare EOF read as truncation, or the splicer's "volume
-	// ended inside its payload", all true of a closed volume -- names the
-	// archive for the caller's own decision.
-	//
-	// The reachable case is severActive, which stamps truncated() on an Entry
-	// the caller still holds when Reset follows Close -- the documented
-	// context.AfterFunc pattern -- and which Read's entrance guard never sees
-	// because severActive reads nothing. TestRetainedEntrySurvivesCloseThenReset
-	// pins exactly that; a reviewer measured that no other path reaches this
-	// branch with an error it actually changes.
-	//
-	// Gated on short(), not on err != nil alone. A CRC mismatch or a LastBlock
-	// contradiction happens only once every declared byte has been produced,
-	// so it cannot have been caused by a cancellation, and hiding it behind
-	// ErrReaderClosed would be the false-verdict failure in reverse.
-	//
-	// err != nil is redundant against every CURRENT call site -- finish(nil)
-	// is only ever reached when !short() -- and stays as the backstop against
-	// a future call site that breaks that invariant, where dropping it would
-	// silently turn a real success into ErrReaderClosed.
-	if err != nil && e.short() && chanClosed(e.cancelled) {
-		err = ErrReaderClosed
 	}
 	if err == nil {
 		err = io.EOF
@@ -261,6 +271,16 @@ func (e *Entry) finish(err error) error {
 // completion, which for a multi-volume member is the LAST part's -- that is
 // where the whole-file CRC32 is recorded.
 func (e *Entry) verifyChecksum() error {
+	// A member that did not produce what it declared has nothing to verify,
+	// and verifying it anyway produced a false message: the LastBlock arm
+	// below says the member "produced its declared N bytes" -- true only when
+	// this guard's condition is false, and every arm after it assumes the
+	// same. Reached through Entry.Close, which calls finish(nil)
+	// unconditionally when e.src is nil, so the assumption was call-site
+	// discipline rather than structure.
+	if e.short() {
+		return e.truncated()
+	}
 	// A member cannot honestly complete while a header saying it continues is
 	// still in force. Reaching the declared UnpackedSize means every byte has
 	// been produced; LastBlock false means the archive says more parts follow.

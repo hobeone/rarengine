@@ -302,7 +302,8 @@ func TestCloseDuringVolumeAcquisitionDoesNotStrandTheVolume(t *testing.T) {
 // in flight. Documenting the hazard instead of fixing it would be documenting
 // something a caller cannot act on.
 //
-// Mutation check: replace the guarded closed flag with an unsynchronised
+// Mutation check: replace the chanClosed(r.done) test under volMu with an
+// unsynchronised
 // sync.Once and this panics with "close of closed channel", or trips the race
 // detector on r.done and r.vol.
 func TestResetIsSafeAgainstAConcurrentClose(t *testing.T) {
@@ -355,10 +356,6 @@ func TestConcurrentClosesAreSafe(t *testing.T) {
 
 // Close concurrent with an active traversal must be race-free and must not
 // panic. This is the contract Reader.Close's doc comment states outright.
-//
-// Task 4 extends this test to assert the VERDICT as well; at this point
-// ErrReaderClosed is not yet what a cancelled traversal reports, so there is
-// nothing to assert but race-freedom.
 //
 // The `started` channel is load-bearing, not decoration. Without it this test
 // passed 6 runs out of 6 at -count=1: Close reaches NextEntry's own closed
@@ -515,7 +512,7 @@ func TestZeroLengthMemberIsNotCancelledByALaterClose(t *testing.T) {
 
 // closedStreamVolume fails reads after its own Close, the way *os.File does --
 // which is what both of this library's consumers actually feed it
-// (constraint 9). recordingVolume and mockReadCloser deliberately keep serving
+// -- an *os.File in both cases. recordingVolume and mockReadCloser keep serving
 // after Close, which is the right fixture for proving the refusal comes from
 // this library; this is the right fixture for proving that a refusal coming
 // from the STREAM is translated rather than reported.
@@ -653,7 +650,7 @@ func (v *closeOnScanVolume) Close() error { return nil }
 // runs is a mechanism a later refactor deletes on a green local run.
 //
 // os.ErrClosed rather than a made-up error: it is what an *os.File returns
-// after Close, and constraint 9 records that both of this library's consumers
+// after Close, and both of this library's known consumers
 // feed exactly that.
 func TestCloseDuringScanIsReportedAsCancellation(t *testing.T) {
 	stream := rar5Archive(t, false,

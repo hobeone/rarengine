@@ -20,7 +20,9 @@ type Reader struct {
 
 	// vol is the open volume, or nil when none is. An advance constructs a new
 	// volume rather than repointing one, so a failed advance cannot leave a
-	// partially consumed volume reachable -- nextVolume assigns the result.
+	// partially consumed volume reachable: takeVolume clears the field before
+	// the receive and publishVolume is the only thing that sets it, so there
+	// is nothing for a failure to leave behind.
 	//
 	// Assigned in exactly two places, takeVolume and publishVolume, both on
 	// the traversal goroutine and both under volMu -- so the field has ONE
@@ -188,10 +190,12 @@ func (r *Reader) SetPasswords(candidates []string) { r.passwords = candidates }
 // NextEntry finishes any active entry, scans forward, and returns the next
 // member. io.EOF reports that the archive is over.
 //
-// Its errors are archive-level only -- a malformed block header, no next
-// volume, an unsupported format, end of stream. Every per-member outcome is
-// delivered by the Entry, including refusals, which arrive as an Entry that is
-// already terminal.
+// Its errors are archive-level -- a malformed block header, no next volume,
+// an unsupported format, end of stream -- plus ErrReaderClosed, which is not
+// archive-level and is exactly why latchArchive excludes it: the caller closed
+// this Reader, which is a statement about the caller rather than the archive.
+// Every per-member outcome is delivered by the Entry, including refusals,
+// which arrive as an Entry that is already terminal.
 func (r *Reader) NextEntry() (*Entry, error) {
 	// Checked before r.fatal and before any read, so a sequential
 	// Close-then-NextEntry performs no read on the caller's stream at all.
@@ -220,11 +224,18 @@ func (r *Reader) NextEntry() (*Entry, error) {
 		// it must stay true about the bytes delivered; this verdict only
 		// decides whether traversal continues, and a closed Reader does not.
 		//
+		// The cause rides along as %v text rather than being discarded: a
+		// corrupt archive header found while a Close is in flight is still a
+		// corrupt archive header, and a caller reading a log wants to know.
+		// %v and not %w, so this cannot make errors.Is(err, io.EOF) true for a
+		// scan that ended on one -- callers loop until io.EOF.
+		//
 		// A guard at the head of the scan loop was tried instead and removed:
 		// unreachable by any sequential test, and it changed no verdict once
-		// this translation existed. See constraint 16.
+		// this translation existed. See CLAUDE.md, "Cancellation is one
+		// channel, checked above the decode chain".
 		if r.isClosed() {
-			return nil, ErrReaderClosed
+			return nil, fmt.Errorf("%w: scan ended on: %v", ErrReaderClosed, err)
 		}
 		return nil, r.latchArchive(err)
 	}
@@ -863,8 +874,11 @@ func (r *Reader) closeCurrentVolume() {
 // Close releases the Reader and unblocks a call waiting for the next volume.
 //
 // It closes the volume currently open and every volume already queued on the
-// channel, and makes every later call return ErrReaderClosed. It is
-// idempotent.
+// channel, and makes every later NextEntry return ErrReaderClosed -- as well
+// as any Entry still owed bytes, from both Read and Close. A member that
+// already produced everything it declared is NOT cancelled by a Close that
+// arrives afterwards; see ErrReaderClosed for the two exceptions and why they
+// are deliberate. It is idempotent.
 //
 // Close is the ONE method safe to call from another goroutine while a read is
 // in progress. Every other method requires the caller's own serialisation --
@@ -932,7 +946,8 @@ func (r *Reader) Close() error {
 	// Dropping it also drops an accidental ownership handoff: with Close
 	// clearing the pointer, whichever goroutine read it first won and the
 	// other saw nil, so only one of them called v.Close(). volume.closeOnce is
-	// what absorbs that now, which is why Task 4 could not come after this.
+	// what absorbs that now, which is why volume.Close had to stop mutating
+	// before this assignment could be removed.
 	v := r.vol
 	// Snapshotted for the same reason as r.done: Reset replaces this field,
 	// so draining r.volumes after the unlock would race with a revival and
@@ -995,11 +1010,12 @@ func (r *Reader) openNextVolume() error {
 
 // nextVolume closes the current volume and opens the next.
 //
-// Every failure leaves r.vol nil, which is a lifetime rather than a rule: the
-// field is assigned the result, so a failed advance has nothing to leave
-// behind. Under the previous design this had to be maintained by hand at each
-// exit, and a volume left standing after a failure was read again at whatever
-// offset the failure stopped at.
+// Every failure leaves r.vol nil, which is a lifetime rather than a rule:
+// takeVolume clears the field up front and publishVolume is the only thing
+// that sets it again, so a failed advance has nothing to leave behind. Under
+// the previous design this had to be maintained by hand at each exit, and a
+// volume left standing after a failure was read again at whatever offset the
+// failure stopped at.
 func (r *Reader) nextVolume() error {
 	// The previous volume is finished with by the time this runs, so closing
 	// it here races with nothing.

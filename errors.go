@@ -38,7 +38,21 @@ var (
 
 	// ErrReaderClosed is returned by a Reader whose Close has been called.
 	// It is what a call blocked waiting for the next volume receives when
-	// Close releases it, and what every later call receives.
+	// Close releases it; what every later NextEntry receives until Reset
+	// revives the Reader; and the terminal verdict of any Entry still owed
+	// bytes, from both Read and Close.
+	//
+	// Two things deliberately do NOT receive it. A member that already
+	// produced everything it declared completes cleanly -- an empty file or a
+	// directory is not cancelled by a Close that arrives afterwards, which
+	// TestZeroLengthMemberIsNotCancelledByALaterClose pins. And Reset revives
+	// the Reader for a new archive rather than latching this forever.
+	//
+	// Where a cancellation lands on top of something else -- a corrupt
+	// continuation header, a missing volume, a stream that failed -- the cause
+	// is carried in the message. It is NOT wrapped with %w: errors.Is against
+	// ErrTruncatedFile and io.EOF must stay false here, for the reasons given
+	// at their own declarations.
 	//
 	// It is not a failure of the archive. A caller that closed a Reader
 	// deliberately -- a cancelled download, a user abandoning an extraction

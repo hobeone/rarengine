@@ -58,7 +58,8 @@ type volume struct {
 	// write racing every traversal read of that field, from the one method
 	// another goroutine may call. Once, plus an immutable rc, removes the
 	// write instead of synchronising it, and absorbs the concurrent double
-	// Close that Task 5 makes possible by leaving r.vol non-nil.
+	// Close that leaving r.vol non-nil makes possible -- Reader.Close and the
+	// traversal can now both reach the same volume.
 	//
 	// sync.Once and not an atomic CAS: Once establishes happens-before for
 	// every caller, so a second caller's read of closeErr is ordered after the
@@ -66,7 +67,8 @@ type volume struct {
 	// (Reader.done is closed under volMu rather than by a Once for the
 	// opposite reason -- Reset replaces it. A volume is never reset.)
 	//
-	// These two fields cost 32 bytes per volume -- Step 9 measures it.
+	// These two fields cost 32 bytes per volume, measured: one volume per
+	// advance, never per byte, with the allocation count unchanged.
 	closeOnce sync.Once
 	closeErr  error
 }
@@ -204,7 +206,9 @@ func (v *volume) useEncryptedHeaders(key []byte) {
 	v.hd = &headerDecrypter{key: key}
 }
 
-// Close closes the underlying stream once, and mutates nothing else.
+// Close closes the underlying stream once, and mutates nothing the traversal
+// reads: rc and body are untouched. It does write the closeOnce/closeErr pair,
+// which is ordered for every caller by the Once itself -- see that field.
 //
 // It used to nil v.rc and zero v.body, which is what made Reader.Close racy:
 // those are fields the traversal reads and writes, and Reader.Close is the one
