@@ -1067,18 +1067,33 @@ func (r *Reader) nextVolume() error {
 	}
 	if rc == nil {
 		// A nil element on the channel is the caller's bug, but the library
-		// must report it rather than dereference it: openVolume would read
-		// the signature straight out of a nil interface and take the process
-		// down with it.
+		// must report it rather than dereference it: the signature read
+		// would go straight at a nil interface and take the process down.
 		return errors.New("rarengine: nil volume stream on the volumes channel")
 	}
-	v, err := openVolume(rc)
-	if err != nil {
-		_ = rc.Close()
-		return err
-	}
+	// Published BEFORE the signature is read, which is the whole point. The
+	// stream is owned from the receive above, and until it is reachable from
+	// r.vol a concurrent Close can reach neither it nor the channel it has
+	// already left -- so a stream that stalls inside its signature read could
+	// never be closed, and the traversal goroutine parked in it could never
+	// be rescued. Publishing first makes ownership and reachability the same
+	// statement rather than two moments with a blocking read between them.
+	//
+	// The double close this admits -- Close reaching v while this function
+	// also closes it below -- is absorbed by volume.closeOnce, which exists
+	// for exactly that reason. A bare io.ReadCloser has no such guarantee
+	// (io.Closer leaves a second Close undefined), which is why the stream is
+	// wrapped before it is published rather than parked in a field of its
+	// own.
+	v := newVolume(rc)
 	if !r.publishVolume(v) {
 		return ErrReaderClosed
+	}
+	if err := v.readSignature(); err != nil {
+		// takeVolume clears r.vol unconditionally, so the documented
+		// "every failure leaves r.vol nil" lifetime survives the reorder.
+		r.closeCurrentVolume()
+		return err
 	}
 	return nil
 }

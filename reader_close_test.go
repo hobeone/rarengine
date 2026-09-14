@@ -733,3 +733,82 @@ func TestCloseDuringScanIsReportedAsCancellation(t *testing.T) {
 		t.Fatalf("NextEntry leaked the stream's error to the caller: %v", err)
 	}
 }
+
+// Close must reach a stream that is stalled inside its own signature read.
+//
+// The window this pins is the gap between the channel receive and the volume
+// becoming reachable as r.vol. A stream received but not yet published is
+// reachable from neither r.vol nor r.volumes, so Close -- which reads exactly
+// those two -- could not close it, and never called Close on it at all. That
+// is not the documented "your stream's Close must interrupt its own Read"
+// limit: stalledVolume models os.File/net.Conn, whose Close DOES interrupt an
+// in-flight Read, and it was still never rescued.
+//
+// Mutation check: move the readSignature call in nextVolume back above
+// publishVolume and this deadlocks inside the bubble.
+func TestCloseRescuesAStreamStalledInItsSignatureRead(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		// Constructed INSIDE the bubble, as every test in this file is: a
+		// channel created outside leaves the block non-durable and Wait
+		// never returns.
+		release := make(chan struct{})
+		sv := &stalledVolume{release: release}
+
+		volumes := make(chan io.ReadCloser, 1)
+		volumes <- sv
+		r := NewReader(volumes)
+
+		result := make(chan error, 1)
+		go func() {
+			_, err := r.NextEntry()
+			result <- err
+		}()
+
+		// Blocks durably inside io.ReadFull, which is the state under test.
+		synctest.Wait()
+		_ = r.Close()
+
+		// No timeout arm: inside a bubble a Close that fails to release is
+		// reported as a deadlock, which cannot pass by accident on a slow
+		// machine.
+		if err := <-result; !errors.Is(err, ErrReaderClosed) {
+			t.Fatalf("NextEntry = %v, want ErrReaderClosed", err)
+		}
+		if !sv.closed() {
+			t.Fatal("the stalled stream was never closed by the library -- " +
+				"Close reached neither r.vol nor r.volumes for it")
+		}
+	})
+}
+
+// stalledVolume models an os.File/net.Conn-class stream: its Read blocks
+// until released, and its own Close releases it. This is the class Close's
+// doc comment says IS rescuable, which is what makes it the right fixture --
+// a stream that ignores a concurrent Close would leave the test unable to
+// distinguish the library's defect from the stream's limitation.
+type stalledVolume struct {
+	release  chan struct{}
+	mu       sync.Mutex
+	didClose bool
+}
+
+func (s *stalledVolume) Read(p []byte) (int, error) {
+	<-s.release
+	return 0, os.ErrClosed
+}
+
+func (s *stalledVolume) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.didClose {
+		s.didClose = true
+		close(s.release)
+	}
+	return nil
+}
+
+func (s *stalledVolume) closed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.didClose
+}
