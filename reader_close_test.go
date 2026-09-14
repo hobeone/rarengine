@@ -812,3 +812,50 @@ func (s *stalledVolume) closed() bool {
 	defer s.mu.Unlock()
 	return s.didClose
 }
+
+// Entry.Read reaches the same acquisition site through the splice, so the
+// same stall is reachable while a member is mid-stream. This is the case a
+// context parameter could never have covered: Entry.Read satisfies io.Reader.
+//
+// Mutation check: this is covered by Task 2's mechanism, so reverting that
+// reorder turns this red too (measured: bubble deadlock). It is kept because
+// "one fix covers three callers" is a claim about three callers, and this
+// test is the only evidence for the second of them -- Reset, the third, is
+// covered by contract rather than by any test.
+func TestCloseRescuesASpliceStalledInASignatureRead(t *testing.T) {
+	v1 := rar5Archive(t, false, rar5Member(t, memberSpec{
+		name: "split.bin", content: "aaaa",
+		unpackedSz: new(int64(8)), packedSz: new(int64(4)), notLast: true,
+	}))
+	synctest.Test(t, func(t *testing.T) {
+		release := make(chan struct{})
+		sv := &stalledVolume{release: release}
+
+		volumes := make(chan io.ReadCloser, 2)
+		volumes <- &mockReadCloser{bytes.NewReader(v1)}
+		volumes <- sv
+
+		r := NewReader(volumes)
+		e, err := r.NextEntry()
+		if err != nil {
+			t.Fatalf("NextEntry: %v", err)
+		}
+
+		result := make(chan error, 1)
+		go func() {
+			_, err := io.ReadAll(e)
+			result <- err
+		}()
+
+		synctest.Wait()
+		_ = r.Close()
+
+		if err := <-result; !errors.Is(err, ErrReaderClosed) {
+			t.Fatalf("Entry.Read = %v, want ErrReaderClosed", err)
+		}
+		if !sv.closed() {
+			t.Fatal("the continuation volume stalled in its signature read " +
+				"was never closed by the library")
+		}
+	})
+}
