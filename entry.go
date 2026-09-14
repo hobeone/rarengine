@@ -254,7 +254,12 @@ func (e *Entry) finish(err error) error {
 	//
 	// err != nil is load-bearing here rather than a backstop: finish(nil) must
 	// not become ErrReaderClosed.
-	if err != nil && e.short() && chanClosed(e.cancelled) {
+	//
+	// Not re-wrapped when the incoming error is already ErrReaderClosed:
+	// Read's entrance guard passes that in directly, and wrapping it produced
+	// "reader is closed: member ended on: rarengine: reader is closed".
+	if err != nil && e.short() && chanClosed(e.cancelled) &&
+		!errors.Is(err, ErrReaderClosed) {
 		err = fmt.Errorf("%w: member ended on: %v", ErrReaderClosed, err)
 	}
 	if err == nil {

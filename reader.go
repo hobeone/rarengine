@@ -234,7 +234,15 @@ func (r *Reader) NextEntry() (*Entry, error) {
 		// unreachable by any sequential test, and it changed no verdict once
 		// this translation existed. See CLAUDE.md, "Cancellation is one
 		// channel, checked above the decode chain".
+		//
+		// Not re-wrapped when the scan already reported cancellation --
+		// nextVolume returns ErrReaderClosed from its done select and from
+		// publishVolume's refusal -- which produced "reader is closed: scan
+		// ended on: rarengine: reader is closed".
 		if r.isClosed() {
+			if errors.Is(err, ErrReaderClosed) {
+				return nil, err
+			}
 			return nil, fmt.Errorf("%w: scan ended on: %v", ErrReaderClosed, err)
 		}
 		return nil, r.latchArchive(err)
@@ -321,10 +329,28 @@ func (r *Reader) armHeaderDecryption(h *blockHeader) error {
 // one direction: if that pre-check ever moves below the r.fatal check, the
 // latch surfaces.
 func (r *Reader) latchArchive(err error) error {
-	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, ErrNoNextVolume) &&
-		!errors.Is(err, ErrReaderClosed) {
-		r.fatal = err
+	if err == nil || errors.Is(err, io.EOF) || errors.Is(err, ErrNoNextVolume) ||
+		errors.Is(err, ErrReaderClosed) {
+		return err
 	}
+	// Nothing latches while this Reader is closed, whatever the error says.
+	//
+	// NextEntry translates its own scan's error before it gets here, but
+	// nextVolumePayload (splice.go) calls this directly from five places, and
+	// a Close landing mid-splice makes r.vol.next() return the stream's error
+	// -- os.ErrClosed for an *os.File. That is the caller's own doing wearing
+	// the archive's clothes, and latching it would put a caller error on
+	// r.fatal, which is documented to hold archive-level failures only.
+	//
+	// Skipping the latch rather than translating here: the member's verdict is
+	// already handled by Entry.finish's override, and r.fatal exists to stop a
+	// RETRY resuming past an unresolved failure. A closed Reader has no retry
+	// -- NextEntry's pre-check returns before reading r.fatal -- and Reset
+	// clears the field anyway, so there is nothing for the latch to guard.
+	if r.isClosed() {
+		return err
+	}
+	r.fatal = err
 	return err
 }
 
@@ -808,6 +834,7 @@ func (r *Reader) doneChan() <-chan struct{} {
 	r.volMu.Lock()
 	done := r.done
 	r.volMu.Unlock()
+	// --- no lock held below this line ---
 	return done
 }
 
@@ -832,6 +859,7 @@ func (r *Reader) takeVolume() (*volume, <-chan struct{}) {
 	v, done := r.vol, r.done
 	r.vol = nil
 	r.volMu.Unlock()
+	// --- no lock held below this line ---
 	return v, done
 }
 
@@ -855,6 +883,7 @@ func (r *Reader) publishVolume(v *volume) bool {
 	}
 	r.vol = v
 	r.volMu.Unlock()
+	// --- no lock held below this line ---
 	return true
 }
 

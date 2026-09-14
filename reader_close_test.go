@@ -481,6 +481,14 @@ func TestCloseCancelsAnInFlightEntry(t *testing.T) {
 		t.Fatalf("Entry.Close after Reader.Close = %v, want ErrReaderClosed; "+
 			"the verdict must be durable", closeErr)
 	}
+
+	// The verdict carries its cause when there is one, and does not restate
+	// itself when there is not. Entry.Read's entrance guard hands finish an
+	// ErrReaderClosed directly, and wrapping that produced "reader is closed:
+	// member ended on: rarengine: reader is closed".
+	if n := strings.Count(readErr.Error(), "reader is closed"); n != 1 {
+		t.Fatalf("verdict names itself %d times, want 1: %v", n, readErr)
+	}
 }
 
 // A member with nothing left to produce completes cleanly, even after Close.
