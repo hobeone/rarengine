@@ -226,9 +226,11 @@ func TestVolumeDoesNotResumeAfterFailedHeaderRead(t *testing.T) {
 // for is the second. Concurrent volume prefetch is the change that would turn
 // the convention false without touching nextVolume at all.
 //
-// Mutation check: delete the !v.signed arm in next() and this reports a
-// header parsed from the signature bytes (or ErrBadHeaderCRC) instead of
-// ErrVolumeNotValidated.
+// Mutation check: drop the errVolumeNotValidated seed from newVolume and this
+// reports "unexpected EOF" instead of the sentinel -- readBlockHeader takes
+// the signature's first four bytes for a CRC32, reads 0x1a as a 26-byte header
+// length, and runs out. A larger fixture would fabricate a header instead;
+// either way next() answers about bytes that are not a block.
 func TestUnvalidatedVolumeRefusesToProduceAHeader(t *testing.T) {
 	stream := append(append([]byte{}, rar5Signature...), rar5EndHeader()...)
 	v := newVolume(&mockReadCloser{bytes.NewReader(stream)})

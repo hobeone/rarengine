@@ -817,11 +817,12 @@ func (s *stalledVolume) closed() bool {
 // same stall is reachable while a member is mid-stream. This is the case a
 // context parameter could never have covered: Entry.Read satisfies io.Reader.
 //
-// Mutation check: this is covered by Task 2's mechanism, so reverting that
-// reorder turns this red too (measured: bubble deadlock). It is kept because
-// "one fix covers three callers" is a claim about three callers, and this
-// test is the only evidence for the second of them -- Reset, the third, is
-// covered by contract rather than by any test.
+// Mutation check: move the readSignature call in nextVolume back above
+// publishVolume and this deadlocks in the bubble, same as the NextEntry case.
+// It is kept despite sharing that mechanism because "one acquisition site
+// covers three callers" is a claim about three callers, and this test is the
+// only evidence for the second of them. The third, Reset, is covered by the
+// traversal-goroutine contract rather than by any test.
 func TestCloseRescuesASpliceStalledInASignatureRead(t *testing.T) {
 	v1 := rar5Archive(t, false, rar5Member(t, memberSpec{
 		name: "split.bin", content: "aaaa",
