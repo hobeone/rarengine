@@ -787,9 +787,9 @@ func TestCloseRescuesAStreamStalledInItsSignatureRead(t *testing.T) {
 // a stream that ignores a concurrent Close would leave the test unable to
 // distinguish the library's defect from the stream's limitation.
 type stalledVolume struct {
-	release  chan struct{}
-	mu       sync.Mutex
-	didClose bool
+	release   chan struct{}
+	closeOnce sync.Once
+	didClose  atomic.Bool
 }
 
 func (s *stalledVolume) Read(p []byte) (int, error) {
@@ -798,20 +798,14 @@ func (s *stalledVolume) Read(p []byte) (int, error) {
 }
 
 func (s *stalledVolume) Close() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !s.didClose {
-		s.didClose = true
+	s.closeOnce.Do(func() {
+		s.didClose.Store(true)
 		close(s.release)
-	}
+	})
 	return nil
 }
 
-func (s *stalledVolume) closed() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.didClose
-}
+func (s *stalledVolume) closed() bool { return s.didClose.Load() }
 
 // Entry.Read reaches the same acquisition site through the splice, so the
 // same stall is reachable while a member is mid-stream. This is the case a
