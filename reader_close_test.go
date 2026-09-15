@@ -744,8 +744,8 @@ func TestCloseDuringScanIsReportedAsCancellation(t *testing.T) {
 // limit: stalledVolume models os.File/net.Conn, whose Close DOES interrupt an
 // in-flight Read, and it was still never rescued.
 //
-// Mutation check: move the readSignature call in nextVolume back above
-// publishVolume and this deadlocks inside the bubble.
+// Mutation check: short-circuit nextVolume's r.stage call and this deadlocks
+// inside the bubble, with the stack parked in readSignature.
 func TestCloseRescuesAStreamStalledInItsSignatureRead(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		// Constructed INSIDE the bubble, as every test in this file is: a
@@ -811,8 +811,8 @@ func (s *stalledVolume) closed() bool { return s.didClose.Load() }
 // same stall is reachable while a member is mid-stream. This is the case a
 // context parameter could never have covered: Entry.Read satisfies io.Reader.
 //
-// Mutation check: move the readSignature call in nextVolume back above
-// publishVolume and this deadlocks in the bubble, same as the NextEntry case.
+// Mutation check: short-circuit nextVolume's r.stage call and this deadlocks
+// in the bubble, same as the NextEntry case.
 // It is kept despite sharing that mechanism because "one acquisition site
 // covers three callers" is a claim about three callers, and this test is the
 // only evidence for the second of them. The third, Reset, is covered by the
@@ -853,4 +853,76 @@ func TestCloseRescuesASpliceStalledInASignatureRead(t *testing.T) {
 				"was never closed by the library")
 		}
 	})
+}
+
+// A rescue that arrives just as the signature read succeeds must still close
+// the caller's stream exactly once.
+//
+// This is the other side of the staging window, and the only place two
+// goroutines can hold the same stream: Close claims it out of r.staging and
+// closes it -- which is what releases the read -- and openVolume then returns
+// a perfectly good volume built around a stream that is already closed.
+// Publishing that volume would make a closed stream reachable as r.vol, and
+// closing it would be a second Close on a stream whose io.Closer contract
+// leaves that undefined. Both are avoided by the same fact: unstage found the
+// field already cleared, so this goroutine does not own the stream.
+//
+// Mutation check: make unstage return true unconditionally and the volume is
+// published to a closed Reader, publishVolume closes it, and the count here
+// reads 2.
+func TestAStreamRescuedAsItsSignatureLandsIsClosedOnce(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		release := make(chan struct{})
+		rv := &rescuedVolume{
+			release: release,
+			src:     bytes.NewReader(rar5Signature),
+		}
+
+		volumes := make(chan io.ReadCloser, 1)
+		volumes <- rv
+		r := NewReader(volumes)
+
+		result := make(chan error, 1)
+		go func() {
+			_, err := r.NextEntry()
+			result <- err
+		}()
+
+		// Parked in the signature read, exactly as in the stall above. The
+		// difference is what happens once Close releases it.
+		synctest.Wait()
+		_ = r.Close()
+
+		if err := <-result; !errors.Is(err, ErrReaderClosed) {
+			t.Fatalf("NextEntry = %v, want ErrReaderClosed", err)
+		}
+		if n := rv.closes.Load(); n != 1 {
+			t.Fatalf("the caller's stream was closed %d times, want exactly "+
+				"1 -- io.Closer leaves a second Close undefined", n)
+		}
+	})
+}
+
+// rescuedVolume is stalledVolume's counterpart: its Read also blocks until
+// its own Close releases it, but it then delivers a VALID RAR5 signature, so
+// openVolume succeeds around a stream the rescuer has already closed. It
+// counts every Close rather than absorbing repeats, which is the whole point
+// -- a fixture with a sync.Once around the count could not tell one call from
+// two.
+type rescuedVolume struct {
+	release chan struct{}
+	src     io.Reader
+	closes  atomic.Int32
+	once    sync.Once
+}
+
+func (v *rescuedVolume) Read(p []byte) (int, error) {
+	<-v.release
+	return v.src.Read(p)
+}
+
+func (v *rescuedVolume) Close() error {
+	v.closes.Add(1)
+	v.once.Do(func() { close(v.release) })
+	return nil
 }

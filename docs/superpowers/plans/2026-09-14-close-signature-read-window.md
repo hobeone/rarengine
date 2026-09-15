@@ -27,7 +27,11 @@
 > *something*; it does not justify wrapping it in `*volume` specifically.
 >
 > **What shipped instead:** `Reader.staging`, an `io.Closer` registered under `volMu` for exactly
-> the duration of `openVolume`, holding an `*onceCloser` around the caller's stream. `volume.go` is
+> the duration of `openVolume`, and cleared by whichever of `Close` and `unstage` reads it first —
+> so the field is the ownership token and no second `Close` is ever attempted. (An intermediate
+> draft did wrap the stream in a `sync.Once`, as this note's own rebuttal suggested; it cost
+> +1 alloc/op and was replaced once the lock turned out to settle the question for free.)
+> `volume.go` is
 > untouched — `openVolume` remains the sole atomic, valid-by-construction constructor, `v.err`
 > remains a sticky corruption sentinel, and `r.vol` still means "a validated RAR5 volume is open".
 > Both `synctest` pins below survived the swap unchanged and still fail as bubble deadlocks when the

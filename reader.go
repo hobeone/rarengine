@@ -57,15 +57,21 @@ type Reader struct {
 	// left. Registering it here for the length of that read is what makes the
 	// stall escapable.
 	//
-	// Written only by nextVolume and only under volMu, set before openVolume
-	// and cleared after, so the field is non-nil exactly for the duration of
-	// one call. Close only reads it. It is an io.Closer rather than an
-	// io.ReadCloser because closing is the only thing anyone does with it
-	// from here.
+	// Set by nextVolume before openVolume and cleared after, always under
+	// volMu, so the field is non-nil exactly for the duration of one call. It
+	// is an io.Closer rather than an io.ReadCloser because closing is the
+	// only thing anyone does with it from here.
 	//
-	// The value is always an *onceCloser, so Close and nextVolume may both
-	// close it: io.Closer leaves a second Close undefined, and the window is
-	// precisely when both parties can reach the same stream.
+	// The field is also the ownership token for that window, which is what
+	// keeps a second Close from ever being attempted on the caller's stream.
+	// Both parties CLEAR it under volMu as they read it -- Close in its
+	// snapshot, nextVolume in unstage -- so exactly one of them comes away
+	// with a non-nil closer and the other comes away with nil. io.Closer
+	// leaves a second Close undefined, and this window is the one place both
+	// could reach the same stream; making the field a claim rather than a
+	// reference means nobody has to absorb the second call. An earlier draft
+	// wrapped the stream in a sync.Once instead, which cost an allocation per
+	// volume to answer a question the lock was already ordering.
 	staging io.Closer
 
 	win   *window
@@ -1022,7 +1028,13 @@ func (r *Reader) Close() error {
 	// left the channel and is not yet a volume -- so without this snapshot a
 	// stream stalled in its signature read could not be closed at all, and
 	// the traversal goroutine parked in it could not be rescued. See staging.
+	//
+	// Cleared as it is read, which is what claims the stream: nextVolume's
+	// unstage does the same, so whichever of the two runs second finds nil
+	// and closes nothing. The caller's stream is therefore closed exactly
+	// once, rather than closed twice into a Close that has to tolerate it.
 	staged := r.staging
+	r.staging = nil
 	// Snapshotted for the same reason as r.done: Reset replaces this field,
 	// so draining r.volumes after the unlock would race with a revival and
 	// could drain the NEW archive's channel.
@@ -1034,8 +1046,8 @@ func (r *Reader) Close() error {
 		err = v.Close()
 	}
 	if staged != nil {
-		// nextVolume closes this too, on its way out of the failure this
-		// close causes; onceCloser is what makes both safe.
+		// Non-nil means this Close claimed the stream above, so nextVolume
+		// will find nil in unstage and leave the closing here.
 		if serr := staged.Close(); err == nil {
 			err = serr
 		}
@@ -1139,52 +1151,32 @@ func (r *Reader) nextVolume() error {
 	// is open", and openVolume returns one only once the signature has been
 	// read, so nothing that is not an archive is ever reachable there and a
 	// failed advance still has nothing to leave behind.
-	staged := newOnceCloser(rc)
-	if !r.stage(staged) {
-		_ = staged.Close()
+	if !r.stage(rc) {
+		_ = rc.Close()
 		return ErrReaderClosed
 	}
-	v, err := openVolume(staged)
-	r.unstage()
+	v, err := openVolume(rc)
+	// True when the stream is still this goroutine's to close. False means a
+	// concurrent Close claimed it out of r.staging and has closed it, or is
+	// about to -- which is also what unblocked the signature read above.
+	owned := r.unstage()
 	if err != nil {
-		// Close may have closed staged already; onceCloser absorbs the
-		// second call, which is the whole reason the stream is wrapped
-		// rather than registered bare.
-		_ = staged.Close()
+		if owned {
+			_ = rc.Close()
+		}
 		return err
+	}
+	if !owned {
+		// openVolume won the race and produced a volume, but around a stream
+		// Close has already claimed. Publishing it would make a closed stream
+		// reachable as r.vol, and closing v here would be the second Close on
+		// the caller's stream. Drop it: the archive is over either way.
+		return ErrReaderClosed
 	}
 	if !r.publishVolume(v) {
 		return ErrReaderClosed
 	}
 	return nil
-}
-
-// onceCloser makes a caller's stream safe to close from two goroutines.
-//
-// io.Closer leaves a second Close undefined, and the acquisition window is
-// exactly when Reader.Close and nextVolume can both reach the same stream: one
-// closes it to unblock the signature read, the other closes it on the way out
-// of the failure that closing caused. volume.Close solves the same problem for
-// a published volume with its own sync.Once; this is that guarantee for a
-// stream that has no volume yet.
-//
-// Close reports the underlying Close's error to every caller, ordered by the
-// Once -- the completion of the function happens before any Do returns, so the
-// second caller's read of err is ordered after the first caller's write.
-type onceCloser struct {
-	io.Reader
-	c    io.Closer
-	once sync.Once
-	err  error
-}
-
-func newOnceCloser(rc io.ReadCloser) *onceCloser {
-	return &onceCloser{Reader: rc, c: rc}
-}
-
-func (o *onceCloser) Close() error {
-	o.once.Do(func() { o.err = o.c.Close() })
-	return o.err
 }
 
 // stage registers the stream being opened, or reports false if the Reader was
@@ -1208,14 +1200,22 @@ func (r *Reader) stage(c io.Closer) bool {
 	return true
 }
 
-// unstage clears the registration once the stream is no longer being opened.
+// unstage clears the registration once the stream is no longer being opened,
+// and reports whether it was still there to clear.
 //
-// Unconditional: it runs on both the success and failure paths, so the field
+// Called unconditionally on both the success and failure paths, so the field
 // is non-nil for exactly the duration of openVolume and a later Close cannot
 // reach a stream that is now either a volume or closed.
-func (r *Reader) unstage() {
+//
+// False is the answer to "who closes this": a concurrent Close cleared the
+// field first, which means it holds the only reference and will close the
+// stream itself. The caller must then not close it and must not publish a
+// volume built around it.
+func (r *Reader) unstage() bool {
 	r.volMu.Lock()
+	owned := r.staging != nil
 	r.staging = nil
 	r.volMu.Unlock()
 	// --- no lock held below this line ---
+	return owned
 }
