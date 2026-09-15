@@ -774,9 +774,15 @@ func TestCloseRescuesAStreamStalledInItsSignatureRead(t *testing.T) {
 		if err := <-result; !errors.Is(err, ErrReaderClosed) {
 			t.Fatalf("NextEntry = %v, want ErrReaderClosed", err)
 		}
-		if !sv.closed() {
-			t.Fatal("the stalled stream was never closed by the library -- " +
-				"Close reached neither r.vol nor r.volumes for it")
+		// Exactly one, not merely at least one. Zero is the stall this test
+		// exists for -- Close reached neither r.vol nor r.volumes. Two is the
+		// failure arm's ownership guard gone: Close claims the stream and
+		// closes it, the read fails BECAUSE of that, and nextVolume closes it
+		// again on the way out.
+		if n := sv.closeCount(); n != 1 {
+			t.Fatalf("the stalled stream was closed %d times, want exactly "+
+				"1; 0 means the library never reached it, 2 means it was "+
+				"closed by both Close and nextVolume", n)
 		}
 	})
 }
@@ -789,7 +795,7 @@ func TestCloseRescuesAStreamStalledInItsSignatureRead(t *testing.T) {
 type stalledVolume struct {
 	release   chan struct{}
 	closeOnce sync.Once
-	didClose  atomic.Bool
+	closes    atomic.Int32
 }
 
 func (s *stalledVolume) Read(p []byte) (int, error) {
@@ -798,14 +804,18 @@ func (s *stalledVolume) Read(p []byte) (int, error) {
 }
 
 func (s *stalledVolume) Close() error {
-	s.closeOnce.Do(func() {
-		s.didClose.Store(true)
-		close(s.release)
-	})
+	// Counted OUTSIDE the Once. An os.File whose Close is called twice
+	// reports the second call as an error rather than absorbing it, and the
+	// count is what lets a caller assert exactly one -- an atomic.Bool here
+	// could not tell one close from two, which left nextVolume's `if owned`
+	// guard on the failure arm unpinned: reverting it to an unconditional
+	// close kept the whole suite green while double-closing the stream.
+	s.closes.Add(1)
+	s.closeOnce.Do(func() { close(s.release) })
 	return nil
 }
 
-func (s *stalledVolume) closed() bool { return s.didClose.Load() }
+func (s *stalledVolume) closeCount() int { return int(s.closes.Load()) }
 
 // Entry.Read reaches the same acquisition site through the splice, so the
 // same stall is reachable while a member is mid-stream. This is the case a
@@ -848,9 +858,9 @@ func TestCloseRescuesASpliceStalledInASignatureRead(t *testing.T) {
 		if err := <-result; !errors.Is(err, ErrReaderClosed) {
 			t.Fatalf("Entry.Read = %v, want ErrReaderClosed", err)
 		}
-		if !sv.closed() {
-			t.Fatal("the continuation volume stalled in its signature read " +
-				"was never closed by the library")
+		if n := sv.closeCount(); n != 1 {
+			t.Fatalf("the continuation volume stalled in its signature read "+
+				"was closed %d times, want exactly 1", n)
 		}
 	})
 }
@@ -900,6 +910,17 @@ func TestAStreamRescuedAsItsSignatureLandsIsClosedOnce(t *testing.T) {
 			t.Fatalf("the caller's stream was closed %d times, want exactly "+
 				"1 -- io.Closer leaves a second Close undefined", n)
 		}
+		// Without this the test would still pass if a future change moved
+		// the stall earlier, to where stage refuses and openVolume never
+		// runs: that path also returns ErrReaderClosed and also closes the
+		// stream once. Draining the signature is what proves openVolume
+		// SUCCEEDED around an already-closed stream, which is the arm under
+		// test.
+		if rv.src.Len() != 0 {
+			t.Fatalf("%d signature bytes left unread -- openVolume did not "+
+				"run to completion, so the arm this test names was never "+
+				"reached", rv.src.Len())
+		}
 	})
 }
 
@@ -911,9 +932,11 @@ func TestAStreamRescuedAsItsSignatureLandsIsClosedOnce(t *testing.T) {
 // two.
 type rescuedVolume struct {
 	release chan struct{}
-	src     io.Reader
-	closes  atomic.Int32
-	once    sync.Once
+	// Concretely a *bytes.Reader rather than an io.Reader so the test can
+	// assert the signature was actually consumed -- see the Len check.
+	src    *bytes.Reader
+	closes atomic.Int32
+	once   sync.Once
 }
 
 func (v *rescuedVolume) Read(p []byte) (int, error) {
