@@ -412,7 +412,7 @@ func TestContinuationForADifferentMemberIsRefused(t *testing.T) {
 
 // TestNilVolumeStreamIsReportedNotDereferenced pins that a nil element on the
 // volumes channel is an error rather than a process kill. It is the caller's
-// bug, but readSignature would read the signature straight out of the nil
+// bug, but openVolume would read the signature straight out of the nil
 // interface, and a library cannot answer a bad argument by taking the program
 // down with it.
 func TestNilVolumeStreamIsReportedNotDereferenced(t *testing.T) {

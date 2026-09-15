@@ -39,24 +39,7 @@ type volume struct {
 	// yielded a key. nil means headers are plaintext.
 	hd *headerDecrypter
 
-	// err starts as errVolumeNotValidated and is cleared by readSignature,
-	// which is what makes "no header before the signature" a state this type
-	// cannot represent rather than an ordering its callers must remember.
-	// nextVolume publishes a volume BEFORE reading its signature -- that is
-	// what lets Reader.Close reach a stream stalled in that read -- so r.vol
-	// briefly points at a volume positioned at byte 0, where next() would skip
-	// nothing (body.N is 0) and parse a block header straight out of the
-	// signature bytes. Seeding the field costs nothing: next() already returns
-	// it on the line it would have tested a separate flag on, and a dedicated
-	// bool measured +16 B/op and ~3% on the decompress benchmarks, because it
-	// grew the struct past an allocator size class.
-	//
-	// This is the one write that clears err rather than setting it, and it
-	// happens once, before any next() call, on the traversal goroutine. Past
-	// that point the field is sticky in the sense the rest of this comment
-	// describes.
-	//
-	// Sticky once set by next(): any failure inside it -- the payload skip or
+	// err is sticky once set: any failure inside next() -- the payload skip or
 	// the header read itself, plaintext or encrypted -- leaves v.rc at an
 	// offset next() cannot vouch for. A header read that fails partway through
 	// (a truncated size vint, an IV read that succeeds but the ciphertext that
@@ -90,12 +73,6 @@ type volume struct {
 	closeErr  error
 }
 
-// errVolumeNotValidated reports a volume asked for a header before its
-// signature was consumed. Unexported: it is unreachable through the public
-// API by construction, and an exported sentinel would be a contract this
-// library has to hold forever for a state a caller cannot produce.
-var errVolumeNotValidated = errors.New("rarengine: volume used before its signature was read")
-
 var rar5Signature = []byte{0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x01, 0x00}
 
 // signatureReadError names a volume that ended inside its own signature.
@@ -113,47 +90,25 @@ func signatureReadError(err error) error {
 	return err
 }
 
-// newVolume wraps rc as the Reader's open volume WITHOUT consuming anything
-// from it. The stream is positioned at byte 0 -- v.readSignature must run
-// before v.next(), and the errVolumeNotValidated seeded into v.err is what
-// enforces that.
-//
-// Split from the signature read so a volume becomes reachable from the Reader
-// at the instant its stream is received, rather than after a blocking read
-// that Reader.Close could not reach. See nextVolume.
-func newVolume(rc io.ReadCloser) *volume {
-	return &volume{rc: rc, err: errVolumeNotValidated}
-}
-
-// readSignature consumes and validates the RAR5 signature on v's own stream,
-// leaving v positioned on the first block boundary. A RAR3 signature is
-// recognised only so it can be reported as ErrUnsupportedFormat by name;
-// nothing past the signature is parsed.
-//
-// A failure here does not set v.err: v.err means "v.rc is at an offset next()
-// cannot vouch for", and a volume that failed its signature is discarded by
-// its caller rather than retried. Setting it would be harmless but would
-// claim a sticky position-level failure this is not.
-func (v *volume) readSignature() error {
-	if err := readSignature(v.rc); err != nil {
-		return err
+// openVolume reads and validates the RAR5 signature, leaving v positioned on
+// the first block boundary. A RAR3 signature is recognised only so it can be
+// reported as ErrUnsupportedFormat by name; nothing past the signature is
+// parsed.
+func openVolume(rc io.ReadCloser) (*volume, error) {
+	if err := readSignature(rc); err != nil {
+		return nil, err
 	}
-	v.err = nil
-	return nil
+	return &volume{rc: rc}, nil
 }
 
 // readSignature consumes the RAR signature from r, leaving it positioned on
 // the first block boundary.
 //
-// Split out as its own function so the inspection entry points in inspect.go
-// reach the same logic without a volume: they call this directly, having no
-// stream to own, while traversal reaches it through (*volume).readSignature,
-// which additionally records that the volume may now be asked for a header.
-//
-// A caller must never be asked to skip the signature itself: its length
-// depends on which format the bytes turn out to be -- 7 for RAR3, 8 for RAR5
-// -- so "skip 8 and start parsing" silently mis-frames every RAR3 archive it
-// is handed.
+// Split out of openVolume so the inspection entry points in inspect.go reach
+// the stream the same way traversal does. A caller must never be asked to skip
+// the signature itself: its length depends on which format the bytes turn out
+// to be -- 7 for RAR3, 8 for RAR5 -- so "skip 8 and start parsing" silently
+// mis-frames every RAR3 archive it is handed.
 func readSignature(r io.Reader) error {
 	var sig [8]byte
 	if _, err := io.ReadFull(r, sig[:7]); err != nil {

@@ -283,14 +283,13 @@ func TestVolumeEndHeaderPayloadDoesNotEatNextVolume_RAR5(t *testing.T) {
 
 // --- nextVolume's other invariant-violating exit ---------------------------
 
-// TestBadMagicLeavesNoUsableVolume covers readSignature's failure path.
+// TestBadMagicLeavesNoUsableVolume covers the openVolume failure path.
 //
-// nextVolume publishes r.vol before readSignature has run, so a bad-magic
-// volume is briefly reachable there -- but closeCurrentVolume, called on that
-// failure, clears the field back to nil rather than leaving it half-opened.
-// NextEntry treats r.vol == nil as "open the next one", so a caller that
-// retries after a bad-magic failure advances cleanly instead of re-reading
-// (or panicking on) a volume that never became usable.
+// nextVolume assigns r.vol only once openVolume has succeeded, so a
+// bad-magic volume leaves r.vol nil rather than half-opened -- and NextEntry
+// treats r.vol == nil as "open the next one", so a caller that retries after
+// a bad-magic failure advances cleanly instead of re-reading (or panicking
+// on) a volume that never became usable.
 func TestBadMagicLeavesNoUsableVolume(t *testing.T) {
 	r := NewReader(volumesOf([]byte("not a rar archive at all")))
 

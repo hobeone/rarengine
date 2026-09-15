@@ -1,5 +1,43 @@
 # Close vs the Signature-Read Window Implementation Plan
 
+> ## ⚠️ SUPERSEDED — implemented, then replaced before merge
+>
+> **This plan's central design decision was wrong, and the code it produced was reverted.** The
+> problem statement, the premise audit, and the tests are all sound and survived; the *approach* did
+> not. Do not follow the tasks below.
+>
+> **What this plan chose:** publish the `*volume` to `r.vol` *before* reading its signature, so that
+> ownership transfer and reachability become the same statement.
+>
+> **Why that was wrong:** it moves a `Reader`-level concern — keeping an owned stream reachable
+> across a channel-to-volume handoff — down into the `volume` parser, which knows nothing about
+> volume channels or cancellation. Everything that followed was scaffolding for that choice:
+> `r.vol` could now point at an unvalidated byte-0 stream, so `next()` needed a guard; the cheapest
+> guard (`signed bool`) grew `volume` past an allocator size class at **+16 B/op and +3.13%
+> geomean**; dodging that cost meant seeding `v.err` and giving a sticky corruption sentinel a
+> second meaning as a lifecycle latch. Three mechanisms, each answering a problem the previous one
+> created.
+>
+> **The error in the reasoning**, which two plan-review rounds and three diff reviewers all missed
+> because they were checking whether the chosen design was implemented correctly rather than whether
+> it was the right design: Gate 1 rejected staging the raw stream on the `Reader` on the grounds
+> that *"a raw `io.ReadCloser` has no idempotent `Close`, so any design that leaves the stream bare
+> must invent a protocol deciding who closes it."* That is a false dilemma. An idempotent
+> `io.Closer` is a ten-line `sync.Once` wrapper. The argument justifies wrapping the stream in
+> *something*; it does not justify wrapping it in `*volume` specifically.
+>
+> **What shipped instead:** `Reader.staging`, an `io.Closer` registered under `volMu` for exactly
+> the duration of `openVolume`, holding an `*onceCloser` around the caller's stream. `volume.go` is
+> untouched — `openVolume` remains the sole atomic, valid-by-construction constructor, `v.err`
+> remains a sticky corruption sentinel, and `r.vol` still means "a validated RAR5 volume is open".
+> Both `synctest` pins below survived the swap unchanged and still fail as bubble deadlocks when the
+> registration is removed.
+>
+> Kept rather than deleted because the premise audit, the three-way solution-space comparison, and
+> the measurements are the record of how the wrong turn was taken — and the wrong turn is the useful
+> part.
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make `Reader.Close` able to reach — and therefore close — the volume stream that is being read for its RAR signature, closing the one window in which an owned stream is reachable from neither `r.vol` nor `r.volumes`.

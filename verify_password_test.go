@@ -20,8 +20,8 @@ func cryptHeaderFromFixture(t *testing.T, name string) *cryptHeader {
 	}
 	t.Cleanup(func() { _ = f.Close() })
 
-	if err := readSignature(f); err != nil {
-		t.Fatalf("readSignature: %v", err)
+	if _, err := openVolume(f); err != nil {
+		t.Fatalf("openVolume: %v", err)
 	}
 
 	for {

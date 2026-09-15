@@ -34,7 +34,10 @@ func TestVolumeNextSkipsUnclaimedPayload(t *testing.T) {
 
 	stream := append(append(append([]byte{}, archive...), planted...), real...)
 
-	v := mustOpenVolume(t, bytes.NewReader(stream))
+	v, err := openVolume(&mockReadCloser{bytes.NewReader(stream)})
+	if err != nil {
+		t.Fatalf("openVolume: %v", err)
+	}
 
 	h, err := v.next()
 	if err != nil {
@@ -62,7 +65,10 @@ func TestVolumePayloadIsBoundedByDataSize(t *testing.T) {
 	blk := rar5BlockDeclaring(headerTypeFile, declared, nil, true)
 	stream := append(append([]byte{}, blk...), append([]byte("DATA"), trailing...)...)
 
-	v := mustOpenVolume(t, bytes.NewReader(stream))
+	v, err := openVolume(&mockReadCloser{bytes.NewReader(stream)})
+	if err != nil {
+		t.Fatalf("openVolume: %v", err)
+	}
 	if _, err := v.next(); err != nil {
 		t.Fatalf("next(): %v", err)
 	}
@@ -76,13 +82,13 @@ func TestVolumePayloadIsBoundedByDataSize(t *testing.T) {
 	}
 }
 
-// A RAR3 signature is not decodable. readSignature must say so rather than
+// A RAR3 signature is not decodable. openVolume must say so rather than
 // misparsing RAR3 blocks under the RAR5 layout.
-func TestReadSignatureRefusesRAR3(t *testing.T) {
+func TestOpenVolumeRefusesRAR3(t *testing.T) {
 	sig := []byte{0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x00}
-	err := readSignature(bytes.NewReader(sig))
+	_, err := openVolume(&mockReadCloser{bytes.NewReader(sig)})
 	if !errors.Is(err, ErrUnsupportedFormat) {
-		t.Fatalf("readSignature error = %v, want ErrUnsupportedFormat", err)
+		t.Fatalf("openVolume error = %v, want ErrUnsupportedFormat", err)
 	}
 }
 
@@ -92,11 +98,14 @@ func TestVolumeTruncatedInsidePayloadReportsEOF(t *testing.T) {
 	blk := rar5BlockDeclaring(headerTypeFile, 100, nil, true)
 	stream := append(append([]byte{}, blk...), []byte("short")...)
 
-	v := mustOpenVolume(t, bytes.NewReader(stream))
+	v, err := openVolume(&mockReadCloser{bytes.NewReader(stream)})
+	if err != nil {
+		t.Fatalf("openVolume: %v", err)
+	}
 	if _, err := v.next(); err != nil {
 		t.Fatalf("first next(): %v", err)
 	}
-	_, err := v.next()
+	_, err = v.next()
 	if !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Fatalf("second next() error = %v, want io.EOF or io.ErrUnexpectedEOF", err)
 	}
@@ -140,7 +149,10 @@ func TestVolumeUseEncryptedHeadersDecryptsAndDoesNotCarryAcrossVolumes(t *testin
 	stream.Write(iv)
 	stream.Write(ciphertext)
 
-	v := mustOpenVolume(t, bytes.NewReader(append(append([]byte{}, rar5Signature...), stream.Bytes()...)))
+	v, err := openVolume(&mockReadCloser{bytes.NewReader(append(append([]byte{}, rar5Signature...), stream.Bytes()...))})
+	if err != nil {
+		t.Fatalf("openVolume: %v", err)
+	}
 	v.useEncryptedHeaders(key)
 
 	h, err := v.next()
@@ -159,7 +171,10 @@ func TestVolumeUseEncryptedHeadersDecryptsAndDoesNotCarryAcrossVolumes(t *testin
 	// misread as ciphertext, and its CRC32 would not validate. Asserting that
 	// next() succeeds AND returns the correct block type is a check the
 	// no-carry-over guarantee can fail.
-	other := mustOpenVolume(t, bytes.NewReader(append(append([]byte{}, rar5Signature...), rar5EndHeader()...)))
+	other, err := openVolume(&mockReadCloser{bytes.NewReader(append(append([]byte{}, rar5Signature...), rar5EndHeader()...))})
+	if err != nil {
+		t.Fatalf("openVolume: %v", err)
+	}
 	h, err = other.next()
 	if err != nil {
 		t.Fatalf("next() on the new plaintext volume: %v", err)
@@ -188,7 +203,10 @@ func TestVolumeDoesNotResumeAfterFailedHeaderRead(t *testing.T) {
 	stream = append(stream, 0x00, 0x00, 0x00, 0x00, 0x80, 0x80, 0x80)
 	stream = append(stream, planted...)
 
-	v := mustOpenVolume(t, bytes.NewReader(stream))
+	v, err := openVolume(&mockReadCloser{bytes.NewReader(stream)})
+	if err != nil {
+		t.Fatalf("openVolume: %v", err)
+	}
 
 	_, firstErr := v.next()
 	if firstErr == nil {
@@ -211,41 +229,5 @@ func TestVolumeDoesNotResumeAfterFailedHeaderRead(t *testing.T) {
 // next() after Close() errors rather than dereferencing a nil rc -- a state
 // volume.Close created itself, by nilling rc for idempotency. closeOnce
 // provides idempotency without the write, so rc is immutable after
-// construction and newVolume is the only constructor, which makes the nil it
+// construction and openVolume is the only constructor, which makes the nil it
 // guarded unrepresentable rather than merely unreached.
-
-// A volume whose signature has not been consumed must refuse to produce a
-// header, rather than parse one out of the signature bytes.
-//
-// nextVolume publishes a volume before reading its signature, so r.vol points
-// at an unvalidated volume for the duration of that read. Nothing can observe
-// it today -- the traversal goroutine is the only reader and it is the one
-// blocked inside the read -- but "unreachable by convention" and
-// "unrepresentable" are different guarantees, and the one this codebase asks
-// for is the second. Concurrent volume prefetch is the change that would turn
-// the convention false without touching nextVolume at all.
-//
-// Mutation check: drop the errVolumeNotValidated seed from newVolume and this
-// reports "unexpected EOF" instead of the sentinel -- readBlockHeader takes
-// the signature's first four bytes for a CRC32, reads 0x1a as a 26-byte header
-// length, and runs out. A larger fixture would fabricate a header instead;
-// either way next() answers about bytes that are not a block.
-func TestUnvalidatedVolumeRefusesToProduceAHeader(t *testing.T) {
-	stream := append(append([]byte{}, rar5Signature...), rar5EndHeader()...)
-	v := newVolume(&mockReadCloser{bytes.NewReader(stream)})
-
-	if _, err := v.next(); !errors.Is(err, errVolumeNotValidated) {
-		t.Fatalf("next() on an unvalidated volume = %v, want "+
-			"errVolumeNotValidated -- it must not read a header out of the "+
-			"signature bytes", err)
-	}
-
-	// And it works normally once validated, so the guard gates the phase
-	// rather than the volume.
-	if err := v.readSignature(); err != nil {
-		t.Fatalf("readSignature: %v", err)
-	}
-	if _, err := v.next(); err != nil {
-		t.Fatalf("next() after readSignature: %v", err)
-	}
-}

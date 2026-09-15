@@ -153,7 +153,7 @@ func TestUnverifiedGuessDoesNotSuppressLaterCandidateScan(t *testing.T) {
 //
 // Every volume of such an archive repeats its own HEAD_CRYPT block in
 // plaintext, and each volume is a fresh value whose header decryptor starts
-// nil -- newVolume carries nothing forward. dispatch armed decryption from
+// nil -- openVolume carries nothing forward. dispatch armed decryption from
 // that block, but nextVolumePayload's continuation scan skipped it, so the
 // rest of volume two's headers were read as plaintext when they were
 // ciphertext and the member died partway through with ErrBadHeaderCRC.
