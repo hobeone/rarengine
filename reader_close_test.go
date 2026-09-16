@@ -733,3 +733,302 @@ func TestCloseDuringScanIsReportedAsCancellation(t *testing.T) {
 		t.Fatalf("NextEntry leaked the stream's error to the caller: %v", err)
 	}
 }
+
+// Close must reach a stream that is stalled inside its own signature read.
+//
+// The window this pins is the gap between the channel receive and the volume
+// becoming reachable as r.vol. A stream received but not yet published is
+// reachable from neither r.vol nor r.volumes, so Close -- which reads exactly
+// those two -- could not close it, and never called Close on it at all. That
+// is not the documented "your stream's Close must interrupt its own Read"
+// limit: stalledVolume models os.File/net.Conn, whose Close DOES interrupt an
+// in-flight Read, and it was still never rescued.
+//
+// Mutation check: short-circuit nextVolume's r.stage call and this deadlocks
+// inside the bubble, with the stack parked in readSignature.
+func TestCloseRescuesAStreamStalledInItsSignatureRead(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		// Constructed INSIDE the bubble, as every test in this file is: a
+		// channel created outside leaves the block non-durable and Wait
+		// never returns.
+		release := make(chan struct{})
+		sv := &stalledVolume{release: release}
+
+		volumes := make(chan io.ReadCloser, 1)
+		volumes <- sv
+		r := NewReader(volumes)
+
+		result := make(chan error, 1)
+		go func() {
+			_, err := r.NextEntry()
+			result <- err
+		}()
+
+		// Blocks durably inside io.ReadFull, which is the state under test.
+		synctest.Wait()
+		_ = r.Close()
+
+		// No timeout arm: inside a bubble a Close that fails to release is
+		// reported as a deadlock, which cannot pass by accident on a slow
+		// machine.
+		if err := <-result; !errors.Is(err, ErrReaderClosed) {
+			t.Fatalf("NextEntry = %v, want ErrReaderClosed", err)
+		}
+		// Exactly one, not merely at least one. Zero is the stall this test
+		// exists for -- Close reached neither r.vol nor r.volumes. Two is the
+		// failure arm's ownership guard gone: Close claims the stream and
+		// closes it, the read fails BECAUSE of that, and nextVolume closes it
+		// again on the way out.
+		if n := sv.closeCount(); n != 1 {
+			t.Fatalf("the stalled stream was closed %d times, want exactly "+
+				"1; 0 means the library never reached it, 2 means it was "+
+				"closed by both Close and nextVolume", n)
+		}
+	})
+}
+
+// stalledVolume models an os.File/net.Conn-class stream: its Read blocks
+// until released, and its own Close releases it. This is the class Close's
+// doc comment says IS rescuable, which is what makes it the right fixture --
+// a stream that ignores a concurrent Close would leave the test unable to
+// distinguish the library's defect from the stream's limitation.
+type stalledVolume struct {
+	release   chan struct{}
+	closeOnce sync.Once
+	closes    atomic.Int32
+}
+
+func (s *stalledVolume) Read(p []byte) (int, error) {
+	<-s.release
+	return 0, os.ErrClosed
+}
+
+func (s *stalledVolume) Close() error {
+	// Counted OUTSIDE the Once. An os.File whose Close is called twice
+	// reports the second call as an error rather than absorbing it, and the
+	// count is what lets a caller assert exactly one -- an atomic.Bool here
+	// could not tell one close from two, which left nextVolume's `if owned`
+	// guard on the failure arm unpinned: reverting it to an unconditional
+	// close kept the whole suite green while double-closing the stream.
+	s.closes.Add(1)
+	s.closeOnce.Do(func() { close(s.release) })
+	return nil
+}
+
+func (s *stalledVolume) closeCount() int { return int(s.closes.Load()) }
+
+// Entry.Read reaches the same acquisition site through the splice, so the
+// same stall is reachable while a member is mid-stream. This is the case a
+// context parameter could never have covered: Entry.Read satisfies io.Reader.
+//
+// Mutation check: short-circuit nextVolume's r.stage call and this deadlocks
+// in the bubble, same as the NextEntry case.
+// It is kept despite sharing that mechanism because "one acquisition site
+// covers three callers" is a claim about three callers, and this test is the
+// only evidence for the second of them. The third, Reset, is covered by the
+// traversal-goroutine contract rather than by any test.
+func TestCloseRescuesASpliceStalledInASignatureRead(t *testing.T) {
+	v1 := rar5Archive(t, false, rar5Member(t, memberSpec{
+		name: "split.bin", content: "aaaa",
+		unpackedSz: new(int64(8)), packedSz: new(int64(4)), notLast: true,
+	}))
+	synctest.Test(t, func(t *testing.T) {
+		release := make(chan struct{})
+		sv := &stalledVolume{release: release}
+
+		volumes := make(chan io.ReadCloser, 2)
+		volumes <- &mockReadCloser{bytes.NewReader(v1)}
+		volumes <- sv
+
+		r := NewReader(volumes)
+		e, err := r.NextEntry()
+		if err != nil {
+			t.Fatalf("NextEntry: %v", err)
+		}
+
+		result := make(chan error, 1)
+		go func() {
+			_, err := io.ReadAll(e)
+			result <- err
+		}()
+
+		synctest.Wait()
+		_ = r.Close()
+
+		if err := <-result; !errors.Is(err, ErrReaderClosed) {
+			t.Fatalf("Entry.Read = %v, want ErrReaderClosed", err)
+		}
+		if n := sv.closeCount(); n != 1 {
+			t.Fatalf("the continuation volume stalled in its signature read "+
+				"was closed %d times, want exactly 1", n)
+		}
+	})
+}
+
+// A rescue that arrives just as the signature read succeeds must still close
+// the caller's stream exactly once.
+//
+// This is the other side of the staging window, and the only place two
+// goroutines can hold the same stream: Close claims it out of r.staging and
+// closes it -- which is what releases the read -- and openVolume then returns
+// a perfectly good volume built around a stream that is already closed.
+// Publishing that volume would make a closed stream reachable as r.vol, and
+// closing it would be a second Close on a stream whose io.Closer contract
+// leaves that undefined. Both are avoided by the same fact: unstage found the
+// field already cleared, so this goroutine does not own the stream.
+//
+// Mutation check: make unstage return true unconditionally and the volume is
+// published to a closed Reader, publishVolume closes it, and the count here
+// reads 2.
+func TestAStreamRescuedAsItsSignatureLandsIsClosedOnce(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		release := make(chan struct{})
+		rv := &rescuedVolume{
+			release: release,
+			src:     bytes.NewReader(rar5Signature),
+		}
+
+		volumes := make(chan io.ReadCloser, 1)
+		volumes <- rv
+		r := NewReader(volumes)
+
+		result := make(chan error, 1)
+		go func() {
+			_, err := r.NextEntry()
+			result <- err
+		}()
+
+		// Parked in the signature read, exactly as in the stall above. The
+		// difference is what happens once Close releases it.
+		synctest.Wait()
+		_ = r.Close()
+
+		if err := <-result; !errors.Is(err, ErrReaderClosed) {
+			t.Fatalf("NextEntry = %v, want ErrReaderClosed", err)
+		}
+		if n := rv.closes.Load(); n != 1 {
+			t.Fatalf("the caller's stream was closed %d times, want exactly "+
+				"1 -- io.Closer leaves a second Close undefined", n)
+		}
+		// Without this the test would still pass if a future change moved
+		// the stall earlier, to where stage refuses and openVolume never
+		// runs: that path also returns ErrReaderClosed and also closes the
+		// stream once. Draining the signature is what proves openVolume
+		// SUCCEEDED around an already-closed stream, which is the arm under
+		// test.
+		if rv.src.Len() != 0 {
+			t.Fatalf("%d signature bytes left unread -- openVolume did not "+
+				"run to completion, so the arm this test names was never "+
+				"reached", rv.src.Len())
+		}
+	})
+}
+
+// rescuedVolume is stalledVolume's counterpart: its Read also blocks until
+// its own Close releases it, but it then delivers a VALID RAR5 signature, so
+// openVolume succeeds around a stream the rescuer has already closed. It
+// counts every Close rather than absorbing repeats, which is the whole point
+// -- a fixture with a sync.Once around the count could not tell one call from
+// two.
+type rescuedVolume struct {
+	release chan struct{}
+	// Concretely a *bytes.Reader rather than an io.Reader so the test can
+	// assert the signature was actually consumed -- see the Len check.
+	src    *bytes.Reader
+	closes atomic.Int32
+	once   sync.Once
+}
+
+func (v *rescuedVolume) Read(p []byte) (int, error) {
+	<-v.release
+	return v.src.Read(p)
+}
+
+func (v *rescuedVolume) Close() error {
+	v.closes.Add(1)
+	v.once.Do(func() { close(v.release) })
+	return nil
+}
+
+// A stream this library closed itself must never be recorded as archive
+// damage, whatever error the close makes its Read report.
+//
+// The path is narrow and entirely self-inflicted. A stream cut mid-signature
+// is ordinary damage -- openNextVolume records it and moves to the next part,
+// which is the right judgement for a set with a truncated volume in it. But
+// io.ReadFull reports ErrUnexpectedEOF for any partial read followed by EOF,
+// and a stream that had delivered some bytes before OUR Close released it
+// reports exactly that. Reaching openNextVolume's damage arm with it makes
+// the Reader record a cut that the archive never had, and sends the loop back
+// for another volume on a Reader that is closed.
+//
+// This is the same rule the window's incomplete flag follows: damage is what
+// happened to the file, never the error the caller receives. Here the caller
+// IS the cause.
+//
+// Mutation check: order nextVolume's `if err != nil` arm before its
+// `if !owned` arm -- the shape this test was written against -- and r.damaged
+// comes back non-nil.
+func TestACloseThatCutsASignatureIsNotRecordedAsDamage(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		release := make(chan struct{})
+		pv := &partialSignatureVolume{release: release}
+
+		volumes := make(chan io.ReadCloser, 1)
+		volumes <- pv
+		r := NewReader(volumes)
+
+		result := make(chan error, 1)
+		go func() {
+			_, err := r.NextEntry()
+			result <- err
+		}()
+
+		// Parked mid-signature, three bytes in. Close is what ends the read,
+		// and ending it that way is what produces the ErrUnexpectedEOF.
+		synctest.Wait()
+		_ = r.Close()
+
+		if err := <-result; !errors.Is(err, ErrReaderClosed) {
+			t.Fatalf("NextEntry = %v, want ErrReaderClosed", err)
+		}
+		if r.damaged != nil {
+			t.Fatalf("Close recorded its own cancellation as archive "+
+				"damage: r.damaged = %v; the volume was intact until this "+
+				"library closed it", r.damaged)
+		}
+		if n := pv.closes.Load(); n != 1 {
+			t.Fatalf("the caller's stream was closed %d times, want 1", n)
+		}
+	})
+}
+
+// partialSignatureVolume delivers the first three signature bytes, then
+// blocks until its own Close, after which it reports io.EOF. io.ReadFull
+// turns "some bytes, then EOF" into io.ErrUnexpectedEOF, which is the error
+// a genuinely truncated volume produces -- so this fixture is indistinguishable
+// from real damage by the error alone. That is the point: only the ownership
+// token knows the difference.
+//
+// sent needs no synchronisation: every Read is on the traversal goroutine.
+type partialSignatureVolume struct {
+	release chan struct{}
+	sent    bool
+	closes  atomic.Int32
+	once    sync.Once
+}
+
+func (p *partialSignatureVolume) Read(b []byte) (int, error) {
+	if !p.sent {
+		p.sent = true
+		return copy(b, rar5Signature[:3]), nil
+	}
+	<-p.release
+	return 0, io.EOF
+}
+
+func (p *partialSignatureVolume) Close() error {
+	p.closes.Add(1)
+	p.once.Do(func() { close(p.release) })
+	return nil
+}
