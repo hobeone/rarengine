@@ -949,3 +949,86 @@ func (v *rescuedVolume) Close() error {
 	v.once.Do(func() { close(v.release) })
 	return nil
 }
+
+// A stream this library closed itself must never be recorded as archive
+// damage, whatever error the close makes its Read report.
+//
+// The path is narrow and entirely self-inflicted. A stream cut mid-signature
+// is ordinary damage -- openNextVolume records it and moves to the next part,
+// which is the right judgement for a set with a truncated volume in it. But
+// io.ReadFull reports ErrUnexpectedEOF for any partial read followed by EOF,
+// and a stream that had delivered some bytes before OUR Close released it
+// reports exactly that. Reaching openNextVolume's damage arm with it makes
+// the Reader record a cut that the archive never had, and sends the loop back
+// for another volume on a Reader that is closed.
+//
+// This is the same rule the window's incomplete flag follows: damage is what
+// happened to the file, never the error the caller receives. Here the caller
+// IS the cause.
+//
+// Mutation check: order nextVolume's `if err != nil` arm before its
+// `if !owned` arm -- the shape this test was written against -- and r.damaged
+// comes back non-nil.
+func TestACloseThatCutsASignatureIsNotRecordedAsDamage(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		release := make(chan struct{})
+		pv := &partialSignatureVolume{release: release}
+
+		volumes := make(chan io.ReadCloser, 1)
+		volumes <- pv
+		r := NewReader(volumes)
+
+		result := make(chan error, 1)
+		go func() {
+			_, err := r.NextEntry()
+			result <- err
+		}()
+
+		// Parked mid-signature, three bytes in. Close is what ends the read,
+		// and ending it that way is what produces the ErrUnexpectedEOF.
+		synctest.Wait()
+		_ = r.Close()
+
+		if err := <-result; !errors.Is(err, ErrReaderClosed) {
+			t.Fatalf("NextEntry = %v, want ErrReaderClosed", err)
+		}
+		if r.damaged != nil {
+			t.Fatalf("Close recorded its own cancellation as archive "+
+				"damage: r.damaged = %v; the volume was intact until this "+
+				"library closed it", r.damaged)
+		}
+		if n := pv.closes.Load(); n != 1 {
+			t.Fatalf("the caller's stream was closed %d times, want 1", n)
+		}
+	})
+}
+
+// partialSignatureVolume delivers the first three signature bytes, then
+// blocks until its own Close, after which it reports io.EOF. io.ReadFull
+// turns "some bytes, then EOF" into io.ErrUnexpectedEOF, which is the error
+// a genuinely truncated volume produces -- so this fixture is indistinguishable
+// from real damage by the error alone. That is the point: only the ownership
+// token knows the difference.
+//
+// sent needs no synchronisation: every Read is on the traversal goroutine.
+type partialSignatureVolume struct {
+	release chan struct{}
+	sent    bool
+	closes  atomic.Int32
+	once    sync.Once
+}
+
+func (p *partialSignatureVolume) Read(b []byte) (int, error) {
+	if !p.sent {
+		p.sent = true
+		return copy(b, rar5Signature[:3]), nil
+	}
+	<-p.release
+	return 0, io.EOF
+}
+
+func (p *partialSignatureVolume) Close() error {
+	p.closes.Add(1)
+	p.once.Do(func() { close(p.release) })
+	return nil
+}

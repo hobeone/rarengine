@@ -943,10 +943,11 @@ func (r *Reader) closeCurrentVolume() {
 // are deliberate. It is idempotent.
 //
 // A Close landing during that signature read changes what this method
-// returns, not just what it reaches: it now finds the published volume and
-// returns that volume's own Close error, where it previously found r.vol
-// still nil and returned nil regardless of what the caller's stream would
-// have reported.
+// returns, not just what it reaches. r.vol is still nil throughout -- the
+// volume is published only once the signature has been read -- so what this
+// method finds is the staged stream, and what it returns is that stream's
+// own Close error, where it previously found nothing at all and returned nil
+// regardless of what the caller's stream would have reported.
 //
 // Close is the ONE method safe to call from another goroutine while a read is
 // in progress. Every other method requires the caller's own serialisation --
@@ -997,9 +998,10 @@ func (r *Reader) closeCurrentVolume() {
 // it does not own.
 //
 // That limit is about whether closing the stream unblocks it. It is not a
-// licence to leave a stream unreachable: until the signature read moved
-// behind publishVolume, an os.File-class stream -- one whose Close DOES
-// interrupt an in-flight Read -- was never rescued either, because Close
+// licence to leave a stream unreachable: until staging existed, a stream was
+// reachable from neither r.vol nor r.volumes between coming off the channel
+// and openVolume returning, so an os.File-class stream -- one whose Close
+// DOES interrupt an in-flight Read -- was never rescued either, because Close
 // never reached it to try.
 //
 // After Close, Reset revives the Reader for a different archive. Close ends
@@ -1159,19 +1161,29 @@ func (r *Reader) nextVolume() error {
 	// True when the stream is still this goroutine's to close. False means a
 	// concurrent Close claimed it out of r.staging and has closed it, or is
 	// about to -- which is also what unblocked the signature read above.
-	owned := r.unstage()
-	if err != nil {
-		if owned {
-			_ = rc.Close()
-		}
-		return err
-	}
-	if !owned {
-		// openVolume won the race and produced a volume, but around a stream
-		// Close has already claimed. Publishing it would make a closed stream
-		// reachable as r.vol, and closing v here would be the second Close on
-		// the caller's stream. Drop it: the archive is over either way.
+	//
+	// Tested BEFORE err, and the order is load-bearing. Whatever openVolume
+	// reported, a stream this library closed underneath itself makes the
+	// verdict cancellation rather than a fact about the archive: io.ReadFull
+	// turns "some bytes, then EOF" into ErrUnexpectedEOF, so a Close landing
+	// a few bytes into the signature produces the exact error a genuinely
+	// truncated volume produces. Returning it sent openNextVolume into its
+	// damage arm, which recorded a cut the archive never had and went back
+	// for another volume on a closed Reader. Nothing downstream can separate
+	// the two -- the errors are identical -- so it is separated here, where
+	// the token still says who caused it.
+	//
+	// The same return covers openVolume SUCCEEDING around a claimed stream:
+	// v wraps a stream Close has already closed, so publishing it would make
+	// a closed stream reachable as r.vol and closing v here would be the
+	// second Close on the caller's stream. v is dropped. The archive is over
+	// either way, which is why one arm answers both.
+	if !r.unstage() {
 		return ErrReaderClosed
+	}
+	if err != nil {
+		_ = rc.Close()
+		return err
 	}
 	if !r.publishVolume(v) {
 		return ErrReaderClosed
