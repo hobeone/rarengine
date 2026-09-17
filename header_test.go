@@ -378,3 +378,65 @@ func TestExtraRecordFailureDoesNotHideALaterEncryptionRecord(t *testing.T) {
 		t.Fatalf("len(fh.EncCheck) = %d, want 12", len(fh.EncCheck))
 	}
 }
+
+// TestMalformedEncryptionRecordStillReportsEncrypted pins that a member with
+// a malformed encryption record is reported as encrypted. The presence of an
+// encryption record means the member is encrypted, whether or not the record
+// body parses -- the failure in the body is what refuses the member, not the
+// presence of the record.
+func TestMalformedEncryptionRecordStillReportsEncrypted(t *testing.T) {
+	tests := []struct {
+		name    string
+		body    []byte
+		wantErr error
+	}{
+		{
+			name:    "unknown encryption version",
+			body:    encodeVint(1),
+			wantErr: ErrUnknownEncryptMethod,
+		},
+		{
+			name:    "too short for salt and IV",
+			body:    append(encodeVint(0), append(encodeVint(0), make([]byte, 10)...)...),
+			wantErr: ErrCorruptEncryptData,
+		},
+		{
+			name: "check flag set, check value short",
+			body: func() []byte {
+				var b bytes.Buffer
+				b.Write(encodeVint(0))                   // version 0
+				b.Write(encodeVint(fileEncCheckPresent)) // flags with check present
+				b.Write(make([]byte, 33))                // kdf count, salt, IV
+				b.Write(make([]byte, 5))                 // only 5 bytes, need 12
+				return b.Bytes()
+			}(),
+			wantErr: ErrCorruptEncryptData,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			blk := rar5Member(t, memberSpec{
+				name:         "test.bin",
+				content:      "hello",
+				extraRecords: []extraRecordSpec{{Type: 1, Body: tt.body}},
+			})
+
+			h, err := readBlockHeader(bytes.NewReader(blk))
+			if err != nil {
+				t.Fatalf("builder produced an unreadable block: %v", err)
+			}
+
+			fh, err := parseFileHeader(h)
+			if !errors.Is(err, tt.wantErr) {
+				t.Errorf("parseFileHeader error = %v, want %v", err, tt.wantErr)
+			}
+			if fh == nil {
+				t.Fatal("parseFileHeader returned a nil header alongside the error")
+			}
+			if !fh.Encrypted {
+				t.Errorf("fh.Encrypted = %v, want true", fh.Encrypted)
+			}
+		})
+	}
+}

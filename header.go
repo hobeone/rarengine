@@ -332,6 +332,15 @@ func parseArchiveHeader(h *blockHeader) (*archiveHeader, error) {
 
 // parseEncryptionRecord decodes RAR5 encryption extra record details.
 func parseEncryptionRecord(fh *FileHeader, b []byte) error {
+	// Presence, not validity. This is the only place Encrypted is set, so the
+	// flag means the archive carries an encryption record for this member --
+	// true whether or not the body below parses. Set after the checks, a
+	// malformed record reported an encrypted member as plaintext. A body that
+	// fails still returns its error, and that error is what refuses the member
+	// and keeps buildChain from ever deriving a key from the zero salt and IV
+	// such a header is left with.
+	fh.Encrypted = true
+
 	ver, nVer, err := decodeVint(b)
 	if err != nil {
 		return err
@@ -350,7 +359,6 @@ func parseEncryptionRecord(fh *FileHeader, b []byte) error {
 	if len(b) < 33 {
 		return ErrCorruptEncryptData
 	}
-	fh.Encrypted = true
 	fh.KdfCount = int(b[0])
 	fh.Salt = append([]byte(nil), b[1:17]...)
 	fh.IV = append([]byte(nil), b[17:33]...)
