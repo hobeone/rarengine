@@ -27,10 +27,11 @@ type Entry struct {
 	//
 	// On an entry refused for its header -- an unknown or negative declared
 	// size, or a failing or duplicated extra record -- only Name and
-	// Encrypted are dependable; every other field is either decoded
-	// correctly or, for a field belonging to a record that failed to parse,
-	// zero or partly filled from that record. Encrypted reports that the
-	// member carries an encryption record, not that it is usable.
+	// Encrypted are dependable; UnpackedSize is decoded but not dependable,
+	// and every other field is either decoded correctly or, for a field
+	// belonging to one of the records that failed to parse, zero or partly
+	// filled from that record. Encrypted reports that the member carries an
+	// encryption record, not that it is usable.
 	Header *FileHeader
 
 	// cur is the header in force, which for a multi-volume member is NOT

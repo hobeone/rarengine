@@ -118,7 +118,10 @@ type FileHeader struct {
 	HasBlake2sp bool
 	Blake2sp    []byte // 32-byte BLAKE2sp hash
 	// Encrypted reports that the member's content is encrypted, from RAR5's
-	// encryption extra record.
+	// encryption extra record. It reports that the member carries such a
+	// record, not that the record is usable: it is set even when that
+	// record fails to parse, in which case the parse error refuses the
+	// member.
 	Encrypted bool
 	KdfCount  int
 	// Salt is the PBKDF2 salt for an encrypted member.
@@ -528,16 +531,17 @@ func parseExtraRecords(fh *FileHeader, extra []extraRecord) error {
 //
 //   - ErrUnpSizeUnknown, from the declared-size check
 //   - ErrCorruptFileHeader, from a negative decoded UnpackedSize
-//   - a failure inside parseExtraRecords, the last step
+//   - a failure inside parseExtraRecords, the lowest-priority of the three
 //
 // All three headers are equally complete: parseExtraRecords runs before
 // either size check reports, so a header returned alongside ANY of these
 // errors carries Name and Encrypted, and every other field is either decoded
-// correctly or, for a field belonging to the extra record that failed, zero
-// or partly filled from that record. The ERRORS still keep their old
-// priority -- an unknown or negative size outranks a failing extra record --
-// so moving the parse earlier changed no caller's verdict, only what the
-// header it's attached to contains.
+// correctly or, for a field belonging to one of the records that failed,
+// zero or partly filled from that record; UnpackedSize itself is decoded but
+// not dependable once either size check has refused the header. The ERRORS
+// still keep their old priority -- an unknown or negative size outranks a
+// failing extra record -- so moving the parse earlier changed no caller's
+// verdict, only what the header it's attached to contains.
 //
 // An exported wrapper used to stand in front of this and flatten all three to
 // a nil header, which is why callers could not tell them apart from a header
@@ -635,21 +639,14 @@ func parseFileHeader(h *blockHeader) (*FileHeader, error) {
 	}
 	fh.Name = sanitizePath(string(payload[:nameLen]))
 
-	// Identity-first validation: both checks below are policy judgments about
-	// already-decoded values, not failures to decode, and neither needs to
-	// fire before fh.Name exists. Placed here, immediately after
-	// parseExtraRecords, every return from this point on carries fh alongside
-	// its error so the caller (Reader.dispatch) can refuse the member by name
-	// instead of dropping it from the listing with no trace -- the same
-	// contract parseExtraRecords already relies on below.
-	//
-	// No return path between the flags/size decode above and here can hand
-	// back a header with an unvalidated size: every intermediate field
-	// (mtime, CRC32, comp flags, host OS, name) fails with a bare
-	// (nil, err) on a short or malformed payload, never exposing fh. So a
-	// negative UnpackedSize is always rejected before ever escaping this
-	// function, satisfying "sizes are validated where they are decoded" even
-	// though the reject site has moved.
+	// fh.Name is set before anything below can fail: no return path between
+	// the flags/size decode above and here can hand back a header with an
+	// unvalidated size, since every intermediate field (mtime, CRC32, comp
+	// flags, host OS, name) fails with a bare (nil, err) on a short or
+	// malformed payload, never exposing fh. So every header this function
+	// returns alongside an error already has a name the caller
+	// (Reader.dispatch) can refuse the member by, instead of dropping it
+	// from the listing with no trace.
 	//
 	// The header's own untrustworthy value -- a meaningless UnpSizeUnknown
 	// placeholder, or a negative size -- is deliberately left exactly as
@@ -657,12 +654,13 @@ func parseFileHeader(h *blockHeader) (*FileHeader, error) {
 	// the statement that nothing in the header is to be trusted; clamping
 	// would destroy that evidence. See terminalEntry's doc comment and
 	// ErrRarBombDetected's existing precedent for the same choice.
-
+	//
 	// Every extra record is attempted before either size check reports, so a
 	// header refused for its size still carries what its archive encoded --
-	// Encrypted above all. The ERRORS keep their priority: an unknown or
-	// negative size outranks a failing extra record, so moving the parse up
-	// changes no caller's verdict.
+	// Encrypted above all, though UnpackedSize itself stays undependable once
+	// a size check has refused the header. The ERRORS keep their priority:
+	// ErrUnpSizeUnknown, then a negative decoded UnpackedSize, then a failing
+	// extra record.
 	extraErr := parseExtraRecords(fh, h.Extra)
 	if unpSizeUnknown {
 		return fh, ErrUnpSizeUnknown

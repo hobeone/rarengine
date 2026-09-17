@@ -19,8 +19,8 @@ import (
 //
 // memberWithEncVersion produces the concrete, empirically-verified trigger:
 // an encryption extra record declaring a version other than 0 fails inside
-// parseEncryptionRecord, the last field parseFileHeader decodes, well after
-// the name.
+// parseEncryptionRecord, run by parseExtraRecords well after the name is
+// decoded.
 
 // memberWithEncVersion builds a stored member carrying an encryption extra
 // record declaring encryption version ver. notFirst clears FirstBlock (i.e.
