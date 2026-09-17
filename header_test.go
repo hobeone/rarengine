@@ -341,3 +341,40 @@ func TestParseFileHeader_RejectsUnknownUnpackedSize(t *testing.T) {
 		t.Fatalf("returned header names %q, want %q", fh.Name, name)
 	}
 }
+
+// TestExtraRecordFailureDoesNotHideALaterEncryptionRecord pins that a
+// malformed record does not stop the records after it from being parsed. A
+// time record declaring mtime but carrying none of its bytes fails, and a
+// valid encryption record follows it in the same extra area; the encryption
+// record must still be parsed and reflected on the returned header.
+func TestExtraRecordFailureDoesNotHideALaterEncryptionRecord(t *testing.T) {
+	blk := rar5Member(t, memberSpec{
+		name: "hidden-enc.bin", content: "hello",
+		extraRecords: []extraRecordSpec{
+			{Type: 3, Body: encodeVint(extraTimeMtime)},
+			{Type: 1, Body: encryptionRecordBody(fileEncCheckPresent, 0xAA)},
+		},
+	})
+
+	h, err := readBlockHeader(bytes.NewReader(blk))
+	if err != nil {
+		t.Fatalf("builder produced an unreadable block: %v", err)
+	}
+	fh, err := parseFileHeader(h)
+	if !errors.Is(err, ErrCorruptFileHeader) {
+		t.Fatalf("parseFileHeader error = %v, want ErrCorruptFileHeader", err)
+	}
+	if fh == nil {
+		t.Fatal("parseFileHeader returned a nil header alongside the error")
+	}
+	if !fh.Encrypted {
+		t.Fatal("fh.Encrypted = false; the encryption record after the " +
+			"broken time record was not parsed")
+	}
+	if len(fh.Salt) != 16 {
+		t.Fatalf("len(fh.Salt) = %d, want 16", len(fh.Salt))
+	}
+	if len(fh.EncCheck) != 12 {
+		t.Fatalf("len(fh.EncCheck) = %d, want 12", len(fh.EncCheck))
+	}
+}

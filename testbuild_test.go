@@ -158,17 +158,19 @@ type memberSpec struct {
 	// CRC-valid. That is the case the traversal must skip rather than stop on.
 	badName bool
 
-	// encRecord attaches a raw file-encryption extra record body (everything
-	// after the record-type vint), letting a test state the encryption
-	// metadata it needs: an encrypted member with no check value, which rar
-	// never produces but the format permits, or -- as encodeVint(99) -- a
-	// record declaring an unsupported version. That second one fails LATER
-	// than badName does, inside parseExtraRecords and after the name has been
-	// decoded, which is the only failure yielding a header alongside its
-	// error, so the member can be refused by name instead of vanishing from
-	// the listing. A dedicated badEncVersion flag built exactly that record
-	// and nothing else, so it was this field with one value hard-coded.
-	encRecord []byte
+	// extraRecords is the header's extra area, emitted record by record in the
+	// order given. Each Body is written verbatim after its type, so a fixture
+	// states a malformed record directly: an unsupported encryption version is
+	// {Type: 1, Body: encodeVint(99)}. Order is part of what a fixture can say,
+	// because extra records are parsed in archive order.
+	extraRecords []extraRecordSpec
+}
+
+// extraRecordSpec is one extra-area record, emitted as its type vint followed
+// by Body verbatim.
+type extraRecordSpec struct {
+	Type uint64
+	Body []byte
 }
 
 // rar5Member builds one RAR5 file block followed by its payload.
@@ -267,10 +269,10 @@ func buildRAR5Member(s memberSpec) []byte {
 	// declared before the data size -- so it has to be built before the block
 	// header fields are written.
 	var extra bytes.Buffer
-	if s.encRecord != nil {
+	for _, r := range s.extraRecords {
 		var rec bytes.Buffer
-		rec.Write(encodeVint(1)) // record type: encryption
-		rec.Write(s.encRecord)
+		rec.Write(encodeVint(r.Type))
+		rec.Write(r.Body)
 		extra.Write(encodeVint(uint64(rec.Len())))
 		extra.Write(rec.Bytes())
 		blockFlags |= headerFlagHasExtra

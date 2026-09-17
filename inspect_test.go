@@ -344,22 +344,31 @@ func TestVolumeNumberOnHeaderEncryptedArchive(t *testing.T) {
 // value" -- which is the distinction the scan has to handle.
 func encryptedMemberHeader(t *testing.T, name string, withCheck bool) []byte {
 	t.Helper()
-	var enc bytes.Buffer
-	enc.Write(encodeVint(0)) // encryption version 0 (AES-256)
+	var flags uint64
 	if withCheck {
-		enc.Write(encodeVint(fileEncCheckPresent))
-	} else {
-		enc.Write(encodeVint(0))
-	}
-	enc.WriteByte(15)                         // kdf count
-	enc.Write(bytes.Repeat([]byte{0xAA}, 16)) // salt
-	enc.Write(bytes.Repeat([]byte{0xBB}, 16)) // IV
-	if withCheck {
-		enc.Write(bytes.Repeat([]byte{0xCC}, 12)) // check value
+		flags = fileEncCheckPresent
 	}
 	return rar5Member(t, memberSpec{
-		name: name, content: "encrypted content", encRecord: enc.Bytes(),
+		name: name, content: "encrypted content",
+		extraRecords: []extraRecordSpec{{Type: 1, Body: encryptionRecordBody(flags, 0xAA)}},
 	})
+}
+
+// encryptionRecordBody is a well-formed RAR5 file-encryption record body
+// (everything after the record-type vint): AES-256, KDF count 15, a salt of
+// sixteen copies of salt, a fixed IV, and the flags given. fileEncCheckPresent
+// appends a 12-byte password check value; fileEncUseMac is recorded as given.
+func encryptionRecordBody(flags uint64, salt byte) []byte {
+	var enc bytes.Buffer
+	enc.Write(encodeVint(0)) // encryption version 0 (AES-256)
+	enc.Write(encodeVint(flags))
+	enc.WriteByte(15)                         // kdf count
+	enc.Write(bytes.Repeat([]byte{salt}, 16)) // salt
+	enc.Write(bytes.Repeat([]byte{0xBB}, 16)) // IV
+	if flags&fileEncCheckPresent != 0 {
+		enc.Write(bytes.Repeat([]byte{0xCC}, 12)) // check value
+	}
+	return enc.Bytes()
 }
 
 // TestInspectionReportsTruncationThroughTheSeekPath pins what the seek

@@ -463,24 +463,30 @@ func parseTimeRecord(fh *FileHeader, data []byte) error {
 }
 
 // parseExtraRecords iterates over extra records and parses encryption or file hash blocks.
+//
+// Every record is parsed, and the first failure is returned once all of them
+// have run. parseBlockHeaderFields has already cut each record to its own
+// declared length and refused broken size or type framing, so one record's
+// bad body cannot desynchronise the next. Stopping at the first failure let a
+// malformed record placed ahead of the encryption record hide it entirely,
+// and the header reported an encrypted member as plaintext.
 func parseExtraRecords(fh *FileHeader, extra []extraRecord) error {
+	var first error
 	for _, e := range extra {
+		var err error
 		switch e.Type {
 		case 1: // Encryption
-			if err := parseEncryptionRecord(fh, e.Data); err != nil {
-				return err
-			}
+			err = parseEncryptionRecord(fh, e.Data)
 		case 2: // File hash (Blake2sp)
-			if err := parseHashRecord(fh, e.Data); err != nil {
-				return err
-			}
+			err = parseHashRecord(fh, e.Data)
 		case 3: // File times
-			if err := parseTimeRecord(fh, e.Data); err != nil {
-				return err
-			}
+			err = parseTimeRecord(fh, e.Data)
+		}
+		if err != nil && first == nil {
+			first = err
 		}
 	}
-	return nil
+	return first
 }
 
 // parseFileHeader decodes the file header details from a block header.
