@@ -3,6 +3,7 @@ package rarengine
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"io"
@@ -378,6 +379,33 @@ func volumesOf(parts ...[]byte) <-chan io.ReadCloser {
 	}
 	close(ch)
 	return ch
+}
+
+// assertRefusedByName reads the next entry of r and asserts it is the member
+// name, refused: NextEntry hands it back rather than failing, and both Read and
+// Close report want. It returns the entry, whose Header stays readable after
+// Close. Exactly one entry is read -- a loop that searched for the name would
+// pass even with a fabricated entry before it.
+func assertRefusedByName(t *testing.T, r *Reader, name string, want error) *Entry {
+	t.Helper()
+	e, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("NextEntry error = %v, want a terminal Entry instead", err)
+	}
+	if e == nil || e.Header == nil {
+		t.Fatalf("NextEntry returned %+v, want an entry for %q", e, name)
+	}
+	if e.Header.Name != name {
+		t.Fatalf("Header.Name = %q, want %q (header %+v)", e.Header.Name, name, e.Header)
+	}
+	buf := make([]byte, 16)
+	if _, readErr := e.Read(buf); !errors.Is(readErr, want) {
+		t.Fatalf("Read error = %v, want %v", readErr, want)
+	}
+	if closeErr := e.Close(); !errors.Is(closeErr, want) {
+		t.Fatalf("Close error = %v, want %v", closeErr, want)
+	}
+	return e
 }
 
 // parseBuiltMember reads one built member back through the real parser.

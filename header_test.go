@@ -455,6 +455,10 @@ func TestDuplicateExtraRecordIsRefused(t *testing.T) {
 		wantSalt0       byte
 		wantEncCheckLen int
 		checkEncryption bool
+		checkHash       bool
+		wantHashByte    byte
+		checkTime       bool
+		wantMtimeUnix   int64
 	}{
 		{
 			name: "encryption",
@@ -474,7 +478,9 @@ func TestDuplicateExtraRecordIsRefused(t *testing.T) {
 				{Type: 2, Body: append(encodeVint(0), bytes.Repeat([]byte{0x11}, 32)...)},
 				{Type: 2, Body: append(encodeVint(0), bytes.Repeat([]byte{0x22}, 32)...)},
 			},
-			wantErr: ErrCorruptFileHeader,
+			wantErr:      ErrCorruptFileHeader,
+			checkHash:    true,
+			wantHashByte: 0x11,
 		},
 		{
 			name: "time",
@@ -482,7 +488,9 @@ func TestDuplicateExtraRecordIsRefused(t *testing.T) {
 				{Type: 3, Body: append(encodeVint(extraTimeMtime|extraTimeUnix), le32(100)...)},
 				{Type: 3, Body: append(encodeVint(extraTimeMtime|extraTimeUnix), le32(200)...)},
 			},
-			wantErr: ErrCorruptFileHeader,
+			wantErr:       ErrCorruptFileHeader,
+			checkTime:     true,
+			wantMtimeUnix: 100,
 		},
 	}
 
@@ -514,6 +522,16 @@ func TestDuplicateExtraRecordIsRefused(t *testing.T) {
 				}
 				if len(fh.EncCheck) != tt.wantEncCheckLen {
 					t.Errorf("len(fh.EncCheck) = %d, want %d", len(fh.EncCheck), tt.wantEncCheckLen)
+				}
+			}
+			if tt.checkHash {
+				if len(fh.Blake2sp) == 0 || fh.Blake2sp[0] != tt.wantHashByte {
+					t.Errorf("fh.Blake2sp[0] = %v, want %#x (hash %v) -- the first record must survive", fh.Blake2sp, tt.wantHashByte, fh.Blake2sp)
+				}
+			}
+			if tt.checkTime {
+				if got := fh.ModificationTime.Unix(); got != tt.wantMtimeUnix {
+					t.Errorf("fh.ModificationTime.Unix() = %d, want %d -- the first record must survive", got, tt.wantMtimeUnix)
 				}
 			}
 		})

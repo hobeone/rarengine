@@ -102,34 +102,6 @@ func TestMemberWithEncVersionRoundTrip(t *testing.T) {
 // report ErrUnknownEncryptMethod. Asserting the FIRST entry, not looping to
 // find it, is deliberate -- a test that loops until it finds the name would
 // pass even if a fabricated entry preceded it.
-
-// assertRefusedByName reads the next entry of r and asserts it is the member
-// name, refused: NextEntry hands it back rather than failing, and both Read and
-// Close report want. It returns the entry, whose Header stays readable after
-// Close. Exactly one entry is read -- a loop that searched for the name would
-// pass even with a fabricated entry before it.
-func assertRefusedByName(t *testing.T, r *Reader, name string, want error) *Entry {
-	t.Helper()
-	e, err := r.NextEntry()
-	if err != nil {
-		t.Fatalf("NextEntry error = %v, want a terminal Entry instead", err)
-	}
-	if e == nil || e.Header == nil {
-		t.Fatalf("NextEntry returned %+v, want an entry for %q", e, name)
-	}
-	if e.Header.Name != name {
-		t.Fatalf("Header.Name = %q, want %q (header %+v)", e.Header.Name, name, e.Header)
-	}
-	buf := make([]byte, 16)
-	if _, readErr := e.Read(buf); !errors.Is(readErr, want) {
-		t.Fatalf("Read error = %v, want %v", readErr, want)
-	}
-	if closeErr := e.Close(); !errors.Is(closeErr, want) {
-		t.Fatalf("Close error = %v, want %v", closeErr, want)
-	}
-	return e
-}
-
 func TestRefusedExtraRecordMemberReportedByName(t *testing.T) {
 	stream := rar5Archive(t, false,
 		memberWithEncVersion(t, "bad.enc", "secret", 1, false),
@@ -554,20 +526,17 @@ func TestDuplicateEncryptionRecordRefusesTheMember(t *testing.T) {
 // the caller with Header.Encrypted true, because its encryption extra record
 // is parsed before the size refusal is reported.
 func TestRefusedMemberHeaderReportsEncryption(t *testing.T) {
-	member := rar5Member(t, memberSpec{
-		name: "unknown-enc.bin", content: "hello",
-		extraFileFlags: fileFlagUnpSizeUnknown,
-		extraRecords: []extraRecordSpec{
-			{Type: 1, Body: encryptionRecordBody(fileEncCheckPresent, 0xAA)},
-		},
-	})
+	stream := rar5Archive(t, false,
+		rar5Member(t, memberSpec{
+			name: "unknown-enc.bin", content: "hello",
+			extraFileFlags: fileFlagUnpSizeUnknown,
+			extraRecords: []extraRecordSpec{
+				{Type: 1, Body: encryptionRecordBody(fileEncCheckPresent, 0xAA)},
+			},
+		}),
+	)
 
-	var stream bytes.Buffer
-	stream.Write(rar5ArchiveHeader())
-	stream.Write(member)
-	stream.Write(rar5EndHeader())
-
-	e := assertRefusedByName(t, NewReader(volumesOf(stream.Bytes())), "unknown-enc.bin", ErrUnpSizeUnknown)
+	e := assertRefusedByName(t, NewReader(volumesOf(stream)), "unknown-enc.bin", ErrUnpSizeUnknown)
 	if !e.Header.Encrypted {
 		t.Error("Header.Encrypted = false, want true -- the extra record was never parsed")
 	}
