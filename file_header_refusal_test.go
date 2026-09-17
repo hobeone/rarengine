@@ -80,11 +80,7 @@ func memberWithEncVersion(t testing.TB, name, content string, ver uint64, notFir
 func TestMemberWithEncVersionRoundTrip(t *testing.T) {
 	blk := memberWithEncVersion(t, "enc0.bin", "hello", 0, false)
 
-	h, err := readBlockHeader(bytes.NewReader(blk))
-	if err != nil {
-		t.Fatalf("builder produced an unreadable block: %v", err)
-	}
-	fh, err := parseFileHeader(h)
+	fh, err := parseBuiltHeader(t, blk)
 	if err != nil {
 		t.Fatalf("builder produced an unparsable file header with ver=0: %v", err)
 	}

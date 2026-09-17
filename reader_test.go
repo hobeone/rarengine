@@ -391,11 +391,7 @@ func TestResetClearsFatalLatch(t *testing.T) {
 func TestFixtureBuildersRoundTrip(t *testing.T) {
 	blk := rar5Member(t, memberSpec{name: "f.bin", content: "hello", withCRC: true})
 
-	h, err := readBlockHeader(bytes.NewReader(blk))
-	if err != nil {
-		t.Fatalf("builder produced an unreadable block: %v", err)
-	}
-	fh, err := parseFileHeader(h)
+	fh, err := parseBuiltHeader(t, blk)
 	if err != nil {
 		t.Fatalf("builder produced an unparsable file header: %v", err)
 	}

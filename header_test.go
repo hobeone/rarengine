@@ -357,11 +357,7 @@ func TestExtraRecordFailureDoesNotHideALaterEncryptionRecord(t *testing.T) {
 		},
 	})
 
-	h, err := readBlockHeader(bytes.NewReader(blk))
-	if err != nil {
-		t.Fatalf("builder produced an unreadable block: %v", err)
-	}
-	fh, err := parseFileHeader(h)
+	fh, err := parseBuiltHeader(t, blk)
 	if !errors.Is(err, ErrCorruptFileHeader) {
 		t.Fatalf("parseFileHeader error = %v, want ErrCorruptFileHeader", err)
 	}
@@ -423,12 +419,7 @@ func TestMalformedEncryptionRecordStillReportsEncrypted(t *testing.T) {
 				extraRecords: []extraRecordSpec{{Type: extraRecordEncryption, Body: tt.body}},
 			})
 
-			h, err := readBlockHeader(bytes.NewReader(blk))
-			if err != nil {
-				t.Fatalf("builder produced an unreadable block: %v", err)
-			}
-
-			fh, err := parseFileHeader(h)
+			fh, err := parseBuiltHeader(t, blk)
 			if !errors.Is(err, tt.wantErr) {
 				t.Errorf("parseFileHeader error = %v, want %v", err, tt.wantErr)
 			}
@@ -502,11 +493,7 @@ func TestDuplicateExtraRecordIsRefused(t *testing.T) {
 				extraRecords: tt.extraRecords,
 			})
 
-			h, err := readBlockHeader(bytes.NewReader(blk))
-			if err != nil {
-				t.Fatalf("builder produced an unreadable block: %v", err)
-			}
-			fh, err := parseFileHeader(h)
+			fh, err := parseBuiltHeader(t, blk)
 			if !errors.Is(err, tt.wantErr) {
 				t.Fatalf("parseFileHeader error = %v, want %v", err, tt.wantErr)
 			}
@@ -549,11 +536,7 @@ func TestDuplicateExtraRecordIsRefused(t *testing.T) {
 			},
 		})
 
-		h, err := readBlockHeader(bytes.NewReader(blk))
-		if err != nil {
-			t.Fatalf("builder produced an unreadable block: %v", err)
-		}
-		fh, err := parseFileHeader(h)
+		fh, err := parseBuiltHeader(t, blk)
 		if !errors.Is(err, ErrUnknownEncryptMethod) {
 			t.Fatalf("parseFileHeader error = %v, want ErrUnknownEncryptMethod", err)
 		}
@@ -584,11 +567,7 @@ func TestDuplicateExtraRecordIsRefused(t *testing.T) {
 			},
 		})
 
-		h, err := readBlockHeader(bytes.NewReader(blk))
-		if err != nil {
-			t.Fatalf("builder produced an unreadable block: %v", err)
-		}
-		fh, err := parseFileHeader(h)
+		fh, err := parseBuiltHeader(t, blk)
 		if !errors.Is(err, ErrCorruptFileHeader) {
 			t.Fatalf("parseFileHeader error = %v, want ErrCorruptFileHeader", err)
 		}
@@ -653,11 +632,7 @@ func TestSizeRefusalStillCarriesExtraRecords(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			blk := rar5Member(t, tt.spec)
 
-			h, err := readBlockHeader(bytes.NewReader(blk))
-			if err != nil {
-				t.Fatalf("builder produced an unreadable block: %v", err)
-			}
-			fh, err := parseFileHeader(h)
+			fh, err := parseBuiltHeader(t, blk)
 			if !errors.Is(err, tt.wantErr) {
 				t.Fatalf("parseFileHeader error = %v, want %v", err, tt.wantErr)
 			}
@@ -712,11 +687,7 @@ func TestSizeRefusalOutranksAnExtraRecordFailure(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			blk := rar5Member(t, tt.spec)
 
-			h, err := readBlockHeader(bytes.NewReader(blk))
-			if err != nil {
-				t.Fatalf("builder produced an unreadable block: %v", err)
-			}
-			fh, err := parseFileHeader(h)
+			fh, err := parseBuiltHeader(t, blk)
 			if !errors.Is(err, tt.wantErr) {
 				t.Fatalf("parseFileHeader error = %v, want %v", err, tt.wantErr)
 			}

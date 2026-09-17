@@ -433,6 +433,19 @@ func parseBuiltMember(t *testing.T, block []byte) *FileHeader {
 	return fh
 }
 
+// parseBuiltHeader reads blk back through readBlockHeader and parseFileHeader
+// and returns what parseFileHeader returns -- including its error, which is
+// what a test of a refused header asserts on. parseBuiltMember is the variant
+// for a header expected to parse.
+func parseBuiltHeader(t *testing.T, blk []byte) (*FileHeader, error) {
+	t.Helper()
+	h, err := readBlockHeader(bytes.NewReader(blk))
+	if err != nil {
+		t.Fatalf("builder produced an unreadable block: %v", err)
+	}
+	return parseFileHeader(h)
+}
+
 // A declared size of zero must reach the header, from both faces.
 //
 // Zero used to mean "absent, use len(content)", so a member declaring
