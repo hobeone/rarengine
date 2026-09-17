@@ -382,8 +382,8 @@ func volumesOf(parts ...[]byte) <-chan io.ReadCloser {
 }
 
 // assertRefusedByName reads the next entry of r and asserts it is the member
-// name, refused: NextEntry hands it back rather than failing, and both Read and
-// Close report want. It returns the entry, whose Header stays readable after
+// name, refused: NextEntry hands it back rather than failing, Read delivers no
+// bytes, and both Read and Close report want. It returns the entry, whose Header stays readable after
 // Close. Exactly one entry is read -- a loop that searched for the name would
 // pass even with a fabricated entry before it.
 func assertRefusedByName(t *testing.T, r *Reader, name string, want error) *Entry {
@@ -399,8 +399,8 @@ func assertRefusedByName(t *testing.T, r *Reader, name string, want error) *Entr
 		t.Fatalf("Header.Name = %q, want %q (header %+v)", e.Header.Name, name, e.Header)
 	}
 	buf := make([]byte, 16)
-	if _, readErr := e.Read(buf); !errors.Is(readErr, want) {
-		t.Fatalf("Read error = %v, want %v", readErr, want)
+	if n, readErr := e.Read(buf); n != 0 || !errors.Is(readErr, want) {
+		t.Fatalf("Read = %d bytes, %v; want 0 bytes, %v", n, readErr, want)
 	}
 	if closeErr := e.Close(); !errors.Is(closeErr, want) {
 		t.Fatalf("Close error = %v, want %v", closeErr, want)
