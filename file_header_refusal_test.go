@@ -531,6 +531,24 @@ func TestBombRatioSurvivesAnAbsurdPackedSize(t *testing.T) {
 	}
 }
 
+// TestDuplicateEncryptionRecordRefusesTheMember pins issue #62's duplicate
+// case end to end through the traversal: a member carrying two encryption
+// extra records is refused, rather than decoded from a header built out of
+// fields from both.
+func TestDuplicateEncryptionRecordRefusesTheMember(t *testing.T) {
+	stream := rar5Archive(t, false,
+		rar5Member(t, memberSpec{
+			name: "dup.enc", content: "secret",
+			extraRecords: []extraRecordSpec{
+				{Type: 1, Body: encryptionRecordBody(fileEncCheckPresent|fileEncUseMac, 0xAA)},
+				{Type: 1, Body: encryptionRecordBody(0, 0x55)},
+			},
+		}),
+	)
+
+	assertRefusedByName(t, NewReader(volumesOf(stream)), "dup.enc", ErrCorruptFileHeader)
+}
+
 // TestRefusedMemberHeaderReportsEncryption pins issue #62 end to end through
 // the traversal: a member refused for an unknown declared size still reaches
 // the caller with Header.Encrypted true, because its encryption extra record

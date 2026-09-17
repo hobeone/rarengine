@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"hash/crc32"
+	"strings"
 	"testing"
 )
 
@@ -439,6 +440,160 @@ func TestMalformedEncryptionRecordStillReportsEncrypted(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestDuplicateExtraRecordIsRefused pins that a header carrying two extra
+// records of the same type is refused rather than built out of a mix of
+// both. The first record of a type is the one parsed, even when it failed --
+// a later record of that type is never read into the header.
+func TestDuplicateExtraRecordIsRefused(t *testing.T) {
+	tests := []struct {
+		name            string
+		extraRecords    []extraRecordSpec
+		wantErr         error
+		wantUseMac      bool
+		wantSalt0       byte
+		wantEncCheckLen int
+		checkEncryption bool
+	}{
+		{
+			name: "encryption",
+			extraRecords: []extraRecordSpec{
+				{Type: 1, Body: encryptionRecordBody(fileEncCheckPresent|fileEncUseMac, 0xAA)},
+				{Type: 1, Body: encryptionRecordBody(0, 0x55)},
+			},
+			wantErr:         ErrCorruptFileHeader,
+			checkEncryption: true,
+			wantUseMac:      true,
+			wantSalt0:       0xAA,
+			wantEncCheckLen: 12,
+		},
+		{
+			name: "hash",
+			extraRecords: []extraRecordSpec{
+				{Type: 2, Body: append(encodeVint(0), bytes.Repeat([]byte{0x11}, 32)...)},
+				{Type: 2, Body: append(encodeVint(0), bytes.Repeat([]byte{0x22}, 32)...)},
+			},
+			wantErr: ErrCorruptFileHeader,
+		},
+		{
+			name: "time",
+			extraRecords: []extraRecordSpec{
+				{Type: 3, Body: append(encodeVint(extraTimeMtime|extraTimeUnix), le32(100)...)},
+				{Type: 3, Body: append(encodeVint(extraTimeMtime|extraTimeUnix), le32(200)...)},
+			},
+			wantErr: ErrCorruptFileHeader,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			blk := rar5Member(t, memberSpec{
+				name:         "test.bin",
+				content:      "hello",
+				extraRecords: tt.extraRecords,
+			})
+
+			h, err := readBlockHeader(bytes.NewReader(blk))
+			if err != nil {
+				t.Fatalf("builder produced an unreadable block: %v", err)
+			}
+			fh, err := parseFileHeader(h)
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("parseFileHeader error = %v, want %v", err, tt.wantErr)
+			}
+			if fh == nil {
+				t.Fatal("parseFileHeader returned a nil header alongside the error")
+			}
+			if tt.checkEncryption {
+				if fh.UseMac != tt.wantUseMac {
+					t.Errorf("fh.UseMac = %v, want %v", fh.UseMac, tt.wantUseMac)
+				}
+				if len(fh.Salt) == 0 || fh.Salt[0] != tt.wantSalt0 {
+					t.Errorf("fh.Salt[0] = %v, want %#x (salt %v)", fh.Salt, tt.wantSalt0, fh.Salt)
+				}
+				if len(fh.EncCheck) != tt.wantEncCheckLen {
+					t.Errorf("len(fh.EncCheck) = %d, want %d", len(fh.EncCheck), tt.wantEncCheckLen)
+				}
+			}
+		})
+	}
+
+	// A fourth case: the first record of a type is authoritative even when
+	// it failed. The duplicate's fields must never reach the header.
+	t.Run("first record malformed, duplicate not parsed", func(t *testing.T) {
+		blk := rar5Member(t, memberSpec{
+			name:    "test.bin",
+			content: "hello",
+			extraRecords: []extraRecordSpec{
+				{Type: 1, Body: encodeVint(99)},
+				{Type: 1, Body: encryptionRecordBody(fileEncCheckPresent, 0x55)},
+			},
+		})
+
+		h, err := readBlockHeader(bytes.NewReader(blk))
+		if err != nil {
+			t.Fatalf("builder produced an unreadable block: %v", err)
+		}
+		fh, err := parseFileHeader(h)
+		if !errors.Is(err, ErrUnknownEncryptMethod) {
+			t.Fatalf("parseFileHeader error = %v, want ErrUnknownEncryptMethod", err)
+		}
+		if fh == nil {
+			t.Fatal("parseFileHeader returned a nil header alongside the error")
+		}
+		if !fh.Encrypted {
+			t.Error("fh.Encrypted = false, want true")
+		}
+		if fh.Salt != nil {
+			t.Errorf("fh.Salt = %v, want nil -- the duplicate must not be parsed", fh.Salt)
+		}
+		if fh.EncCheck != nil {
+			t.Errorf("fh.EncCheck = %v, want nil -- the duplicate must not be parsed", fh.EncCheck)
+		}
+	})
+
+	// A fifth case: an earlier failure of a DIFFERENT type stands, and is
+	// not overwritten by the duplicate-record error that follows it.
+	t.Run("earlier failure of a different type stands", func(t *testing.T) {
+		blk := rar5Member(t, memberSpec{
+			name:    "test.bin",
+			content: "hello",
+			extraRecords: []extraRecordSpec{
+				{Type: 3, Body: encodeVint(extraTimeMtime)},
+				{Type: 1, Body: encryptionRecordBody(fileEncCheckPresent, 0xAA)},
+				{Type: 1, Body: encryptionRecordBody(0, 0x55)},
+			},
+		})
+
+		h, err := readBlockHeader(bytes.NewReader(blk))
+		if err != nil {
+			t.Fatalf("builder produced an unreadable block: %v", err)
+		}
+		fh, err := parseFileHeader(h)
+		if !errors.Is(err, ErrCorruptFileHeader) {
+			t.Fatalf("parseFileHeader error = %v, want ErrCorruptFileHeader", err)
+		}
+		if strings.Contains(err.Error(), "duplicate") {
+			t.Fatalf("parseFileHeader error = %q, want the time record's failure, not the later duplicate", err.Error())
+		}
+		if fh == nil {
+			t.Fatal("parseFileHeader returned a nil header alongside the error")
+		}
+		if len(fh.Salt) == 0 || fh.Salt[0] != 0xAA {
+			t.Errorf("fh.Salt[0] = %v, want 0xAA (salt %v)", fh.Salt, fh.Salt)
+		}
+		if len(fh.EncCheck) != 12 {
+			t.Errorf("len(fh.EncCheck) = %d, want 12", len(fh.EncCheck))
+		}
+	})
+}
+
+// le32 encodes v as 4 little-endian bytes, for a unix time record body.
+func le32(v uint32) []byte {
+	var b [4]byte
+	binary.LittleEndian.PutUint32(b[:], v)
+	return b[:]
 }
 
 // TestSizeRefusalStillCarriesExtraRecords pins issue #62: a header refused

@@ -477,17 +477,35 @@ func parseTimeRecord(fh *FileHeader, data []byte) error {
 // bad body cannot desynchronise the next. Stopping at the first failure let a
 // malformed record placed ahead of the encryption record hide it entirely,
 // and the header reported an encrypted member as plaintext.
+//
+// A record type this function parses may appear once. Two encryption
+// records built one header out of both -- Salt, IV and UseMac from the
+// second, EncCheck from the first -- with a nil error, which let a crafted
+// archive clear UseMac and have a MAC compared as a CRC32, or pair one
+// record's check value with the other's salt. Refused rather than resolved
+// by choosing one: the header contradicts itself. The first record of a
+// type is the one parsed, even when it fails; a later one is never read
+// into the header.
 func parseExtraRecords(fh *FileHeader, extra []extraRecord) error {
 	var first error
+	var seen [4]bool // indexed by record type; 1-3 are the types parsed below
 	for _, e := range extra {
 		var err error
-		switch e.Type {
-		case 1: // Encryption
-			err = parseEncryptionRecord(fh, e.Data)
-		case 2: // File hash (Blake2sp)
-			err = parseHashRecord(fh, e.Data)
-		case 3: // File times
-			err = parseTimeRecord(fh, e.Data)
+		if e.Type >= 1 && e.Type <= 3 && seen[e.Type] {
+			err = fmt.Errorf("%w: duplicate extra record of type %d",
+				ErrCorruptFileHeader, e.Type)
+		} else {
+			if e.Type >= 1 && e.Type <= 3 {
+				seen[e.Type] = true
+			}
+			switch e.Type {
+			case 1: // Encryption
+				err = parseEncryptionRecord(fh, e.Data)
+			case 2: // File hash (Blake2sp)
+				err = parseHashRecord(fh, e.Data)
+			case 3: // File times
+				err = parseTimeRecord(fh, e.Data)
+			}
 		}
 		if err != nil && first == nil {
 			first = err
