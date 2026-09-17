@@ -439,17 +439,10 @@ func TestMalformedEncryptionRecordStillReportsEncrypted(t *testing.T) {
 // a later record of that type is never read into the header.
 func TestDuplicateExtraRecordIsRefused(t *testing.T) {
 	tests := []struct {
-		name            string
-		extraRecords    []extraRecordSpec
-		wantErr         error
-		wantUseMac      bool
-		wantSalt0       byte
-		wantEncCheckLen int
-		checkEncryption bool
-		checkHash       bool
-		wantHashByte    byte
-		checkTime       bool
-		wantMtimeUnix   int64
+		name         string
+		extraRecords []extraRecordSpec
+		// verify checks that the FIRST record's fields survived.
+		verify func(t *testing.T, fh *FileHeader)
 	}{
 		{
 			name: "encryption",
@@ -457,11 +450,17 @@ func TestDuplicateExtraRecordIsRefused(t *testing.T) {
 				{Type: extraRecordEncryption, Body: encryptionRecordBody(fileEncCheckPresent|fileEncUseMac, 0xAA)},
 				{Type: extraRecordEncryption, Body: encryptionRecordBody(0, 0x55)},
 			},
-			wantErr:         ErrCorruptFileHeader,
-			checkEncryption: true,
-			wantUseMac:      true,
-			wantSalt0:       0xAA,
-			wantEncCheckLen: 12,
+			verify: func(t *testing.T, fh *FileHeader) {
+				if !fh.UseMac {
+					t.Errorf("fh.UseMac = false, want true")
+				}
+				if len(fh.Salt) == 0 || fh.Salt[0] != 0xAA {
+					t.Errorf("fh.Salt = %v, want a salt of 0xAA bytes", fh.Salt)
+				}
+				if len(fh.EncCheck) != 12 {
+					t.Errorf("len(fh.EncCheck) = %d, want 12", len(fh.EncCheck))
+				}
+			},
 		},
 		{
 			name: "hash",
@@ -469,19 +468,23 @@ func TestDuplicateExtraRecordIsRefused(t *testing.T) {
 				{Type: extraRecordHash, Body: append(encodeVint(0), bytes.Repeat([]byte{0x11}, 32)...)},
 				{Type: extraRecordHash, Body: append(encodeVint(0), bytes.Repeat([]byte{0x22}, 32)...)},
 			},
-			wantErr:      ErrCorruptFileHeader,
-			checkHash:    true,
-			wantHashByte: 0x11,
+			verify: func(t *testing.T, fh *FileHeader) {
+				if len(fh.Blake2sp) == 0 || fh.Blake2sp[0] != 0x11 {
+					t.Errorf("fh.Blake2sp = %v, want a digest of 0x11 bytes -- the first record must survive", fh.Blake2sp)
+				}
+			},
 		},
 		{
 			name: "time",
 			extraRecords: []extraRecordSpec{
-				{Type: extraRecordTime, Body: append(encodeVint(extraTimeMtime|extraTimeUnix), le32(100)...)},
-				{Type: extraRecordTime, Body: append(encodeVint(extraTimeMtime|extraTimeUnix), le32(200)...)},
+				{Type: extraRecordTime, Body: binary.LittleEndian.AppendUint32(encodeVint(extraTimeMtime|extraTimeUnix), 100)},
+				{Type: extraRecordTime, Body: binary.LittleEndian.AppendUint32(encodeVint(extraTimeMtime|extraTimeUnix), 200)},
 			},
-			wantErr:       ErrCorruptFileHeader,
-			checkTime:     true,
-			wantMtimeUnix: 100,
+			verify: func(t *testing.T, fh *FileHeader) {
+				if got := fh.ModificationTime.Unix(); got != 100 {
+					t.Errorf("fh.ModificationTime.Unix() = %d, want 100 -- the first record must survive", got)
+				}
+			},
 		},
 	}
 
@@ -494,33 +497,13 @@ func TestDuplicateExtraRecordIsRefused(t *testing.T) {
 			})
 
 			fh, err := parseBuiltHeader(t, blk)
-			if !errors.Is(err, tt.wantErr) {
-				t.Fatalf("parseFileHeader error = %v, want %v", err, tt.wantErr)
+			if !errors.Is(err, ErrCorruptFileHeader) {
+				t.Fatalf("parseFileHeader error = %v, want ErrCorruptFileHeader", err)
 			}
 			if fh == nil {
 				t.Fatal("parseFileHeader returned a nil header alongside the error")
 			}
-			if tt.checkEncryption {
-				if fh.UseMac != tt.wantUseMac {
-					t.Errorf("fh.UseMac = %v, want %v", fh.UseMac, tt.wantUseMac)
-				}
-				if len(fh.Salt) == 0 || fh.Salt[0] != tt.wantSalt0 {
-					t.Errorf("fh.Salt[0] = %v, want %#x (salt %v)", fh.Salt, tt.wantSalt0, fh.Salt)
-				}
-				if len(fh.EncCheck) != tt.wantEncCheckLen {
-					t.Errorf("len(fh.EncCheck) = %d, want %d", len(fh.EncCheck), tt.wantEncCheckLen)
-				}
-			}
-			if tt.checkHash {
-				if len(fh.Blake2sp) == 0 || fh.Blake2sp[0] != tt.wantHashByte {
-					t.Errorf("fh.Blake2sp[0] = %v, want %#x (hash %v) -- the first record must survive", fh.Blake2sp, tt.wantHashByte, fh.Blake2sp)
-				}
-			}
-			if tt.checkTime {
-				if got := fh.ModificationTime.Unix(); got != tt.wantMtimeUnix {
-					t.Errorf("fh.ModificationTime.Unix() = %d, want %d -- the first record must survive", got, tt.wantMtimeUnix)
-				}
-			}
+			tt.verify(t, fh)
 		})
 	}
 
@@ -584,13 +567,6 @@ func TestDuplicateExtraRecordIsRefused(t *testing.T) {
 			t.Errorf("len(fh.EncCheck) = %d, want 12", len(fh.EncCheck))
 		}
 	})
-}
-
-// le32 encodes v as 4 little-endian bytes, for a unix time record body.
-func le32(v uint32) []byte {
-	var b [4]byte
-	binary.LittleEndian.PutUint32(b[:], v)
-	return b[:]
 }
 
 // TestSizeRefusalStillCarriesExtraRecords pins issue #62: a header refused

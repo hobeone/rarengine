@@ -80,10 +80,7 @@ func memberWithEncVersion(t testing.TB, name, content string, ver uint64, notFir
 func TestMemberWithEncVersionRoundTrip(t *testing.T) {
 	blk := memberWithEncVersion(t, "enc0.bin", "hello", 0, false)
 
-	fh, err := parseBuiltHeader(t, blk)
-	if err != nil {
-		t.Fatalf("builder produced an unparsable file header with ver=0: %v", err)
-	}
+	fh := parseBuiltMember(t, blk)
 	if fh.Name != "enc0.bin" {
 		t.Fatalf("round trip name = %q, want enc0.bin", fh.Name)
 	}
