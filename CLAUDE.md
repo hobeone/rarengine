@@ -86,7 +86,7 @@ Skipping the clear is safe only because `CopyBytes` refuses to read behind the h
 
 ### Concurrency model
 
-The library is **not concurrently safe** within a single `Reader` instance. Files within a single archive are decoded sequentially. See `TODO.md` for the analysis of when file-level parallelism is feasible (non-solid multi-file archives only).
+The library is **not concurrently safe** within a single `Reader` instance. Files within a single archive are decoded sequentially. File-level parallelism is only feasible for non-solid multi-file archives, where no member's back-references reach into a previous member's history — a solid archive's members are one continuous stream by construction.
 
 ### Zero-allocation invariants
 
