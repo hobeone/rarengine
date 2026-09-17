@@ -344,21 +344,13 @@ func TestVolumeNumberOnHeaderEncryptedArchive(t *testing.T) {
 // value" -- which is the distinction the scan has to handle.
 func encryptedMemberHeader(t *testing.T, name string, withCheck bool) []byte {
 	t.Helper()
-	var enc bytes.Buffer
-	enc.Write(encodeVint(0)) // encryption version 0 (AES-256)
+	var flags uint64
 	if withCheck {
-		enc.Write(encodeVint(fileEncCheckPresent))
-	} else {
-		enc.Write(encodeVint(0))
-	}
-	enc.WriteByte(15)                         // kdf count
-	enc.Write(bytes.Repeat([]byte{0xAA}, 16)) // salt
-	enc.Write(bytes.Repeat([]byte{0xBB}, 16)) // IV
-	if withCheck {
-		enc.Write(bytes.Repeat([]byte{0xCC}, 12)) // check value
+		flags = fileEncCheckPresent
 	}
 	return rar5Member(t, memberSpec{
-		name: name, content: "encrypted content", encRecord: enc.Bytes(),
+		name: name, content: "encrypted content",
+		extraRecords: []extraRecordSpec{{Type: extraRecordEncryption, Body: encryptionRecordBody(flags, 0xAA)}},
 	})
 }
 

@@ -19,8 +19,8 @@ import (
 //
 // memberWithEncVersion produces the concrete, empirically-verified trigger:
 // an encryption extra record declaring a version other than 0 fails inside
-// parseEncryptionRecord, the last field parseFileHeader decodes, well after
-// the name.
+// parseEncryptionRecord, run by parseExtraRecords well after the name is
+// decoded.
 
 // memberWithEncVersion builds a stored member carrying an encryption extra
 // record declaring encryption version ver. notFirst clears FirstBlock (i.e.
@@ -80,14 +80,7 @@ func memberWithEncVersion(t testing.TB, name, content string, ver uint64, notFir
 func TestMemberWithEncVersionRoundTrip(t *testing.T) {
 	blk := memberWithEncVersion(t, "enc0.bin", "hello", 0, false)
 
-	h, err := readBlockHeader(bytes.NewReader(blk))
-	if err != nil {
-		t.Fatalf("builder produced an unreadable block: %v", err)
-	}
-	fh, err := parseFileHeader(h)
-	if err != nil {
-		t.Fatalf("builder produced an unparsable file header with ver=0: %v", err)
-	}
+	fh := parseBuiltMember(t, blk)
 	if fh.Name != "enc0.bin" {
 		t.Fatalf("round trip name = %q, want enc0.bin", fh.Name)
 	}
@@ -107,26 +100,7 @@ func TestRefusedExtraRecordMemberReportedByName(t *testing.T) {
 		memberWithEncVersion(t, "bad.enc", "secret", 1, false),
 	)
 
-	r := NewReader(volumesOf(stream))
-	e, err := r.NextEntry()
-	if err != nil {
-		t.Fatalf("NextEntry error = %v, want a terminal Entry instead", err)
-	}
-	if e == nil {
-		t.Fatal("NextEntry returned a nil Entry, want the refused member reported by name")
-	}
-	if e.Header == nil || e.Header.Name != "bad.enc" {
-		t.Fatalf("NextEntry returned %+v, want Header.Name = bad.enc", e.Header)
-	}
-
-	buf := make([]byte, 16)
-	_, readErr := e.Read(buf)
-	if !errors.Is(readErr, ErrUnknownEncryptMethod) {
-		t.Fatalf("Read error = %v, want ErrUnknownEncryptMethod", readErr)
-	}
-	if closeErr := e.Close(); !errors.Is(closeErr, ErrUnknownEncryptMethod) {
-		t.Fatalf("Close error = %v, want ErrUnknownEncryptMethod", closeErr)
-	}
+	assertRefusedByName(t, NewReader(volumesOf(stream)), "bad.enc", ErrUnknownEncryptMethod)
 }
 
 // (c) Traversal continues correctly after the refusal: the member after the
@@ -312,23 +286,7 @@ func TestUnpSizeUnknownMemberRefusedByName(t *testing.T) {
 		memberWithUnpSizeUnknown(t, "unknown.bin", "secret", false),
 	)
 
-	r := NewReader(volumesOf(stream))
-	e, err := r.NextEntry()
-	if err != nil {
-		t.Fatalf("NextEntry error = %v, want a terminal Entry instead", err)
-	}
-	if e == nil || e.Header == nil || e.Header.Name != "unknown.bin" {
-		t.Fatalf("NextEntry returned %+v, want Header.Name = unknown.bin", e)
-	}
-
-	buf := make([]byte, 16)
-	_, readErr := e.Read(buf)
-	if !errors.Is(readErr, ErrUnpSizeUnknown) {
-		t.Fatalf("Read error = %v, want ErrUnpSizeUnknown", readErr)
-	}
-	if closeErr := e.Close(); !errors.Is(closeErr, ErrUnpSizeUnknown) {
-		t.Fatalf("Close error = %v, want ErrUnpSizeUnknown", closeErr)
-	}
+	assertRefusedByName(t, NewReader(volumesOf(stream)), "unknown.bin", ErrUnpSizeUnknown)
 }
 
 // (b) A negative-UnpackedSize member is refused BY NAME the same way,
@@ -338,23 +296,7 @@ func TestNegativeUnpackedSizeMemberRefusedByName(t *testing.T) {
 		memberWithNegativeSize(t, "negative.bin", "secret", false),
 	)
 
-	r := NewReader(volumesOf(stream))
-	e, err := r.NextEntry()
-	if err != nil {
-		t.Fatalf("NextEntry error = %v, want a terminal Entry instead", err)
-	}
-	if e == nil || e.Header == nil || e.Header.Name != "negative.bin" {
-		t.Fatalf("NextEntry returned %+v, want Header.Name = negative.bin", e)
-	}
-
-	buf := make([]byte, 16)
-	_, readErr := e.Read(buf)
-	if !errors.Is(readErr, ErrCorruptFileHeader) {
-		t.Fatalf("Read error = %v, want ErrCorruptFileHeader", readErr)
-	}
-	if closeErr := e.Close(); !errors.Is(closeErr, ErrCorruptFileHeader) {
-		t.Fatalf("Close error = %v, want ErrCorruptFileHeader", closeErr)
-	}
+	assertRefusedByName(t, NewReader(volumesOf(stream)), "negative.bin", ErrCorruptFileHeader)
 }
 
 // (c) Traversal continues after an UnpSizeUnknown refusal: the member after
@@ -551,5 +493,44 @@ func TestBombRatioSurvivesAnAbsurdPackedSize(t *testing.T) {
 	if _, err := io.ReadAll(e); errors.Is(err, ErrRarBombDetected) {
 		t.Fatal("a member expanding 2 MiB from an enormous packed size was " +
 			"refused as a rar bomb; the ratio wrapped negative")
+	}
+}
+
+// TestDuplicateEncryptionRecordRefusesTheMember pins issue #62's duplicate
+// case end to end through the traversal: a member carrying two encryption
+// extra records is refused, rather than decoded from a header built out of
+// fields from both.
+func TestDuplicateEncryptionRecordRefusesTheMember(t *testing.T) {
+	stream := rar5Archive(t, false,
+		rar5Member(t, memberSpec{
+			name: "dup.enc", content: "secret",
+			extraRecords: []extraRecordSpec{
+				{Type: extraRecordEncryption, Body: encryptionRecordBody(fileEncCheckPresent|fileEncUseMac, 0xAA)},
+				{Type: extraRecordEncryption, Body: encryptionRecordBody(0, 0x55)},
+			},
+		}),
+	)
+
+	assertRefusedByName(t, NewReader(volumesOf(stream)), "dup.enc", ErrCorruptFileHeader)
+}
+
+// TestRefusedMemberHeaderReportsEncryption pins issue #62 end to end through
+// the traversal: a member refused for an unknown declared size still reaches
+// the caller with Header.Encrypted true, because its encryption extra record
+// is parsed before the size refusal is reported.
+func TestRefusedMemberHeaderReportsEncryption(t *testing.T) {
+	stream := rar5Archive(t, false,
+		rar5Member(t, memberSpec{
+			name: "unknown-enc.bin", content: "hello",
+			extraFileFlags: fileFlagUnpSizeUnknown,
+			extraRecords: []extraRecordSpec{
+				{Type: extraRecordEncryption, Body: encryptionRecordBody(fileEncCheckPresent, 0xAA)},
+			},
+		}),
+	)
+
+	e := assertRefusedByName(t, NewReader(volumesOf(stream)), "unknown-enc.bin", ErrUnpSizeUnknown)
+	if !e.Header.Encrypted {
+		t.Error("Header.Encrypted = false, want true -- the extra record was never parsed")
 	}
 }

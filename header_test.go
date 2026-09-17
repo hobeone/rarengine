@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"hash/crc32"
+	"strings"
 	"testing"
 )
 
@@ -339,5 +340,340 @@ func TestParseFileHeader_RejectsUnknownUnpackedSize(t *testing.T) {
 	}
 	if fh.Name != name {
 		t.Fatalf("returned header names %q, want %q", fh.Name, name)
+	}
+}
+
+// TestExtraRecordFailureDoesNotHideALaterEncryptionRecord pins that a
+// malformed record does not stop the records after it from being parsed. A
+// time record declaring mtime but carrying none of its bytes fails, and a
+// valid encryption record follows it in the same extra area; the encryption
+// record must still be parsed and reflected on the returned header.
+func TestExtraRecordFailureDoesNotHideALaterEncryptionRecord(t *testing.T) {
+	blk := rar5Member(t, memberSpec{
+		name: "hidden-enc.bin", content: "hello",
+		extraRecords: []extraRecordSpec{
+			{Type: extraRecordTime, Body: encodeVint(extraTimeMtime)},
+			{Type: extraRecordEncryption, Body: encryptionRecordBody(fileEncCheckPresent, 0xAA)},
+		},
+	})
+
+	fh, err := parseBuiltHeader(t, blk)
+	if !errors.Is(err, ErrCorruptFileHeader) {
+		t.Fatalf("parseFileHeader error = %v, want ErrCorruptFileHeader", err)
+	}
+	if fh == nil {
+		t.Fatal("parseFileHeader returned a nil header alongside the error")
+	}
+	if !fh.Encrypted {
+		t.Fatal("fh.Encrypted = false; the encryption record after the " +
+			"broken time record was not parsed")
+	}
+	if len(fh.Salt) != 16 {
+		t.Fatalf("len(fh.Salt) = %d, want 16", len(fh.Salt))
+	}
+	if len(fh.EncCheck) != 12 {
+		t.Fatalf("len(fh.EncCheck) = %d, want 12", len(fh.EncCheck))
+	}
+}
+
+// TestMalformedEncryptionRecordStillReportsEncrypted pins that a member with
+// a malformed encryption record is reported as encrypted. The presence of an
+// encryption record means the member is encrypted, whether or not the record
+// body parses -- the failure in the body is what refuses the member, not the
+// presence of the record.
+func TestMalformedEncryptionRecordStillReportsEncrypted(t *testing.T) {
+	tests := []struct {
+		name    string
+		body    []byte
+		wantErr error
+	}{
+		{
+			name:    "unknown encryption version",
+			body:    encodeVint(1),
+			wantErr: ErrUnknownEncryptMethod,
+		},
+		{
+			name:    "too short for salt and IV",
+			body:    append(encodeVint(0), append(encodeVint(0), make([]byte, 10)...)...),
+			wantErr: ErrCorruptEncryptData,
+		},
+		{
+			name: "check flag set, check value short",
+			body: func() []byte {
+				var b bytes.Buffer
+				b.Write(encodeVint(0))                   // version 0
+				b.Write(encodeVint(fileEncCheckPresent)) // flags with check present
+				b.Write(make([]byte, 33))                // kdf count, salt, IV
+				b.Write(make([]byte, 5))                 // only 5 bytes, need 12
+				return b.Bytes()
+			}(),
+			wantErr: ErrCorruptEncryptData,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			blk := rar5Member(t, memberSpec{
+				name:         "test.bin",
+				content:      "hello",
+				extraRecords: []extraRecordSpec{{Type: extraRecordEncryption, Body: tt.body}},
+			})
+
+			fh, err := parseBuiltHeader(t, blk)
+			if !errors.Is(err, tt.wantErr) {
+				t.Errorf("parseFileHeader error = %v, want %v", err, tt.wantErr)
+			}
+			if fh == nil {
+				t.Fatal("parseFileHeader returned a nil header alongside the error")
+			}
+			if !fh.Encrypted {
+				t.Errorf("fh.Encrypted = %v, want true", fh.Encrypted)
+			}
+		})
+	}
+}
+
+// TestDuplicateExtraRecordIsRefused pins that a header carrying two extra
+// records of the same type is refused rather than built out of a mix of
+// both. The first record of a type is the one parsed, even when it failed --
+// a later record of that type is never read into the header.
+func TestDuplicateExtraRecordIsRefused(t *testing.T) {
+	tests := []struct {
+		name         string
+		extraRecords []extraRecordSpec
+		// verify checks that the FIRST record's fields survived.
+		verify func(t *testing.T, fh *FileHeader)
+	}{
+		{
+			name: "encryption",
+			extraRecords: []extraRecordSpec{
+				{Type: extraRecordEncryption, Body: encryptionRecordBody(fileEncCheckPresent|fileEncUseMac, 0xAA)},
+				{Type: extraRecordEncryption, Body: encryptionRecordBody(0, 0x55)},
+			},
+			verify: func(t *testing.T, fh *FileHeader) {
+				if !fh.UseMac {
+					t.Errorf("fh.UseMac = false, want true")
+				}
+				if len(fh.Salt) == 0 || fh.Salt[0] != 0xAA {
+					t.Errorf("fh.Salt = %v, want a salt of 0xAA bytes", fh.Salt)
+				}
+				if len(fh.EncCheck) != 12 {
+					t.Errorf("len(fh.EncCheck) = %d, want 12", len(fh.EncCheck))
+				}
+			},
+		},
+		{
+			name: "hash",
+			extraRecords: []extraRecordSpec{
+				{Type: extraRecordHash, Body: append(encodeVint(0), bytes.Repeat([]byte{0x11}, 32)...)},
+				{Type: extraRecordHash, Body: append(encodeVint(0), bytes.Repeat([]byte{0x22}, 32)...)},
+			},
+			verify: func(t *testing.T, fh *FileHeader) {
+				if len(fh.Blake2sp) == 0 || fh.Blake2sp[0] != 0x11 {
+					t.Errorf("fh.Blake2sp = %v, want a digest of 0x11 bytes -- the first record must survive", fh.Blake2sp)
+				}
+			},
+		},
+		{
+			name: "time",
+			extraRecords: []extraRecordSpec{
+				{Type: extraRecordTime, Body: binary.LittleEndian.AppendUint32(encodeVint(extraTimeMtime|extraTimeUnix), 100)},
+				{Type: extraRecordTime, Body: binary.LittleEndian.AppendUint32(encodeVint(extraTimeMtime|extraTimeUnix), 200)},
+			},
+			verify: func(t *testing.T, fh *FileHeader) {
+				if got := fh.ModificationTime.Unix(); got != 100 {
+					t.Errorf("fh.ModificationTime.Unix() = %d, want 100 -- the first record must survive", got)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			blk := rar5Member(t, memberSpec{
+				name:         "test.bin",
+				content:      "hello",
+				extraRecords: tt.extraRecords,
+			})
+
+			fh, err := parseBuiltHeader(t, blk)
+			if !errors.Is(err, ErrCorruptFileHeader) {
+				t.Fatalf("parseFileHeader error = %v, want ErrCorruptFileHeader", err)
+			}
+			if fh == nil {
+				t.Fatal("parseFileHeader returned a nil header alongside the error")
+			}
+			tt.verify(t, fh)
+		})
+	}
+
+	// A fourth case: the first record of a type is authoritative even when
+	// it failed. The duplicate's fields must never reach the header.
+	t.Run("first record malformed, duplicate not parsed", func(t *testing.T) {
+		blk := rar5Member(t, memberSpec{
+			name:    "test.bin",
+			content: "hello",
+			extraRecords: []extraRecordSpec{
+				{Type: extraRecordEncryption, Body: encodeVint(99)},
+				{Type: extraRecordEncryption, Body: encryptionRecordBody(fileEncCheckPresent, 0x55)},
+			},
+		})
+
+		fh, err := parseBuiltHeader(t, blk)
+		if !errors.Is(err, ErrUnknownEncryptMethod) {
+			t.Fatalf("parseFileHeader error = %v, want ErrUnknownEncryptMethod", err)
+		}
+		if fh == nil {
+			t.Fatal("parseFileHeader returned a nil header alongside the error")
+		}
+		if !fh.Encrypted {
+			t.Error("fh.Encrypted = false, want true")
+		}
+		if fh.Salt != nil {
+			t.Errorf("fh.Salt = %v, want nil -- the duplicate must not be parsed", fh.Salt)
+		}
+		if fh.EncCheck != nil {
+			t.Errorf("fh.EncCheck = %v, want nil -- the duplicate must not be parsed", fh.EncCheck)
+		}
+	})
+
+	// A fifth case: an earlier failure of a DIFFERENT type stands, and is
+	// not overwritten by the duplicate-record error that follows it.
+	t.Run("earlier failure of a different type stands", func(t *testing.T) {
+		blk := rar5Member(t, memberSpec{
+			name:    "test.bin",
+			content: "hello",
+			extraRecords: []extraRecordSpec{
+				{Type: extraRecordTime, Body: encodeVint(extraTimeMtime)},
+				{Type: extraRecordEncryption, Body: encryptionRecordBody(fileEncCheckPresent, 0xAA)},
+				{Type: extraRecordEncryption, Body: encryptionRecordBody(0, 0x55)},
+			},
+		})
+
+		fh, err := parseBuiltHeader(t, blk)
+		if !errors.Is(err, ErrCorruptFileHeader) {
+			t.Fatalf("parseFileHeader error = %v, want ErrCorruptFileHeader", err)
+		}
+		if strings.Contains(err.Error(), "duplicate") {
+			t.Fatalf("parseFileHeader error = %q, want the time record's failure, not the later duplicate", err.Error())
+		}
+		if fh == nil {
+			t.Fatal("parseFileHeader returned a nil header alongside the error")
+		}
+		if len(fh.Salt) == 0 || fh.Salt[0] != 0xAA {
+			t.Errorf("fh.Salt[0] = %v, want 0xAA (salt %v)", fh.Salt, fh.Salt)
+		}
+		if len(fh.EncCheck) != 12 {
+			t.Errorf("len(fh.EncCheck) = %d, want 12", len(fh.EncCheck))
+		}
+	})
+}
+
+// TestSizeRefusalStillCarriesExtraRecords pins issue #62: a header refused
+// for its declared size -- unknown or negative -- still has every extra
+// record parsed before the refusal is reported, so Encrypted and the fields
+// an encryption record carries are populated on the header the caller gets
+// back, not left at their zero values.
+func TestSizeRefusalStillCarriesExtraRecords(t *testing.T) {
+	tests := []struct {
+		name    string
+		spec    memberSpec
+		wantErr error
+	}{
+		{
+			name: "unknown size",
+			spec: memberSpec{
+				name: "unknown.bin", content: "hello",
+				extraFileFlags: fileFlagUnpSizeUnknown,
+				extraRecords: []extraRecordSpec{
+					{Type: extraRecordEncryption, Body: encryptionRecordBody(fileEncCheckPresent, 0xAA)},
+				},
+			},
+			wantErr: ErrUnpSizeUnknown,
+		},
+		{
+			name: "negative size",
+			spec: memberSpec{
+				name: "negative.bin", content: "hello",
+				unpackedSz: new(int64(-1)),
+				extraRecords: []extraRecordSpec{
+					{Type: extraRecordEncryption, Body: encryptionRecordBody(fileEncCheckPresent, 0xAA)},
+				},
+			},
+			wantErr: ErrCorruptFileHeader,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			blk := rar5Member(t, tt.spec)
+
+			fh, err := parseBuiltHeader(t, blk)
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("parseFileHeader error = %v, want %v", err, tt.wantErr)
+			}
+			if fh == nil {
+				t.Fatal("parseFileHeader returned a nil header alongside the error")
+			}
+			if !fh.Encrypted {
+				t.Error("fh.Encrypted = false, want true -- the extra record was never parsed")
+			}
+			if len(fh.EncCheck) != 12 {
+				t.Errorf("len(fh.EncCheck) = %d, want 12", len(fh.EncCheck))
+			}
+		})
+	}
+}
+
+// TestSizeRefusalOutranksAnExtraRecordFailure pins that moving the extra
+// record parse above the size checks moves the PARSE, not the REPORT: when
+// both a size check and an extra record would fail, the size sentinel is
+// still what the caller sees, never the extra record's own error.
+func TestSizeRefusalOutranksAnExtraRecordFailure(t *testing.T) {
+	tests := []struct {
+		name    string
+		spec    memberSpec
+		wantErr error
+	}{
+		{
+			name: "unknown size outranks a failing extra record",
+			spec: memberSpec{
+				name: "unknown.bin", content: "hello",
+				extraFileFlags: fileFlagUnpSizeUnknown,
+				extraRecords: []extraRecordSpec{
+					{Type: extraRecordEncryption, Body: encodeVint(99)},
+				},
+			},
+			wantErr: ErrUnpSizeUnknown,
+		},
+		{
+			name: "negative size outranks a failing extra record",
+			spec: memberSpec{
+				name: "negative.bin", content: "hello",
+				unpackedSz: new(int64(-1)),
+				extraRecords: []extraRecordSpec{
+					{Type: extraRecordEncryption, Body: encodeVint(99)},
+				},
+			},
+			wantErr: ErrCorruptFileHeader,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			blk := rar5Member(t, tt.spec)
+
+			fh, err := parseBuiltHeader(t, blk)
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("parseFileHeader error = %v, want %v", err, tt.wantErr)
+			}
+			if fh == nil {
+				t.Fatal("parseFileHeader returned a nil header alongside the error")
+			}
+			if errors.Is(err, ErrUnknownEncryptMethod) {
+				t.Fatalf("parseFileHeader error %v also satisfies ErrUnknownEncryptMethod; "+
+					"want ONLY %v", err, tt.wantErr)
+			}
+		})
 	}
 }
