@@ -469,14 +469,16 @@ func parseTimeRecord(fh *FileHeader, data []byte) error {
 	return nil
 }
 
-// parseExtraRecords iterates over extra records and parses encryption or file hash blocks.
+// parseExtraRecords applies a file header's encryption, hash and time records
+// to fh.
 //
-// Every record is parsed, and the first failure is returned once all of them
-// have run. parseBlockHeaderFields has already cut each record to its own
-// declared length and refused broken size or type framing, so one record's
-// bad body cannot desynchronise the next. Stopping at the first failure let a
-// malformed record placed ahead of the encryption record hide it entirely,
-// and the header reported an encrypted member as plaintext.
+// A failing record does not stop the ones after it: every record is examined,
+// and the first failure is returned once all of them have been.
+// parseBlockHeaderFields has already cut each record to its own declared
+// length and refused broken size or type framing, so one record's bad body
+// cannot desynchronise the next. Stopping at the first failure let a malformed
+// record placed ahead of the encryption record hide it entirely, and the
+// header reported an encrypted member as plaintext.
 //
 // A record type this function parses may appear once. Two encryption
 // records built one header out of both -- Salt, IV and UseMac from the
