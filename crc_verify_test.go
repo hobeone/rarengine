@@ -161,20 +161,7 @@ func TestUnknownUnpackedSizeIsRefusedByName(t *testing.T) {
 
 	r := NewReader(volumesOf(archive.Bytes()))
 
-	first, err := r.NextEntry()
-	if err != nil {
-		t.Fatalf("first NextEntry: %v", err)
-	}
-	if first == nil || first.Header == nil || first.Header.Name != "streamed.txt" {
-		t.Fatalf("first NextEntry returned %+v, want the refused member reported by name (streamed.txt)", first)
-	}
-	buf := make([]byte, 16)
-	if _, readErr := first.Read(buf); !errors.Is(readErr, ErrUnpSizeUnknown) {
-		t.Fatalf("first member Read error = %v, want ErrUnpSizeUnknown", readErr)
-	}
-	if closeErr := first.Close(); !errors.Is(closeErr, ErrUnpSizeUnknown) {
-		t.Fatalf("first member Close = %v, want ErrUnpSizeUnknown", closeErr)
-	}
+	assertRefusedByName(t, r, "streamed.txt", ErrUnpSizeUnknown)
 
 	second, err := r.NextEntry()
 	if err != nil {

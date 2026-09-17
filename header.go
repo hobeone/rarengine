@@ -24,11 +24,10 @@ var (
 	ErrCorruptEncryptData   = errors.New("rarengine: corrupt encryption record")
 
 	// ErrUnpSizeUnknown is returned for a file whose header declares that its
-	// unpacked size is not known (fileFlagUnpSizeUnknown), as produced by
-	// streamed archiving such as "rar -si". Decoding relies on the declared
-	// size to tell a completed file from a truncated one, so a file that
-	// declines to state it is refused rather than decoded on a size that
-	// means nothing.
+	// unpacked size is not known (fileFlagUnpSizeUnknown). Decoding relies on
+	// the declared size to tell a completed file from a truncated one, so a
+	// file that declines to state it is refused rather than decoded on a size
+	// that means nothing.
 	ErrUnpSizeUnknown = errors.New("rarengine: file header declares an unknown unpacked size")
 )
 
@@ -502,30 +501,28 @@ func parseExtraRecords(fh *FileHeader, extra []extraRecord) error {
 // It is the ONLY function in this package permitted to return a non-nil
 // *FileHeader alongside a non-nil error. Every failure up through the name
 // field means there is no identity to report, so those paths return a nil
-// header like any other parse failure. Two later failures return the header
-// they built anyway, because by then the member's name and sizes are decoded
-// and the caller (Reader.dispatch) can refuse the member BY NAME instead of
-// dropping it from the listing with no trace:
+// header like any other parse failure. Three later failures return the
+// header they built anyway, because by then the member's name and sizes are
+// decoded and the caller (Reader.dispatch) can refuse the member BY NAME
+// instead of dropping it from the listing with no trace:
 //
 //   - ErrUnpSizeUnknown, from the declared-size check
+//   - ErrCorruptFileHeader, from a negative decoded UnpackedSize
 //   - a failure inside parseExtraRecords, the last step
 //
-// Those two headers are NOT equally complete, and the difference is a trap.
-// The declared-size check runs BEFORE parseExtraRecords, so a header carrying
-// ErrUnpSizeUnknown has its name, sizes and compression fields decoded and
-// every extra-record field still at its zero value -- Encrypted false,
-// EncCheck nil, Salt nil, KdfCount 0 -- however encrypted the member actually
-// is. Only "name and sizes" may be read from it. A caller that treats
-// Encrypted as meaningful there decides an encrypted member is plaintext,
-// which is a silent wrong answer rather than an error. See issue #62: the fix
-// is to move the check below parseExtraRecords so both paths mean the same
-// thing, which changes this function's contract and Reader.dispatch's
-// refusal path and so is not done here.
+// All three headers are equally complete: parseExtraRecords runs before
+// either size check reports, so a header returned alongside ANY of these
+// errors carries Name and Encrypted, and every other field is either decoded
+// correctly or, for a field belonging to the extra record that failed, zero
+// or partly filled from that record. The ERRORS still keep their old
+// priority -- an unknown or negative size outranks a failing extra record --
+// so moving the parse earlier changed no caller's verdict, only what the
+// header it's attached to contains.
 //
-// An exported wrapper used to stand in front of this and flatten both to a
-// nil header, which is why callers could not tell those two apart from a
-// header that never parsed. It had no callers outside tests once the
-// traversal started using this form directly, and it is gone.
+// An exported wrapper used to stand in front of this and flatten all three to
+// a nil header, which is why callers could not tell them apart from a header
+// that never parsed. It had no callers outside tests once the traversal
+// started using this form directly, and it is gone.
 func parseFileHeader(h *blockHeader) (*FileHeader, error) {
 	if h.Type != headerTypeFile && h.Type != headerTypeService {
 		return nil, ErrBadBlockHeader
@@ -620,7 +617,7 @@ func parseFileHeader(h *blockHeader) (*FileHeader, error) {
 
 	// Identity-first validation: both checks below are policy judgments about
 	// already-decoded values, not failures to decode, and neither needs to
-	// fire before fh.Name exists. Placed here, immediately before
+	// fire before fh.Name exists. Placed here, immediately after
 	// parseExtraRecords, every return from this point on carries fh alongside
 	// its error so the caller (Reader.dispatch) can refuse the member by name
 	// instead of dropping it from the listing with no trace -- the same
@@ -640,19 +637,21 @@ func parseFileHeader(h *blockHeader) (*FileHeader, error) {
 	// the statement that nothing in the header is to be trusted; clamping
 	// would destroy that evidence. See terminalEntry's doc comment and
 	// ErrRarBombDetected's existing precedent for the same choice.
+
+	// Every extra record is attempted before either size check reports, so a
+	// header refused for its size still carries what its archive encoded --
+	// Encrypted above all. The ERRORS keep their priority: an unknown or
+	// negative size outranks a failing extra record, so moving the parse up
+	// changes no caller's verdict.
+	extraErr := parseExtraRecords(fh, h.Extra)
 	if unpSizeUnknown {
 		return fh, ErrUnpSizeUnknown
 	}
 	if fh.UnpackedSize < 0 {
 		return fh, ErrCorruptFileHeader
 	}
-
-	// Parse optional extra records. Unlike every earlier failure in this
-	// function, fh is returned alongside the error here: the name and every
-	// size/CRC field are already decoded, so the caller can refuse the
-	// member by name instead of dropping it silently.
-	if err := parseExtraRecords(fh, h.Extra); err != nil {
-		return fh, err
+	if extraErr != nil {
+		return fh, extraErr
 	}
 
 	return fh, nil

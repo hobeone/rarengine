@@ -102,31 +102,40 @@ func TestMemberWithEncVersionRoundTrip(t *testing.T) {
 // report ErrUnknownEncryptMethod. Asserting the FIRST entry, not looping to
 // find it, is deliberate -- a test that loops until it finds the name would
 // pass even if a fabricated entry preceded it.
+
+// assertRefusedByName reads the next entry of r and asserts it is the member
+// name, refused: NextEntry hands it back rather than failing, and both Read and
+// Close report want. It returns the entry, whose Header stays readable after
+// Close. Exactly one entry is read -- a loop that searched for the name would
+// pass even with a fabricated entry before it.
+func assertRefusedByName(t *testing.T, r *Reader, name string, want error) *Entry {
+	t.Helper()
+	e, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("NextEntry error = %v, want a terminal Entry instead", err)
+	}
+	if e == nil || e.Header == nil {
+		t.Fatalf("NextEntry returned %+v, want an entry for %q", e, name)
+	}
+	if e.Header.Name != name {
+		t.Fatalf("Header.Name = %q, want %q (header %+v)", e.Header.Name, name, e.Header)
+	}
+	buf := make([]byte, 16)
+	if _, readErr := e.Read(buf); !errors.Is(readErr, want) {
+		t.Fatalf("Read error = %v, want %v", readErr, want)
+	}
+	if closeErr := e.Close(); !errors.Is(closeErr, want) {
+		t.Fatalf("Close error = %v, want %v", closeErr, want)
+	}
+	return e
+}
+
 func TestRefusedExtraRecordMemberReportedByName(t *testing.T) {
 	stream := rar5Archive(t, false,
 		memberWithEncVersion(t, "bad.enc", "secret", 1, false),
 	)
 
-	r := NewReader(volumesOf(stream))
-	e, err := r.NextEntry()
-	if err != nil {
-		t.Fatalf("NextEntry error = %v, want a terminal Entry instead", err)
-	}
-	if e == nil {
-		t.Fatal("NextEntry returned a nil Entry, want the refused member reported by name")
-	}
-	if e.Header == nil || e.Header.Name != "bad.enc" {
-		t.Fatalf("NextEntry returned %+v, want Header.Name = bad.enc", e.Header)
-	}
-
-	buf := make([]byte, 16)
-	_, readErr := e.Read(buf)
-	if !errors.Is(readErr, ErrUnknownEncryptMethod) {
-		t.Fatalf("Read error = %v, want ErrUnknownEncryptMethod", readErr)
-	}
-	if closeErr := e.Close(); !errors.Is(closeErr, ErrUnknownEncryptMethod) {
-		t.Fatalf("Close error = %v, want ErrUnknownEncryptMethod", closeErr)
-	}
+	assertRefusedByName(t, NewReader(volumesOf(stream)), "bad.enc", ErrUnknownEncryptMethod)
 }
 
 // (c) Traversal continues correctly after the refusal: the member after the
@@ -312,23 +321,7 @@ func TestUnpSizeUnknownMemberRefusedByName(t *testing.T) {
 		memberWithUnpSizeUnknown(t, "unknown.bin", "secret", false),
 	)
 
-	r := NewReader(volumesOf(stream))
-	e, err := r.NextEntry()
-	if err != nil {
-		t.Fatalf("NextEntry error = %v, want a terminal Entry instead", err)
-	}
-	if e == nil || e.Header == nil || e.Header.Name != "unknown.bin" {
-		t.Fatalf("NextEntry returned %+v, want Header.Name = unknown.bin", e)
-	}
-
-	buf := make([]byte, 16)
-	_, readErr := e.Read(buf)
-	if !errors.Is(readErr, ErrUnpSizeUnknown) {
-		t.Fatalf("Read error = %v, want ErrUnpSizeUnknown", readErr)
-	}
-	if closeErr := e.Close(); !errors.Is(closeErr, ErrUnpSizeUnknown) {
-		t.Fatalf("Close error = %v, want ErrUnpSizeUnknown", closeErr)
-	}
+	assertRefusedByName(t, NewReader(volumesOf(stream)), "unknown.bin", ErrUnpSizeUnknown)
 }
 
 // (b) A negative-UnpackedSize member is refused BY NAME the same way,
@@ -338,23 +331,7 @@ func TestNegativeUnpackedSizeMemberRefusedByName(t *testing.T) {
 		memberWithNegativeSize(t, "negative.bin", "secret", false),
 	)
 
-	r := NewReader(volumesOf(stream))
-	e, err := r.NextEntry()
-	if err != nil {
-		t.Fatalf("NextEntry error = %v, want a terminal Entry instead", err)
-	}
-	if e == nil || e.Header == nil || e.Header.Name != "negative.bin" {
-		t.Fatalf("NextEntry returned %+v, want Header.Name = negative.bin", e)
-	}
-
-	buf := make([]byte, 16)
-	_, readErr := e.Read(buf)
-	if !errors.Is(readErr, ErrCorruptFileHeader) {
-		t.Fatalf("Read error = %v, want ErrCorruptFileHeader", readErr)
-	}
-	if closeErr := e.Close(); !errors.Is(closeErr, ErrCorruptFileHeader) {
-		t.Fatalf("Close error = %v, want ErrCorruptFileHeader", closeErr)
-	}
+	assertRefusedByName(t, NewReader(volumesOf(stream)), "negative.bin", ErrCorruptFileHeader)
 }
 
 // (c) Traversal continues after an UnpSizeUnknown refusal: the member after
@@ -551,5 +528,29 @@ func TestBombRatioSurvivesAnAbsurdPackedSize(t *testing.T) {
 	if _, err := io.ReadAll(e); errors.Is(err, ErrRarBombDetected) {
 		t.Fatal("a member expanding 2 MiB from an enormous packed size was " +
 			"refused as a rar bomb; the ratio wrapped negative")
+	}
+}
+
+// TestRefusedMemberHeaderReportsEncryption pins issue #62 end to end through
+// the traversal: a member refused for an unknown declared size still reaches
+// the caller with Header.Encrypted true, because its encryption extra record
+// is parsed before the size refusal is reported.
+func TestRefusedMemberHeaderReportsEncryption(t *testing.T) {
+	member := rar5Member(t, memberSpec{
+		name: "unknown-enc.bin", content: "hello",
+		extraFileFlags: fileFlagUnpSizeUnknown,
+		extraRecords: []extraRecordSpec{
+			{Type: 1, Body: encryptionRecordBody(fileEncCheckPresent, 0xAA)},
+		},
+	})
+
+	var stream bytes.Buffer
+	stream.Write(rar5ArchiveHeader())
+	stream.Write(member)
+	stream.Write(rar5EndHeader())
+
+	e := assertRefusedByName(t, NewReader(volumesOf(stream.Bytes())), "unknown-enc.bin", ErrUnpSizeUnknown)
+	if !e.Header.Encrypted {
+		t.Error("Header.Encrypted = false, want true -- the extra record was never parsed")
 	}
 }

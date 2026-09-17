@@ -440,3 +440,120 @@ func TestMalformedEncryptionRecordStillReportsEncrypted(t *testing.T) {
 		})
 	}
 }
+
+// TestSizeRefusalStillCarriesExtraRecords pins issue #62: a header refused
+// for its declared size -- unknown or negative -- still has every extra
+// record parsed before the refusal is reported, so Encrypted and the fields
+// an encryption record carries are populated on the header the caller gets
+// back, not left at their zero values.
+func TestSizeRefusalStillCarriesExtraRecords(t *testing.T) {
+	tests := []struct {
+		name    string
+		spec    memberSpec
+		wantErr error
+	}{
+		{
+			name: "unknown size",
+			spec: memberSpec{
+				name: "unknown.bin", content: "hello",
+				extraFileFlags: fileFlagUnpSizeUnknown,
+				extraRecords: []extraRecordSpec{
+					{Type: 1, Body: encryptionRecordBody(fileEncCheckPresent, 0xAA)},
+				},
+			},
+			wantErr: ErrUnpSizeUnknown,
+		},
+		{
+			name: "negative size",
+			spec: memberSpec{
+				name: "negative.bin", content: "hello",
+				unpackedSz: new(int64(-1)),
+				extraRecords: []extraRecordSpec{
+					{Type: 1, Body: encryptionRecordBody(fileEncCheckPresent, 0xAA)},
+				},
+			},
+			wantErr: ErrCorruptFileHeader,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			blk := rar5Member(t, tt.spec)
+
+			h, err := readBlockHeader(bytes.NewReader(blk))
+			if err != nil {
+				t.Fatalf("builder produced an unreadable block: %v", err)
+			}
+			fh, err := parseFileHeader(h)
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("parseFileHeader error = %v, want %v", err, tt.wantErr)
+			}
+			if fh == nil {
+				t.Fatal("parseFileHeader returned a nil header alongside the error")
+			}
+			if !fh.Encrypted {
+				t.Error("fh.Encrypted = false, want true -- the extra record was never parsed")
+			}
+			if len(fh.EncCheck) != 12 {
+				t.Errorf("len(fh.EncCheck) = %d, want 12", len(fh.EncCheck))
+			}
+		})
+	}
+}
+
+// TestSizeRefusalOutranksAnExtraRecordFailure pins that moving the extra
+// record parse above the size checks moves the PARSE, not the REPORT: when
+// both a size check and an extra record would fail, the size sentinel is
+// still what the caller sees, never the extra record's own error.
+func TestSizeRefusalOutranksAnExtraRecordFailure(t *testing.T) {
+	tests := []struct {
+		name    string
+		spec    memberSpec
+		wantErr error
+	}{
+		{
+			name: "unknown size outranks a failing extra record",
+			spec: memberSpec{
+				name: "unknown.bin", content: "hello",
+				extraFileFlags: fileFlagUnpSizeUnknown,
+				extraRecords: []extraRecordSpec{
+					{Type: 1, Body: encodeVint(99)},
+				},
+			},
+			wantErr: ErrUnpSizeUnknown,
+		},
+		{
+			name: "negative size outranks a failing extra record",
+			spec: memberSpec{
+				name: "negative.bin", content: "hello",
+				unpackedSz: new(int64(-1)),
+				extraRecords: []extraRecordSpec{
+					{Type: 1, Body: encodeVint(99)},
+				},
+			},
+			wantErr: ErrCorruptFileHeader,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			blk := rar5Member(t, tt.spec)
+
+			h, err := readBlockHeader(bytes.NewReader(blk))
+			if err != nil {
+				t.Fatalf("builder produced an unreadable block: %v", err)
+			}
+			fh, err := parseFileHeader(h)
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("parseFileHeader error = %v, want %v", err, tt.wantErr)
+			}
+			if fh == nil {
+				t.Fatal("parseFileHeader returned a nil header alongside the error")
+			}
+			if errors.Is(err, ErrUnknownEncryptMethod) {
+				t.Fatalf("parseFileHeader error %v also satisfies ErrUnknownEncryptMethod; "+
+					"want ONLY %v", err, tt.wantErr)
+			}
+		})
+	}
+}
