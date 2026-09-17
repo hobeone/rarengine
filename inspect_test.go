@@ -350,7 +350,7 @@ func encryptedMemberHeader(t *testing.T, name string, withCheck bool) []byte {
 	}
 	return rar5Member(t, memberSpec{
 		name: name, content: "encrypted content",
-		extraRecords: []extraRecordSpec{{Type: 1, Body: encryptionRecordBody(flags, 0xAA)}},
+		extraRecords: []extraRecordSpec{{Type: extraRecordEncryption, Body: encryptionRecordBody(flags, 0xAA)}},
 	})
 }
 

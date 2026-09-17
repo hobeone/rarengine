@@ -352,8 +352,8 @@ func TestExtraRecordFailureDoesNotHideALaterEncryptionRecord(t *testing.T) {
 	blk := rar5Member(t, memberSpec{
 		name: "hidden-enc.bin", content: "hello",
 		extraRecords: []extraRecordSpec{
-			{Type: 3, Body: encodeVint(extraTimeMtime)},
-			{Type: 1, Body: encryptionRecordBody(fileEncCheckPresent, 0xAA)},
+			{Type: extraRecordTime, Body: encodeVint(extraTimeMtime)},
+			{Type: extraRecordEncryption, Body: encryptionRecordBody(fileEncCheckPresent, 0xAA)},
 		},
 	})
 
@@ -420,7 +420,7 @@ func TestMalformedEncryptionRecordStillReportsEncrypted(t *testing.T) {
 			blk := rar5Member(t, memberSpec{
 				name:         "test.bin",
 				content:      "hello",
-				extraRecords: []extraRecordSpec{{Type: 1, Body: tt.body}},
+				extraRecords: []extraRecordSpec{{Type: extraRecordEncryption, Body: tt.body}},
 			})
 
 			h, err := readBlockHeader(bytes.NewReader(blk))
@@ -463,8 +463,8 @@ func TestDuplicateExtraRecordIsRefused(t *testing.T) {
 		{
 			name: "encryption",
 			extraRecords: []extraRecordSpec{
-				{Type: 1, Body: encryptionRecordBody(fileEncCheckPresent|fileEncUseMac, 0xAA)},
-				{Type: 1, Body: encryptionRecordBody(0, 0x55)},
+				{Type: extraRecordEncryption, Body: encryptionRecordBody(fileEncCheckPresent|fileEncUseMac, 0xAA)},
+				{Type: extraRecordEncryption, Body: encryptionRecordBody(0, 0x55)},
 			},
 			wantErr:         ErrCorruptFileHeader,
 			checkEncryption: true,
@@ -475,8 +475,8 @@ func TestDuplicateExtraRecordIsRefused(t *testing.T) {
 		{
 			name: "hash",
 			extraRecords: []extraRecordSpec{
-				{Type: 2, Body: append(encodeVint(0), bytes.Repeat([]byte{0x11}, 32)...)},
-				{Type: 2, Body: append(encodeVint(0), bytes.Repeat([]byte{0x22}, 32)...)},
+				{Type: extraRecordHash, Body: append(encodeVint(0), bytes.Repeat([]byte{0x11}, 32)...)},
+				{Type: extraRecordHash, Body: append(encodeVint(0), bytes.Repeat([]byte{0x22}, 32)...)},
 			},
 			wantErr:      ErrCorruptFileHeader,
 			checkHash:    true,
@@ -485,8 +485,8 @@ func TestDuplicateExtraRecordIsRefused(t *testing.T) {
 		{
 			name: "time",
 			extraRecords: []extraRecordSpec{
-				{Type: 3, Body: append(encodeVint(extraTimeMtime|extraTimeUnix), le32(100)...)},
-				{Type: 3, Body: append(encodeVint(extraTimeMtime|extraTimeUnix), le32(200)...)},
+				{Type: extraRecordTime, Body: append(encodeVint(extraTimeMtime|extraTimeUnix), le32(100)...)},
+				{Type: extraRecordTime, Body: append(encodeVint(extraTimeMtime|extraTimeUnix), le32(200)...)},
 			},
 			wantErr:       ErrCorruptFileHeader,
 			checkTime:     true,
@@ -544,8 +544,8 @@ func TestDuplicateExtraRecordIsRefused(t *testing.T) {
 			name:    "test.bin",
 			content: "hello",
 			extraRecords: []extraRecordSpec{
-				{Type: 1, Body: encodeVint(99)},
-				{Type: 1, Body: encryptionRecordBody(fileEncCheckPresent, 0x55)},
+				{Type: extraRecordEncryption, Body: encodeVint(99)},
+				{Type: extraRecordEncryption, Body: encryptionRecordBody(fileEncCheckPresent, 0x55)},
 			},
 		})
 
@@ -578,9 +578,9 @@ func TestDuplicateExtraRecordIsRefused(t *testing.T) {
 			name:    "test.bin",
 			content: "hello",
 			extraRecords: []extraRecordSpec{
-				{Type: 3, Body: encodeVint(extraTimeMtime)},
-				{Type: 1, Body: encryptionRecordBody(fileEncCheckPresent, 0xAA)},
-				{Type: 1, Body: encryptionRecordBody(0, 0x55)},
+				{Type: extraRecordTime, Body: encodeVint(extraTimeMtime)},
+				{Type: extraRecordEncryption, Body: encryptionRecordBody(fileEncCheckPresent, 0xAA)},
+				{Type: extraRecordEncryption, Body: encryptionRecordBody(0, 0x55)},
 			},
 		})
 
@@ -631,7 +631,7 @@ func TestSizeRefusalStillCarriesExtraRecords(t *testing.T) {
 				name: "unknown.bin", content: "hello",
 				extraFileFlags: fileFlagUnpSizeUnknown,
 				extraRecords: []extraRecordSpec{
-					{Type: 1, Body: encryptionRecordBody(fileEncCheckPresent, 0xAA)},
+					{Type: extraRecordEncryption, Body: encryptionRecordBody(fileEncCheckPresent, 0xAA)},
 				},
 			},
 			wantErr: ErrUnpSizeUnknown,
@@ -642,7 +642,7 @@ func TestSizeRefusalStillCarriesExtraRecords(t *testing.T) {
 				name: "negative.bin", content: "hello",
 				unpackedSz: new(int64(-1)),
 				extraRecords: []extraRecordSpec{
-					{Type: 1, Body: encryptionRecordBody(fileEncCheckPresent, 0xAA)},
+					{Type: extraRecordEncryption, Body: encryptionRecordBody(fileEncCheckPresent, 0xAA)},
 				},
 			},
 			wantErr: ErrCorruptFileHeader,
@@ -690,7 +690,7 @@ func TestSizeRefusalOutranksAnExtraRecordFailure(t *testing.T) {
 				name: "unknown.bin", content: "hello",
 				extraFileFlags: fileFlagUnpSizeUnknown,
 				extraRecords: []extraRecordSpec{
-					{Type: 1, Body: encodeVint(99)},
+					{Type: extraRecordEncryption, Body: encodeVint(99)},
 				},
 			},
 			wantErr: ErrUnpSizeUnknown,
@@ -701,7 +701,7 @@ func TestSizeRefusalOutranksAnExtraRecordFailure(t *testing.T) {
 				name: "negative.bin", content: "hello",
 				unpackedSz: new(int64(-1)),
 				extraRecords: []extraRecordSpec{
-					{Type: 1, Body: encodeVint(99)},
+					{Type: extraRecordEncryption, Body: encodeVint(99)},
 				},
 			},
 			wantErr: ErrCorruptFileHeader,

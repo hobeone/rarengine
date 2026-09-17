@@ -70,6 +70,11 @@ const (
 	// File Encryption Extra Flags
 	fileEncCheckPresent = 0x0001
 	fileEncUseMac       = 0x0002
+
+	// File header extra record types
+	extraRecordEncryption = 0x01 // Encryption
+	extraRecordHash       = 0x02 // File hash (Blake2sp)
+	extraRecordTime       = 0x03 // File times
 )
 
 // blockHeader represents a generic RAR5 block header.
@@ -493,22 +498,22 @@ func parseTimeRecord(fh *FileHeader, data []byte) error {
 // into the header.
 func parseExtraRecords(fh *FileHeader, extra []extraRecord) error {
 	var first error
-	var seen [4]bool // indexed by record type; 1-3 are the types parsed below
+	var seen [extraRecordTime + 1]bool // indexed by record type
 	for _, e := range extra {
+		if e.Type < extraRecordEncryption || e.Type > extraRecordTime {
+			continue // not a record this function parses; repeats are not tracked either
+		}
 		var err error
-		if e.Type >= 1 && e.Type <= 3 && seen[e.Type] {
-			err = fmt.Errorf("%w: duplicate extra record of type %d",
-				ErrCorruptFileHeader, e.Type)
+		if seen[e.Type] {
+			err = fmt.Errorf("%w: duplicate extra record of type %d", ErrCorruptFileHeader, e.Type)
 		} else {
-			if e.Type >= 1 && e.Type <= 3 {
-				seen[e.Type] = true
-			}
+			seen[e.Type] = true
 			switch e.Type {
-			case 1: // Encryption
+			case extraRecordEncryption:
 				err = parseEncryptionRecord(fh, e.Data)
-			case 2: // File hash (Blake2sp)
+			case extraRecordHash:
 				err = parseHashRecord(fh, e.Data)
-			case 3: // File times
+			case extraRecordTime:
 				err = parseTimeRecord(fh, e.Data)
 			}
 		}

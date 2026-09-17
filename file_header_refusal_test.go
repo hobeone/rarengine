@@ -512,8 +512,8 @@ func TestDuplicateEncryptionRecordRefusesTheMember(t *testing.T) {
 		rar5Member(t, memberSpec{
 			name: "dup.enc", content: "secret",
 			extraRecords: []extraRecordSpec{
-				{Type: 1, Body: encryptionRecordBody(fileEncCheckPresent|fileEncUseMac, 0xAA)},
-				{Type: 1, Body: encryptionRecordBody(0, 0x55)},
+				{Type: extraRecordEncryption, Body: encryptionRecordBody(fileEncCheckPresent|fileEncUseMac, 0xAA)},
+				{Type: extraRecordEncryption, Body: encryptionRecordBody(0, 0x55)},
 			},
 		}),
 	)
@@ -531,7 +531,7 @@ func TestRefusedMemberHeaderReportsEncryption(t *testing.T) {
 			name: "unknown-enc.bin", content: "hello",
 			extraFileFlags: fileFlagUnpSizeUnknown,
 			extraRecords: []extraRecordSpec{
-				{Type: 1, Body: encryptionRecordBody(fileEncCheckPresent, 0xAA)},
+				{Type: extraRecordEncryption, Body: encryptionRecordBody(fileEncCheckPresent, 0xAA)},
 			},
 		}),
 	)
