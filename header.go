@@ -503,19 +503,21 @@ func parseExtraRecords(fh *FileHeader, extra []extraRecord) error {
 		if e.Type < extraRecordEncryption || e.Type > extraRecordTime {
 			continue // not a record this function parses; repeats are not tracked either
 		}
-		var err error
 		if seen[e.Type] {
-			err = fmt.Errorf("%w: duplicate extra record of type %d", ErrCorruptFileHeader, e.Type)
-		} else {
-			seen[e.Type] = true
-			switch e.Type {
-			case extraRecordEncryption:
-				err = parseEncryptionRecord(fh, e.Data)
-			case extraRecordHash:
-				err = parseHashRecord(fh, e.Data)
-			case extraRecordTime:
-				err = parseTimeRecord(fh, e.Data)
+			if first == nil {
+				first = fmt.Errorf("%w: duplicate extra record of type %d", ErrCorruptFileHeader, e.Type)
 			}
+			continue
+		}
+		seen[e.Type] = true
+		var err error
+		switch e.Type {
+		case extraRecordEncryption:
+			err = parseEncryptionRecord(fh, e.Data)
+		case extraRecordHash:
+			err = parseHashRecord(fh, e.Data)
+		case extraRecordTime:
+			err = parseTimeRecord(fh, e.Data)
 		}
 		if err != nil && first == nil {
 			first = err
