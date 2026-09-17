@@ -354,23 +354,6 @@ func encryptedMemberHeader(t *testing.T, name string, withCheck bool) []byte {
 	})
 }
 
-// encryptionRecordBody is a well-formed RAR5 file-encryption record body
-// (everything after the record-type vint): AES-256, KDF count 15, a salt of
-// sixteen copies of salt, a fixed IV, and the flags given. fileEncCheckPresent
-// appends a 12-byte password check value; fileEncUseMac is recorded as given.
-func encryptionRecordBody(flags uint64, salt byte) []byte {
-	var enc bytes.Buffer
-	enc.Write(encodeVint(0)) // encryption version 0 (AES-256)
-	enc.Write(encodeVint(flags))
-	enc.WriteByte(15)                         // kdf count
-	enc.Write(bytes.Repeat([]byte{salt}, 16)) // salt
-	enc.Write(bytes.Repeat([]byte{0xBB}, 16)) // IV
-	if flags&fileEncCheckPresent != 0 {
-		enc.Write(bytes.Repeat([]byte{0xCC}, 12)) // check value
-	}
-	return enc.Bytes()
-}
-
 // TestInspectionReportsTruncationThroughTheSeekPath pins what the seek
 // fast-path in skipPayload gives up, and what it must not.
 //
