@@ -1,7 +1,6 @@
 package rarengine
 
 import (
-	"maps"
 	"math/rand/v2"
 	"testing"
 )
@@ -22,22 +21,6 @@ func blake2spOneBlockSum(data []byte) [blake2spSize]byte {
 	return h.sum()
 }
 
-// blake2sp8Impls returns every implementation of the strided kernel the build
-// can run, by name, so each is compared against the oracle in its own right
-// rather than whichever one init happened to install.
-func blake2sp8Impls() map[string]func(*[8][8]uint32, []byte, uint64) {
-	impls := map[string]func(*[8][8]uint32, []byte, uint64){"generic": blake2sp8Generic}
-	maps.Copy(impls, blake2sp8Arch())
-	return impls
-}
-
-func withBlake2sp8(t *testing.T, f func(*[8][8]uint32, []byte, uint64)) {
-	t.Helper()
-	saved := blake2sp8
-	blake2sp8 = f
-	t.Cleanup(func() { blake2sp8 = saved })
-}
-
 func TestBlake2spStridedMatchesOneBlockAtATime(t *testing.T) {
 	rng := rand.New(rand.NewPCG(1, 2))
 	sizes := make([]int, 0, 4200)
@@ -45,9 +28,9 @@ func TestBlake2spStridedMatchesOneBlockAtATime(t *testing.T) {
 		sizes = append(sizes, n)
 	}
 	sizes = append(sizes, 1<<20, 1<<20+1, 1<<20+511, 1<<20+512, 3*512*1024+37)
-	for name, impl := range blake2sp8Impls() {
+	for name, use := range blake2sp8Modes() {
 		t.Run(name, func(t *testing.T) {
-			withBlake2sp8(t, impl)
+			use(t)
 			for _, n := range sizes {
 				data := make([]byte, n)
 				for i := range data {
@@ -70,9 +53,9 @@ func TestBlake2spStridedAcrossArbitraryWrites(t *testing.T) {
 		data[i] = byte(rng.Uint32())
 	}
 	want := blake2spOneBlockSum(data)
-	for name, impl := range blake2sp8Impls() {
+	for name, use := range blake2sp8Modes() {
 		t.Run(name, func(t *testing.T) {
-			withBlake2sp8(t, impl)
+			use(t)
 			for trial := range 50 {
 				var h blake2sp
 				h.init()
@@ -97,17 +80,43 @@ func TestBlake2spStridedAcrossArbitraryWrites(t *testing.T) {
 // everything through deal would pass every equality test above.
 func TestBlake2spWriteUsesTheStridedKernel(t *testing.T) {
 	var calls, bytesSeen int
-	withBlake2sp8(t, func(h *[8][8]uint32, p []byte, ctr uint64) {
+	blake2spStrideHook = func(n int) {
 		calls++
-		bytesSeen += len(p)
-		blake2sp8Generic(h, p, ctr)
-	})
+		bytesSeen += n
+	}
+	t.Cleanup(func() { blake2spStrideHook = nil })
 	data := blake2spPattern(10*blake2spStride + 100)
 	var h blake2sp
 	h.init()
 	_, _ = h.Write(data)
 	if calls == 0 || bytesSeen < 9*blake2spStride {
 		t.Fatalf("kernel saw %d bytes in %d calls of %d written", bytesSeen, calls, len(data))
+	}
+	if got, want := h.sum(), blake2spOneBlockSum(data); got != want {
+		t.Fatalf("digest %x, want %x", got, want)
+	}
+}
+
+// One kernel call never covers more than blake2spMaxCallStrides strides, so a
+// huge Write cannot hold a thread in non-preemptible assembly for long, and
+// the counter carried between the calls must stay right.
+func TestBlake2spKernelCallsAreBounded(t *testing.T) {
+	const limit = blake2spMaxCallStrides * blake2spStride
+	var calls, biggest int
+	blake2spStrideHook = func(n int) {
+		calls++
+		biggest = max(biggest, n)
+	}
+	t.Cleanup(func() { blake2spStrideHook = nil })
+	data := blake2spPattern(2*limit + 5*blake2spStride + 33)
+	var h blake2sp
+	h.init()
+	_, _ = h.Write(data)
+	if biggest > limit {
+		t.Fatalf("a kernel call covered %d bytes, limit %d", biggest, limit)
+	}
+	if calls < 3 {
+		t.Fatalf("%d bytes took %d kernel calls, want at least 3", len(data), calls)
 	}
 	if got, want := h.sum(), blake2spOneBlockSum(data); got != want {
 		t.Fatalf("digest %x, want %x", got, want)

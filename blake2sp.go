@@ -167,25 +167,24 @@ type blake2sp struct {
 	buf [blake2sBlockSize]byte
 	n   int
 	cur int
-	// lanes and stage are scratch for dealStrides, kept here so Write
-	// allocates nothing: the leaf states transposed so word j of leaf i is
-	// lanes[j][i], and the leaves' held-back blocks laid out as one stride.
-	lanes [8][8]uint32
-	stage [blake2spStride]byte
 }
 
 // blake2spStride is the input one trip round the leaves consumes: eight
 // 64-byte blocks, one for each leaf.
 const blake2spStride = blake2spLeaves * blake2sBlockSize
 
-// blake2sp8 compresses len(p)/blake2spStride strides of p, none of them the
-// last block of anything, into eight leaf states held transposed in h (word j
-// of leaf i is h[j][i]); leaf i takes bytes 64*i..64*i+63 of each stride. t is
-// the byte counter the first block of each leaf ends at, and advances by 64
-// per stride. Architecture files replace it with a SIMD kernel; this is the
-// reference every kernel must match.
-var blake2sp8 = blake2sp8Generic
+// blake2spMaxCallStrides bounds the strides handed to one kernel call, 64 KiB
+// of input, so a huge Write never sits in non-preemptible assembly for long.
+const blake2spMaxCallStrides = 128
 
+//go:generate go run -C asm -mod=readonly blake2sp_gen.go -pkg rarengine -out ../blake2sp_amd64.s -stubs ../blake2sp_amd64.go
+
+// blake2sp8Generic compresses len(p)/blake2spStride strides of p, none of them
+// the last block of anything, into eight leaf states held transposed in h
+// (word j of leaf i is h[j][i]); leaf i takes bytes 64*i..64*i+63 of each
+// stride. t is the byte counter the first block of each leaf ends at, and
+// advances by 64 per stride. It is the reference every SIMD kernel must match;
+// the per-architecture blake2sp8 picks between them.
 func blake2sp8Generic(h *[8][8]uint32, p []byte, t uint64) {
 	var s blake2s
 	for ; len(p) >= blake2spStride; p = p[blake2spStride:] {
@@ -203,6 +202,25 @@ func blake2sp8Generic(h *[8][8]uint32, p []byte, t uint64) {
 	}
 }
 
+// blake2spStrideHook, when non-nil, is told the byte length of every kernel
+// call. It exists for tests to observe that the strided path ran.
+var blake2spStrideHook func(n int)
+
+// blake2sp8Chunked runs blake2sp8 over p, a whole number of strides, in calls
+// of at most blake2spMaxCallStrides, and returns the advanced counter.
+func blake2sp8Chunked(h *[8][8]uint32, p []byte, t uint64) uint64 {
+	for len(p) > 0 {
+		n := min(len(p), blake2spMaxCallStrides*blake2spStride)
+		if blake2spStrideHook != nil {
+			blake2spStrideHook(n)
+		}
+		blake2sp8(h, p[:n], t)
+		t += uint64(n/blake2spStride) * blake2sBlockSize
+		p = p[n:]
+	}
+	return t
+}
+
 // dealStrides deals every whole stride of p to the leaves, which must be
 // block-aligned (cur == 0), and returns what is left. At least one block per
 // leaf is always held back, exactly as the one-block-at-a-time path does,
@@ -215,29 +233,29 @@ func (s *blake2sp) dealStrides(p []byte) []byte {
 	if k == 0 {
 		return p
 	}
+	// Scratch lives on the stack: the leaf states transposed so word j of
+	// leaf i is lanes[j][i], and the held-back blocks laid out as one stride.
+	var lanes [8][8]uint32
+	var stage [blake2spStride]byte
 	t := s.leaf[0].t
 	for i := range s.leaf {
 		for j, w := range s.leaf[i].h {
-			s.lanes[j][i] = w
+			lanes[j][i] = w
 		}
 	}
 	if s.leaf[0].n == blake2sBlockSize {
 		// The held-back blocks now provably are not last: compress them.
 		for i := range s.leaf {
-			copy(s.stage[blake2sBlockSize*i:], s.leaf[i].buf[:])
+			copy(stage[blake2sBlockSize*i:], s.leaf[i].buf[:])
 		}
-		blake2sp8(&s.lanes, s.stage[:], t)
-		t += blake2sBlockSize
+		t = blake2sp8Chunked(&lanes, stage[:], t)
 	}
-	if k > 1 {
-		blake2sp8(&s.lanes, p[:(k-1)*blake2spStride], t)
-		t += uint64(k-1) * blake2sBlockSize
-	}
+	t = blake2sp8Chunked(&lanes, p[:(k-1)*blake2spStride], t)
 	last := p[(k-1)*blake2spStride:]
 	for i := range s.leaf {
 		l := &s.leaf[i]
 		for j := range l.h {
-			l.h[j] = s.lanes[j][i]
+			l.h[j] = lanes[j][i]
 		}
 		l.t = t
 		copy(l.buf[:], last[blake2sBlockSize*i:])

@@ -9,22 +9,33 @@ import (
 	"golang.org/x/sys/cpu"
 )
 
-// blake2sp8Arch lists the architecture kernels this build has. The AVX2 kernel
-// is named here directly, not read back from blake2sp8, so a machine without
-// AVX2 cannot silently compare the generic kernel with itself.
-func blake2sp8Arch() map[string]func(*[8][8]uint32, []byte, uint64) {
-	if !cpu.X86.HasAVX2 {
-		return nil
+// blake2sp8Modes names every way this build can run the strided path, each a
+// function that selects it for the test and restores the default afterwards.
+// The AVX2 mode is offered only where the CPU has AVX2, so a machine without it
+// cannot silently compare the generic kernel with itself.
+func blake2sp8Modes() map[string]func(*testing.T) {
+	set := func(on bool) func(*testing.T) {
+		return func(t *testing.T) {
+			saved := useAVX2
+			useAVX2 = on
+			t.Cleanup(func() { useAVX2 = saved })
+		}
 	}
-	return map[string]func(*[8][8]uint32, []byte, uint64){"avx2": blake2sp8Dispatch}
+	modes := map[string]func(*testing.T){"generic": set(false)}
+	if cpu.X86.HasAVX2 {
+		modes["avx2"] = set(true)
+	}
+	return modes
 }
 
-func TestBlake2sp8AVX2RunsOnThisMachine(t *testing.T) {
+// A machine with AVX2 must come up using it. Every equality test above selects
+// its mode explicitly, so none would notice init failing to install the kernel.
+func TestBlake2sp8InstallsAVX2WhenAvailable(t *testing.T) {
 	if !cpu.X86.HasAVX2 {
 		t.Skip("CPU has no AVX2: the AVX2 kernel is not exercised on this machine")
 	}
-	if _, ok := blake2sp8Arch()["avx2"]; !ok {
-		t.Fatal("AVX2 present but its kernel is not in the comparison set")
+	if !useAVX2 {
+		t.Fatal("CPU has AVX2 but blake2sp8 is not dispatching to the AVX2 kernel")
 	}
 }
 

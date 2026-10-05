@@ -2,5 +2,10 @@
 
 package rarengine
 
-// blake2sp8Arch lists the architecture kernels this build has: none.
-func blake2sp8Arch() map[string]func(*[8][8]uint32, []byte, uint64) { return nil }
+import "testing"
+
+// blake2sp8Modes names every way this build can run the strided path, each a
+// function that selects it for the test. Without a SIMD kernel there is one.
+func blake2sp8Modes() map[string]func(*testing.T) {
+	return map[string]func(*testing.T){"generic": func(*testing.T) {}}
+}

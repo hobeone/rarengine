@@ -9,9 +9,9 @@
 // at generation time) follows nwaples/rardecode's asm/blake2sp_gen.go,
 // Copyright (c) 2015, Nicholas Waples, BSD 2-Clause licence. That licence
 // requires its copyright notice and disclaimer to be retained in source and
-// binary redistributions; they are reproduced in full in
-// THIRD_PARTY_NOTICES in this directory and referenced from the header of the
-// generated file. The kernel here differs from that one in taking raw input
+// binary redistributions; they are reproduced in full in THIRD_PARTY_NOTICES
+// at the repository root (this directory is a separate module, so a notice
+// kept here would not ship with the root module's zip). The kernel here differs from that one in taking raw input
 // pointers rather than a pre-transposed context, so it transposes the
 // message itself, and in looping over many strides with the counter kept in a
 // general register.
@@ -72,7 +72,8 @@ func main() {
 		"",
 		"The design follows nwaples/rardecode's asm/blake2sp_gen.go, Copyright (c)",
 		"2015, Nicholas Waples, BSD 2-Clause licence; its notice and disclaimer are",
-		"reproduced in asm/THIRD_PARTY_NOTICES.")
+		"reproduced in THIRD_PARTY_NOTICES at the repository root.")
+	Pragma("noescape")
 
 	hPtr := Load(Param("h"), GP64())
 	pPtr := Load(Param("p"), GP64())

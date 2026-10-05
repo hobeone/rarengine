@@ -11,5 +11,7 @@ package rarengine
 //
 // The design follows nwaples/rardecode's asm/blake2sp_gen.go, Copyright (c)
 // 2015, Nicholas Waples, BSD 2-Clause licence; its notice and disclaimer are
-// reproduced in asm/THIRD_PARTY_NOTICES.
+// reproduced in THIRD_PARTY_NOTICES at the repository root.
+//
+//go:noescape
 func blake2sp8AVX2(h *[8][8]uint32, p *byte, strides int, t uint64)
