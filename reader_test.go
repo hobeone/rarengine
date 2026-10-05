@@ -688,13 +688,13 @@ func TestArchiveHeaderSolidFlagReachesTheReader(t *testing.T) {
 		}
 	})
 
-	// Volume 1 declares a non-solid archive, so a set flag can only have come
-	// from volume 2's archive header -- which the scan never reads, because
-	// the member in progress is what pulls that volume in.
+	// Volume 2's archive header is read only through the splice, because the
+	// member in progress is what pulls that volume in. It must AGREE with
+	// volume 1's; a flip is corrupt (TestArchiveHeaderSolidFlagFlipAcrossVolumes).
 	t.Run("splice", func(t *testing.T) {
 		const content = "hello world"
 		half := len(content) / 2
-		v1 := rar5Archive(t, false, rar5Member(t, memberSpec{
+		v1 := rar5Archive(t, true, rar5Member(t, memberSpec{
 			name: "split.bin", content: content[:half],
 			unpackedSz: new(int64(len(content))), packedSz: new(int64(half)), notLast: true,
 		}))
@@ -709,14 +709,11 @@ func TestArchiveHeaderSolidFlagReachesTheReader(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NextEntry: %v", err)
 		}
-		if r.solid {
-			t.Fatal("r.solid set before the second volume was reached")
-		}
 		if _, err := io.ReadAll(e); err != nil {
 			t.Fatalf("ReadAll: %v", err)
 		}
 		if !r.solid {
-			t.Fatal("volume 2's archive header declared Solid, r.solid = false")
+			t.Fatal("both archive headers declared Solid, r.solid = false")
 		}
 	})
 }

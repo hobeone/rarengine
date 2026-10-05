@@ -106,7 +106,7 @@ func TestSkipDamagedFile_TraversalContinues(t *testing.T) {
 // corruption, which is worse than the lost-files problem skipping solves.
 func TestSkipDamagedFile_SolidSuccessorRefused(t *testing.T) {
 	var archive bytes.Buffer
-	archive.Write(rar5ArchiveHeader())
+	archive.Write(rar5SolidArchiveHeader())
 	archive.Write(shortEntry("truncated.bin"))
 	// fileCompSolid: this file's back-references reach into the damaged one.
 	archive.Write(rar5EntryComp("solid.bin", fileCompSolid, 20, 0x1234,
@@ -135,7 +135,7 @@ func TestSkipDamagedFile_NonSolidSuccessorClearsDamage(t *testing.T) {
 	second := []byte("solid on top of a clean base!!!")
 
 	var archive bytes.Buffer
-	archive.Write(rar5ArchiveHeader())
+	archive.Write(rar5SolidArchiveHeader())
 	archive.Write(shortEntry("truncated.bin"))
 	archive.Write(goodEntry("independent.bin", first))
 	archive.Write(rar5EntryComp("solid.bin", fileCompSolid, uint64(len(second)),
@@ -186,7 +186,7 @@ func TestSkipDamagedFile_ResetClearsDamage(t *testing.T) {
 
 	content := []byte("a fresh archive, solid from the start")
 	var fresh bytes.Buffer
-	fresh.Write(rar5ArchiveHeader())
+	fresh.Write(rar5SolidArchiveHeader())
 	fresh.Write(rar5EntryComp("solid.bin", fileCompSolid, uint64(len(content)),
 		crc32.ChecksumIEEE(content), content))
 	fresh.Write(rar5EndHeader())
@@ -301,7 +301,7 @@ func volumesOf2(r io.Reader) <-chan io.ReadCloser {
 func TestSkipDamagedFile_SolidRefusedAcrossVolumeAfterTruncation(t *testing.T) {
 	// Volume 1: a file declaring far more payload than the media carries.
 	var vol1 bytes.Buffer
-	vol1.Write(rar5ArchiveHeader())
+	vol1.Write(rar5SolidArchiveHeader())
 	vol1.Write(rar5FileEntry("truncated.bin", 1000, 0xdeadbeef, make([]byte, 1000)))
 	truncated := vol1.Bytes()[:vol1.Len()-990]
 
@@ -309,7 +309,7 @@ func TestSkipDamagedFile_SolidRefusedAcrossVolumeAfterTruncation(t *testing.T) {
 	// history volume 1 failed to write.
 	content := []byte("solid content depending on history")
 	var vol2 bytes.Buffer
-	vol2.Write(rar5ArchiveHeader())
+	vol2.Write(rar5SolidArchiveHeader())
 	vol2.Write(rar5EntryComp("solid.bin", fileCompSolid, uint64(len(content)),
 		crc32.ChecksumIEEE(content), content))
 	vol2.Write(rar5EndHeader())
@@ -418,7 +418,7 @@ func TestSkipDamagedFile_SolidRefusalDropsPayload(t *testing.T) {
 
 	tail := []byte("the real next file")
 	var archive bytes.Buffer
-	archive.Write(rar5ArchiveHeader())
+	archive.Write(rar5SolidArchiveHeader())
 	archive.Write(shortEntry("truncated.bin"))
 	archive.Write(rar5EntryComp("solid.bin", fileCompSolid,
 		uint64(len(smuggled)), 0x1234, smuggled))
@@ -507,7 +507,7 @@ func TestSkipDamagedFile_ChecksumFailureIsContinuable(t *testing.T) {
 // assumed -- silently, since nothing in the format marks it.
 func TestSkipDamagedFile_ChecksumFailureDamagesWindow(t *testing.T) {
 	var archive bytes.Buffer
-	archive.Write(rar5ArchiveHeader())
+	archive.Write(rar5SolidArchiveHeader())
 	archive.Write(badCRCEntry("bad.bin", []byte("content whose CRC will not match")))
 	archive.Write(rar5EntryComp("solid.bin", fileCompSolid, 20, 0x1234,
 		[]byte("twenty bytes exactly")))
@@ -553,7 +553,7 @@ func TestSkipDamagedFile_RefusedFileDamagesWindow(t *testing.T) {
 	bomb := rar5FileEntry("bomb.bin", 2*1024*1024, 0x1234, []byte("ten bytes!"))
 
 	var archive bytes.Buffer
-	archive.Write(rar5ArchiveHeader())
+	archive.Write(rar5SolidArchiveHeader())
 	archive.Write(bomb)
 	archive.Write(rar5EntryComp("solid.bin", fileCompSolid, 20, 0x1234,
 		[]byte("twenty bytes exactly")))

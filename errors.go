@@ -194,6 +194,24 @@ var (
 	// has run, Read reports the member's recorded verdict, as for any member.
 	ErrLinkEntry = errors.New("rarengine: member is a link and has no content to read; check Header.LinkType")
 
+	// ErrSolidFlagMismatch is a member's verdict when its file header says it
+	// continues a solid stream but the archive header did not declare the
+	// archive solid.
+	//
+	// rar sets both flags together, so a disagreement is a contradiction in
+	// the archive and not a choice a writer made. It matters because the two
+	// flags steer different parts of the library -- the file's flag decides
+	// whether the window keeps its history, the archive's whether stored
+	// members record into it -- so trusting either leaves a solid successor
+	// back-referencing bytes nothing wrote, and the window state cannot be
+	// trusted. The member is refused rather than decoded, delivered by its
+	// Entry like any refusal, and counts as window damage for any solid
+	// successor (ErrSolidStreamBroken). The archive stays readable past it.
+	//
+	// The reverse -- a solid archive whose member header is not flagged -- is
+	// ordinary: the first member of a solid run starts the stream.
+	ErrSolidFlagMismatch = errors.New("rarengine: file header is solid but the archive header is not")
+
 	// ErrSolidStreamBroken is returned when a solid file cannot be decoded
 	// because an earlier file in the same solid run was damaged.
 	//

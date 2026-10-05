@@ -231,6 +231,15 @@ func (r *Reader) nextVolumePayload(e *Entry) (io.Reader, error) {
 				fh.UnpackVersion, e.Header.Name, e.Header.Method,
 				e.Header.UnpackVersion)
 		}
+		// Solid is part of the member's identity for the same reason: dispatch
+		// admitted the first block against the archive's flag, and a
+		// continuation saying otherwise contradicts what that admission
+		// relied on.
+		if fh.Solid != e.Header.Solid {
+			return nil, fmt.Errorf("%w: file %q: continuation declares "+
+				"Solid=%v, first block declared %v",
+				ErrCorruptFileHeader, e.Header.Name, fh.Solid, e.Header.Solid)
+		}
 		// Captures the whole-file CRC32, LastBlock and UseMac, all of which
 		// RAR records on the LAST part rather than the first.
 		e.advanceVolume(fh)

@@ -139,6 +139,9 @@ type Reader struct {
 	// decides whether abandoning a member must decode its remainder to keep
 	// the window valid for a successor -- see NextEntry.
 	solid bool
+	// solidSeen reports that an archive header has set solid, so a later
+	// volume's header is compared against it instead of overwriting it.
+	solidSeen bool
 
 	// fatal is sticky once set: NextEntry checks it first and, if non-nil,
 	// returns it again without touching r.vol. It is set by NextEntry itself
@@ -211,7 +214,7 @@ func (r *Reader) Reset(volumes <-chan io.ReadCloser) {
 	r.staged = nil
 	r.damaged = nil
 	r.resolved, r.hasResolved = "", false
-	r.solid = false
+	r.solid, r.solidSeen = false, false
 	r.fatal = nil
 	// BeginFile(false) is the window's one entrance for discarding history: it
 	// resets the pointers and clears incomplete together. Poking r.win.incomplete
@@ -579,6 +582,25 @@ func (r *Reader) dispatch(h *blockHeader) (*Entry, error) {
 				"version %d (RAR 5.0)", ErrUnsupportedFormat, fh.Name,
 			fh.UnpackVersion, unpackVersionRAR5), done), nil
 	}
+	// Solid is an archive-level property that rar records twice: on the
+	// archive header and on every member of a solid run. A member claiming
+	// to continue a solid stream in an archive that never declared one
+	// contradicts it, and the two flags drive different mechanisms -- this
+	// one picks BeginFile's reset-or-keep, the archive's picks whether a
+	// stored member records history at all (buildChain) and whether an
+	// abandoned member is decoded out (finishActive). Disagreeing, they
+	// leave a solid successor reading history a stored member never wrote.
+	// Refused as corrupt rather than reconciled: no honest writer produces
+	// it, so there is no reading of it to prefer.
+	//
+	// Before the link arm, because the contradiction is in the header and a
+	// link is no more entitled to it than a file; before the bomb ratio and
+	// BeginFile for the same reason as the version check above.
+	if fh.Solid && !r.solid {
+		r.win.MarkIncomplete()
+		return terminalEntry(fh, fmt.Errorf(
+			"%w: file %q", ErrSolidFlagMismatch, fh.Name), done), nil
+	}
 	// A link is admitted here, AHEAD of the bomb ratio and of BeginFile, and
 	// each of those is a reason, not an accident of ordering.
 	//
@@ -673,7 +695,16 @@ func (r *Reader) handleNonFileBlock(h *blockHeader) error {
 			// this (see Reader.fatal) so a second call cannot resume past it.
 			return fmt.Errorf("%w: %w", ErrCorruptArchiveHeader, err)
 		}
-		r.solid = r.solid || ah.Solid
+		// The first archive header seen sets the flag; a later one (each
+		// volume repeats its own) must agree. A sticky OR let a second
+		// volume turn solidity on mid-member, after the member's chain
+		// had already been built without history recording.
+		if r.solidSeen && r.solid != ah.Solid {
+			return fmt.Errorf("%w: archive header solid flag is %v, "+
+				"an earlier volume declared %v",
+				ErrCorruptArchiveHeader, ah.Solid, r.solid)
+		}
+		r.solid, r.solidSeen = ah.Solid, true
 
 	case headerTypeEncryption:
 		// Every volume of a header-encrypted archive repeats its own

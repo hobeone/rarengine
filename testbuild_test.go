@@ -62,6 +62,13 @@ func rar5ArchiveHeaderFlags(flags uint64) []byte {
 // default most fixtures want.
 func rar5ArchiveHeader() []byte { return rar5ArchiveHeaderFlags(arcFlagMultiVol) }
 
+// rar5SolidArchiveHeader is rar5ArchiveHeader for a solid set. A fixture whose
+// members carry fileCompSolid needs it: a solid member in an archive that is
+// not declared solid is refused with ErrSolidFlagMismatch.
+func rar5SolidArchiveHeader() []byte {
+	return rar5ArchiveHeaderFlags(arcFlagMultiVol | arcFlagSolid)
+}
+
 // rar5EndHeader terminates a volume. No signature: it is never the first
 // thing in one.
 func rar5EndHeader() []byte {
