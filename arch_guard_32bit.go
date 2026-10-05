@@ -1,5 +1,4 @@
-//go:build 386 || arm || mips || mipsle || ppc || s390 || sparc
-// +build 386 arm mips mipsle ppc s390 sparc
+//go:build 386 || arm || mips || mipsle
 
 package rarengine
 
