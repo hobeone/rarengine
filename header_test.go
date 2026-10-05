@@ -7,6 +7,7 @@ import (
 	"hash/crc32"
 	"strings"
 	"testing"
+	"unsafe"
 )
 
 func TestReadBlockHeader_CorruptCRC(t *testing.T) {
@@ -675,5 +676,22 @@ func TestSizeRefusalOutranksAnExtraRecordFailure(t *testing.T) {
 					"want ONLY %v", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+// FileHeader is allocated once per member, so its size is paid by every
+// member of every archive: crossing an allocator size class costs each one
+// 16 bytes. 240 is the top of the class it sits in on a 64-bit build; adding
+// a field among the word-sized ones has crossed it twice, and nothing but a
+// benchmark noticed. Group one-byte fields together (see the struct) rather
+// than raising this number.
+func TestFileHeaderStaysInItsAllocatorSizeClass(t *testing.T) {
+	if unsafe.Sizeof(uintptr(0)) != 8 {
+		t.Skip("size classes below are for a 64-bit build")
+	}
+	const class = 240
+	if got := unsafe.Sizeof(FileHeader{}); got > class {
+		t.Fatalf("FileHeader is %d bytes, over the %d-byte size class: every "+
+			"member now allocates the next class up", got, class)
 	}
 }

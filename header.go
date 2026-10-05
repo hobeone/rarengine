@@ -141,7 +141,9 @@ type FileHeader struct {
 	// The one-byte fields sit together so they share a word. FileHeader is
 	// allocated once per member, and growing it past an allocator size class
 	// costs every member of every archive: adding the link fields scattered
-	// among the word-sized ones moved it from the 240-byte class to 256.
+	// among the word-sized ones moved it from the 240-byte class to 256, so
+	// Encrypted and UseMac live in this group too rather than each padding out
+	// a word of its own. Keep the one-byte fields together.
 	IsDir      bool
 	Solid      bool
 	FirstBlock bool // true if this is the first block/volume-part of the file
@@ -153,6 +155,17 @@ type FileHeader struct {
 	// of its target string and a hard link the size of the file it points at.
 	// Creating the link is the caller's job; this library writes nothing.
 	LinkType LinkType
+
+	// Encrypted reports that the member's content is encrypted, from RAR5's
+	// encryption extra record. It reports that the member carries such a
+	// record, not that the record is usable: it is set even when that
+	// record fails to parse, in which case the parse error refuses the
+	// member.
+	Encrypted bool
+
+	// UseMac reports that the digest recorded for an encrypted member is a
+	// key-derived MAC rather than a hash of the plaintext.
+	UseMac bool
 
 	Method int // compression method: 0 = store, 1..5 = compress
 
@@ -180,17 +193,10 @@ type FileHeader struct {
 	HasCRC32    bool
 	HasBlake2sp bool
 	Blake2sp    []byte // 32-byte BLAKE2sp hash
-	// Encrypted reports that the member's content is encrypted, from RAR5's
-	// encryption extra record. It reports that the member carries such a
-	// record, not that the record is usable: it is set even when that
-	// record fails to parse, in which case the parse error refuses the
-	// member.
-	Encrypted bool
-	KdfCount  int
+	KdfCount    int
 	// Salt is the PBKDF2 salt for an encrypted member.
 	Salt             []byte
 	IV               []byte
-	UseMac           bool
 	EncCheck         []byte
 	ModificationTime time.Time
 	HostOS           uint64
