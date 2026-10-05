@@ -153,6 +153,28 @@ func terminalEntry(fh *FileHeader, cause error, cancelled <-chan struct{}) *Entr
 	return &Entry{Header: fh, cur: fh, done: cause, cancelled: cancelled}
 }
 
+// noPayload is the source of a member that owns no bytes. It is never read --
+// the byte budget is zero, so Read completes before reaching it -- and exists
+// because a nil src means "no active file" (ErrNoActiveFile), which is a
+// different statement from "a member with nothing to produce". A zero-size
+// struct stored in an interface does not allocate.
+type noPayload struct{}
+
+func (noPayload) Read([]byte) (int, error) { return 0, io.EOF }
+
+// linkEntry builds the member for a link: a header, and nothing to read.
+//
+// Header.UnpackedSize stays as the archive declared it -- the header is
+// faithful -- but the entry's own byte budget is zero, because the declared
+// size of a link is not a content size (a symlink declares its target's
+// length, a hard link its target's). Read therefore reaches the same
+// zero-length completion a directory or an empty file does: finish(nil),
+// where verifyChecksum's e.size == 0 gate finds nothing to compare. No second
+// terminal mechanism exists for it.
+func linkEntry(fh *FileHeader, cancelled <-chan struct{}) *Entry {
+	return &Entry{Header: fh, cur: fh, src: noPayload{}, cancelled: cancelled}
+}
+
 // advanceVolume replaces the header in force when the member continues into
 // the next volume. It is a named transition rather than a bare field write so
 // that the one place allowed to swap the header mid-member stays visible.

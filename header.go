@@ -1,6 +1,7 @@
 package rarengine
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
@@ -85,6 +86,28 @@ const (
 	extraRecordEncryption = 0x01 // Encryption
 	extraRecordHash       = 0x02 // File hash (Blake2sp)
 	extraRecordTime       = 0x03 // File times
+
+	// extraRecordVersion is the file-version record. Nothing here reads it, and
+	// it is named only so parseExtraRecords can say that it is deliberately
+	// outside the once-per-type rule.
+	extraRecordVersion = 0x04
+
+	extraRecordRedirection = 0x05 // File-system redirection: a link
+)
+
+// LinkType says what kind of link a member is, from the file-system
+// redirection record in its header. The zero value, LinkNone, is an ordinary
+// member.
+type LinkType uint8
+
+const (
+	LinkNone LinkType = 0 // not a link
+
+	LinkUnixSymlink     LinkType = 1
+	LinkWindowsSymlink  LinkType = 2
+	LinkWindowsJunction LinkType = 3
+	LinkHardLink        LinkType = 4
+	LinkFileCopy        LinkType = 5
 )
 
 // blockHeader represents a generic RAR5 block header.
@@ -112,13 +135,26 @@ type archiveHeader struct {
 // FileHeader represents a parsed file header inside the archive.
 type FileHeader struct {
 	Name         string
-	IsDir        bool
 	PackedSize   int64
 	UnpackedSize int64
-	Solid        bool
-	FirstBlock   bool // true if this is the first block/volume-part of the file
-	LastBlock    bool // true if this is the last block/volume-part of the file
-	Method       int  // compression method: 0 = store, 1..5 = compress
+
+	// The one-byte fields sit together so they share a word. FileHeader is
+	// allocated once per member, and growing it past an allocator size class
+	// costs every member of every archive: adding the link fields scattered
+	// among the word-sized ones moved it from the 240-byte class to 256.
+	IsDir      bool
+	Solid      bool
+	FirstBlock bool // true if this is the first block/volume-part of the file
+	LastBlock  bool // true if this is the last block/volume-part of the file
+
+	// LinkType is LinkNone for an ordinary member. Anything else means this
+	// member is a link: it carries no payload, Read returns io.EOF at once,
+	// and UnpackedSize is NOT a content size -- a symlink declares the length
+	// of its target string and a hard link the size of the file it points at.
+	// Creating the link is the caller's job; this library writes nothing.
+	LinkType LinkType
+
+	Method int // compression method: 0 = store, 1..5 = compress
 
 	// UnpackVersion is the compression algorithm version this member's header
 	// declares: 0 is RAR 5.0, and it is the only value this library can
@@ -159,6 +195,16 @@ type FileHeader struct {
 	ModificationTime time.Time
 	HostOS           uint64
 	Attributes       uint64
+
+	// LinkTarget is the target the archive names, exactly as stored. It is
+	// attacker-controlled and deliberately NOT sanitized the way Name is: a
+	// legitimate target such as "../lib/x" is exactly what a consumer needs
+	// to see, and rewriting it would destroy it. A consumer must validate it
+	// before creating anything -- an absolute path or a ".." that escapes the
+	// extraction root is a traversal -- and must do the same for Name. It is
+	// never empty and never contains a NUL byte when LinkType is not
+	// LinkNone. Empty for an ordinary member.
+	LinkTarget string
 }
 
 // Mode returns the Go fs.FileMode mapped from the HostOS and Attributes values.
@@ -499,8 +545,64 @@ func parseTimeRecord(fh *FileHeader, data []byte) error {
 	return nil
 }
 
-// parseExtraRecords applies a file header's encryption, hash and time records
-// to fh.
+// parseRedirectionRecord decodes the file-system redirection extra record:
+// a vint kind, a vint flags word (bit 0 says the target is a directory, which
+// nothing here needs), a vint target length, and that many bytes of target.
+//
+// fh.LinkType and fh.LinkTarget are written only when the whole record is
+// acceptable, so a header refused for its record never reports a link kind
+// with no usable target.
+//
+// A kind outside 1..5 is refused as ErrUnsupportedFormat rather than skipped.
+// Skipping would admit the member as an ordinary file, and an ordinary file
+// with no payload is exactly the ErrTruncatedFile this record exists to
+// explain; delivering an unknown kind as plain content is the other way to be
+// wrong. Bytes after the declared target are tolerated: the length says where
+// the target ends, and the record's own framing has already bounded the rest.
+func parseRedirectionRecord(fh *FileHeader, b []byte) error {
+	kind, n, err := decodeVint(b)
+	if err != nil {
+		return fmt.Errorf("%w: redirection record: %w", ErrCorruptFileHeader, err)
+	}
+	b = b[n:]
+	if kind < uint64(LinkUnixSymlink) || kind > uint64(LinkFileCopy) {
+		return fmt.Errorf("%w: file %q has a redirection record of unknown type %d",
+			ErrUnsupportedFormat, fh.Name, kind)
+	}
+
+	_, n, err = decodeVint(b) // flags; bit 0 (target is a directory) is not exposed
+	if err != nil {
+		return fmt.Errorf("%w: redirection record: %w", ErrCorruptFileHeader, err)
+	}
+	b = b[n:]
+
+	nameLen, n, err := decodeVint(b)
+	if err != nil {
+		return fmt.Errorf("%w: redirection record: %w", ErrCorruptFileHeader, err)
+	}
+	b = b[n:]
+	// uint64 against uint64, like every declared length here: a vint carries
+	// 70 bits, so int(nameLen) can wrap negative, pass this bound and panic at
+	// the slice below.
+	if uint64(len(b)) < nameLen {
+		return fmt.Errorf("%w: redirection record declares a %d-byte target in %d bytes",
+			ErrCorruptFileHeader, nameLen, len(b))
+	}
+	target := b[:nameLen]
+	if len(target) == 0 {
+		return fmt.Errorf("%w: redirection record names no target", ErrCorruptFileHeader)
+	}
+	if bytes.IndexByte(target, 0) >= 0 {
+		return fmt.Errorf("%w: redirection target contains a NUL byte", ErrCorruptFileHeader)
+	}
+
+	fh.LinkType = LinkType(kind)
+	fh.LinkTarget = string(target)
+	return nil
+}
+
+// parseExtraRecords applies a file header's encryption, hash, time and
+// redirection records to fh.
 //
 // A failing record does not stop the ones after it: every record is examined,
 // and the first failure is returned once all of them have been.
@@ -520,9 +622,13 @@ func parseTimeRecord(fh *FileHeader, data []byte) error {
 // into the header.
 func parseExtraRecords(fh *FileHeader, extra []extraRecord) error {
 	var first error
-	var seen [extraRecordTime + 1]bool // indexed by record type
+	var seen [extraRecordRedirection + 1]bool // indexed by record type
 	for _, e := range extra {
-		if e.Type < extraRecordEncryption || e.Type > extraRecordTime {
+		// The version record (4) sits between the time and redirection
+		// records and is not parsed, so it is excluded by name rather than by
+		// the range: a repeat of it is not tracked either.
+		if e.Type < extraRecordEncryption || e.Type > extraRecordRedirection ||
+			e.Type == extraRecordVersion {
 			continue // not a record this function parses; repeats are not tracked either
 		}
 		if seen[e.Type] {
@@ -540,6 +646,8 @@ func parseExtraRecords(fh *FileHeader, extra []extraRecord) error {
 			err = parseHashRecord(fh, e.Data)
 		case extraRecordTime:
 			err = parseTimeRecord(fh, e.Data)
+		case extraRecordRedirection:
+			err = parseRedirectionRecord(fh, e.Data)
 		}
 		if err != nil && first == nil {
 			first = err
@@ -562,7 +670,11 @@ func parseExtraRecords(fh *FileHeader, extra []extraRecord) error {
 //   - ErrCorruptFileHeader, from a negative decoded UnpackedSize
 //   - a failure inside parseExtraRecords, the lowest-priority of the three
 //
-// All three headers are equally complete: parseExtraRecords runs before
+// A fourth, a link whose header contradicts itself (it declares payload, or a
+// further part), returns its header the same way and ranks after the extra
+// records, since it can only be judged once they have said it is a link.
+//
+// All of these headers are equally complete: parseExtraRecords runs before
 // either size check reports, so a header returned alongside ANY of these
 // errors carries Name and Encrypted, and every other field is either decoded
 // correctly or, for a field belonging to one of the records that failed,
@@ -702,6 +814,22 @@ func parseFileHeader(h *blockHeader) (*FileHeader, error) {
 	}
 	if extraErr != nil {
 		return fh, extraErr
+	}
+	if fh.LinkType != LinkNone {
+		// A link has no data. A header that names a target AND declares
+		// payload bytes is both a link and a file, and delivering it as either
+		// would hand the other half's bytes to the wrong consumer; one that
+		// continues into a further part contradicts a member that has nothing
+		// to continue. Refused rather than reconciled, like every other header
+		// that contradicts itself.
+		if fh.PackedSize != 0 {
+			return fh, fmt.Errorf("%w: link %q declares %d bytes of payload",
+				ErrCorruptFileHeader, fh.Name, fh.PackedSize)
+		}
+		if !fh.LastBlock {
+			return fh, fmt.Errorf("%w: link %q declares a further part",
+				ErrCorruptFileHeader, fh.Name)
+		}
 	}
 
 	return fh, nil
