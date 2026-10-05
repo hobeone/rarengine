@@ -14,7 +14,7 @@ Designed specifically for high-throughput Usenet downloaders (like `gonzbd`), `r
 - **Differential Oracle Tested**: Verified byte-for-byte against the system-installed canonical `unrar` binary for standard, compressed, solid, and password-encrypted RAR5 archives.
 - **Robust Security Boundaries**:
   - **Path Sanitization**: Dynamic, OS-independent path sanitization neutralizes directory traversal exploits (strips relative upward `..` and absolute paths safely).
-  - **Rar-Bomb Protection**: Aborts decompression instantly when file expansion ratios exceed `1000x` for files larger than `1MB`.
+  - **Rar-Bomb Protection**: Aborts decompression instantly when file expansion ratios exceed `65536x` for files larger than `1MB`.
   - **Bitstream Fuzzing**: Huffman decoder fuzzed with native Go `testing.Fuzz` to prevent crashes or infinite loops on malformed payloads.
 
 ---

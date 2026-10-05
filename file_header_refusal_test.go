@@ -469,20 +469,20 @@ func TestNegativeSizeContinuationBlockSkipsSilently(t *testing.T) {
 // TestBombRatioSurvivesAnAbsurdPackedSize pins that the expansion guard
 // answers the question it was asked, for every declared packed size.
 //
-// The ratio was computed as 65536*PackedSize, which wraps negative for a
-// packed size above MaxInt64/65536. Every member over 1 MB then compared
+// The ratio is computed as bombRatio*PackedSize, which wraps negative for a
+// packed size above MaxInt64/bombRatio. Every member over 1 MB then compared
 // greater than a negative number and was refused as a bomb -- the guard
 // firing on archives it exists to let through.
 //
-// Nothing real declares 280 EB packed, which is the point: the value is
-// attacker-chosen, and a guard that can be switched into refusing
+// Nothing real declares ~140 TB packed (MaxInt64/bombRatio), which is the point:
+// the value is attacker-chosen, and a guard that can be switched into refusing
 // everything is as much a defect as one that can be switched off.
 func TestBombRatioSurvivesAnAbsurdPackedSize(t *testing.T) {
 	member := rar5Member(t, memberSpec{
 		name:       "honest.bin",
 		content:    "payload",
-		unpackedSz: new(int64(2 << 20)),                 // over the 1 MB floor the guard applies above
-		packedSz:   new(int64(math.MaxInt64/65536 + 1)), // one past where the product wraps
+		unpackedSz: new(int64(2 << 20)),                     // over the 1 MB floor the guard applies above
+		packedSz:   new(int64(math.MaxInt64/bombRatio + 1)), // one past where the product wraps
 	})
 	r := NewReader(volumesOf(rar5Archive(t, false, member)))
 

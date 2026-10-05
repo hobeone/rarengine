@@ -364,10 +364,10 @@ echo "  rar5_link_{symlink,hard,solid,hard_large}.rar"
 
 # 25. RAR5, bomb-ratio boundary: 64 MiB of zeros (ratio between 1000:1 and 65536:1)
 #
-# This archive tests the bomb-guard boundary. 64 MiB of zeros compresses to ~2 KiB
-# with -m3 (method 3), giving a ratio of ~33,554:1. This is above 1000:1 (so it
-# was refused at the old ratio) but below 65536:1 (so it is admitted at the new
-# ratio). The archive decodes and verifies without ErrRarBombDetected.
+# This archive tests the bomb-guard boundary. 64 MiB of zeros compresses to 2,779 bytes
+# with -m3 (method 3), giving a ratio of ~24,150:1. This ratio the old 1000:1 guard
+# refused and the new 65536:1 guard admits. The archive decodes and verifies without
+# ErrRarBombDetected.
 dd if=/dev/zero of="$TMPDIR/zeros_64m.bin" bs=1M count=64 2>/dev/null
 rar a -m3 -ma5 -ep rar5_zeros_bomb_ratio.rar "$TMPDIR/zeros_64m.bin"
 echo "  rar5_zeros_bomb_ratio.rar"

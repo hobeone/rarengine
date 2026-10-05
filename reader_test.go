@@ -100,15 +100,14 @@ func TestRarBombIsRefusedAsTerminalEntry(t *testing.T) {
 	}
 }
 
-// TestZerosBombRatioFixtureAdmitted verifies that a member with a ratio just
-// below the bomb guard (65536:1) decodes and verifies without ErrRarBombDetected.
-// The fixture is 64 MiB of zeros compressed to ~2.8 KiB with rar -m3, a ratio
-// of ~24,140:1, which was refused at the old 1000:1 guard but is admitted at
-// the new 65536:1 guard.
+// TestZerosBombRatioFixtureAdmitted verifies that a member with a ratio the old
+// 1000:1 guard refused is admitted at the new 65536:1 guard.
+// The fixture is 64 MiB of zeros compressed to 2,779 bytes with rar -m3 (-md3),
+// a ratio of ~24,150:1.
 func TestZerosBombRatioFixtureAdmitted(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("testdata", "rar5_zeros_bomb_ratio.rar"))
 	if err != nil {
-		t.Skipf("fixture not found: %v", err)
+		t.Fatalf("fixture not found: %v", err)
 	}
 
 	r := NewReader(volumesOf(data))
@@ -116,7 +115,7 @@ func TestZerosBombRatioFixtureAdmitted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NextEntry: %v", err)
 	}
-	// The fixture is a single uncompressed member of 64 MiB, so reading all of it
+	// The fixture is a single -m3 compressed member of 64 MiB, so reading all of it
 	// should deliver the full size without error.
 	n, err := io.Copy(io.Discard, e)
 	if err != nil {
@@ -127,6 +126,86 @@ func TestZerosBombRatioFixtureAdmitted(t *testing.T) {
 	}
 	if err := e.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
+	}
+}
+
+// TestBombRatioBoundary tests the exact boundary of the rar-bomb guard.
+// A member with packed size P and unpacked size bombRatio*P should be
+// admitted; one with unpacked size bombRatio*P+1 should be refused as
+// ErrRarBombDetected (even if the declaration is a lie). Also tests the
+// acceptance case from issue #86: 1 GiB unpacked from 1,000 bytes packed is
+// still refused.
+func TestBombRatioBoundary(t *testing.T) {
+	// Fixed sizes that test the 65536:1 boundary.
+	// These are hardcoded so the test's red/green behavior matches bombRatio changes.
+	// - (a): packed=32, unpacked=2,097,152 → ratio = 65536:1 (at boundary)
+	// - (b): packed=32, unpacked=2,097,153 → ratio = 65536.03:1 (just over)
+	// When bombRatio=100000: (b) becomes admitted (ratio < 100000:1)
+	// When bombRatio=30000: (a) becomes refused (ratio > 30000:1)
+
+	tests := []struct {
+		name        string
+		content     string
+		declaredPak int64
+		declaredUn  int64
+		wantBomb    bool
+	}{
+		{
+			name:        "at 65536:1 boundary (2097152 from 32 bytes)",
+			content:     "x",
+			declaredPak: 32,
+			declaredUn:  2097152,
+			wantBomb:    false,
+		},
+		{
+			name:        "just over 65536:1 (2097153 from 32 bytes)",
+			content:     "x",
+			declaredPak: 32,
+			declaredUn:  2097153,
+			wantBomb:    true,
+		},
+		{
+			name:        "issue #86: 1 GiB from 1000 bytes",
+			content:     "x",
+			declaredPak: 1000,
+			declaredUn:  1 << 30,
+			wantBomb:    true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			pak := tc.declaredPak
+			un := tc.declaredUn
+			member := rar5Member(t, memberSpec{
+				name:       "test.bin",
+				content:    tc.content,
+				unpackedSz: &un,
+				packedSz:   &pak,
+				withCRC:    true,
+			})
+			stream := rar5Archive(t, false, member)
+			r := NewReader(volumesOf(stream))
+
+			e, err := r.NextEntry()
+			if err != nil {
+				t.Fatalf("NextEntry: %v", err)
+			}
+
+			// For refused members, Close returns ErrRarBombDetected.
+			// For admitted members, they may fail for other reasons (truncation, CRC),
+			// but not for ErrRarBombDetected.
+			closeErr := e.Close()
+			if tc.wantBomb {
+				if !errors.Is(closeErr, ErrRarBombDetected) {
+					t.Fatalf("expected ErrRarBombDetected but got %v", closeErr)
+				}
+			} else {
+				if errors.Is(closeErr, ErrRarBombDetected) {
+					t.Fatalf("unexpectedly got ErrRarBombDetected: %v", closeErr)
+				}
+			}
+		})
 	}
 }
 

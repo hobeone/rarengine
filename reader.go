@@ -802,9 +802,9 @@ const unpackVersionRAR5 = 0
 // RAR5's longest match is 4097 bytes per symbol and a symbol costs at least one
 // bit, so about 32,800:1 is the most a block of literal LZ output can expand.
 // 65536:1 sits above that with margin and still refuses a header that declares
-// gigabytes from a few bytes. The guard's zero-packed rule (PackedSize==0 is
-// allowed for links and empty files), 1 MiB floor, and guarded multiplication
-// are unchanged.
+// gigabytes from a few bytes. The guard's predicate treats PackedSize==0 as
+// infinitely expanding (for links and large empty files above the 1 MiB floor),
+// the 1 MiB floor, and guarded multiplication are unchanged.
 const bombRatio = 65536
 
 // buildChain assembles the decode chain for a member:
