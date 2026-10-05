@@ -820,8 +820,16 @@ func parseFileHeader(h *blockHeader) (*FileHeader, error) {
 		// payload bytes is both a link and a file, and delivering it as either
 		// would hand the other half's bytes to the wrong consumer; one that
 		// continues into a further part contradicts a member that has nothing
-		// to continue. Refused rather than reconciled, like every other header
-		// that contradicts itself.
+		// to continue, and one that claims to be a continuation contradicts a
+		// member that has no earlier part: spliced into an ordinary member's
+		// next volume, it would have ended that member as ErrTruncatedFile --
+		// an accusation about the archive's content for what is a header
+		// contradicting itself. Refused rather than reconciled, like every
+		// other header that contradicts itself.
+		if !fh.FirstBlock {
+			return fh, fmt.Errorf("%w: link %q declares an earlier part",
+				ErrCorruptFileHeader, fh.Name)
+		}
 		if fh.PackedSize != 0 {
 			return fh, fmt.Errorf("%w: link %q declares %d bytes of payload",
 				ErrCorruptFileHeader, fh.Name, fh.PackedSize)

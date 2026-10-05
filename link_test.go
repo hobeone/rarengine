@@ -377,6 +377,8 @@ func TestMalformedLinksAreRefusedByName(t *testing.T) {
 			spec: memberSpec{extraRecords: []extraRecordSpec{redirection(maxLen.Bytes())}}},
 		{name: "record ends after the kind", want: ErrCorruptFileHeader,
 			spec: memberSpec{extraRecords: []extraRecordSpec{redirection(encodeVint(1))}}},
+		{name: "record ends after the flags", want: ErrCorruptFileHeader,
+			spec: memberSpec{extraRecords: []extraRecordSpec{redirection(append(encodeVint(1), encodeVint(0)...))}}},
 		{name: "empty record", want: ErrCorruptFileHeader,
 			spec: memberSpec{extraRecords: []extraRecordSpec{redirection(nil)}}},
 		{name: "kind 0", want: ErrUnsupportedFormat,
@@ -435,6 +437,7 @@ func TestLinkHeaderContradictionsAreRefusedAtParse(t *testing.T) {
 	}{
 		{"declares payload", memberSpec{content: "xxxxx", unpackedSz: new(int64(5)), extraRecords: []extraRecordSpec{rec}}},
 		{"declares a further part", memberSpec{notLast: true, unpackedSz: new(int64(5)), extraRecords: []extraRecordSpec{rec}}},
+		{"declares an earlier part", memberSpec{notFirst: true, unpackedSz: new(int64(5)), extraRecords: []extraRecordSpec{rec}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			spec := tc.spec
@@ -447,6 +450,48 @@ func TestLinkHeaderContradictionsAreRefusedAtParse(t *testing.T) {
 				t.Fatalf("header = %+v, want one to refuse the member by name", fh)
 			}
 		})
+	}
+}
+
+// Bytes after the declared target are tolerated: the length says where the
+// target ends, and the record's own framing has already bounded the rest. The
+// target is exactly the declared length, with none of the trailing bytes.
+func TestRedirectionRecordToleratesBytesAfterTheTarget(t *testing.T) {
+	body := append(redirectionBody(1, "target"), "junk"...)
+	fh, err := parseBuiltHeader(t, linkMember("l", 6, redirection(body)))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if fh.LinkType != LinkUnixSymlink || fh.LinkTarget != "target" {
+		t.Fatalf("got %v %q, want a symlink to %q", fh.LinkType, fh.LinkTarget, "target")
+	}
+}
+
+// A continuation block that carries a redirection record is a header
+// contradicting itself, not a truncated file. Spliced into an ordinary
+// member's next volume it parsed cleanly, supplied zero bytes, and ended the
+// member as ErrTruncatedFile.
+func TestLinkContinuationInAnOrdinaryMembersNextVolumeIsCorrupt(t *testing.T) {
+	v1 := rar5Archive(t, false, rar5Member(t, memberSpec{
+		name: "split.bin", content: "aaa", unpackedSz: new(int64(5)), packedSz: new(int64(3)), notLast: true,
+	}))
+	v2 := rar5Archive(t, false, rar5Member(t, memberSpec{
+		name: "split.bin", notFirst: true, hostOS: 1,
+		unpackedSz: new(int64(5)), packedSz: new(int64(0)), rawCRC: new(uint32(0)),
+		extraRecords: []extraRecordSpec{redirection(redirectionBody(1, "t"))},
+	}))
+
+	r := NewReader(volumesOf(v1, v2))
+	e, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("NextEntry: %v", err)
+	}
+	_, err = io.ReadAll(e)
+	if !errors.Is(err, ErrCorruptFileHeader) {
+		t.Fatalf("reading split.bin: %v, want ErrCorruptFileHeader", err)
+	}
+	if errors.Is(err, ErrTruncatedFile) {
+		t.Fatalf("verdict %v also matches ErrTruncatedFile", err)
 	}
 }
 
