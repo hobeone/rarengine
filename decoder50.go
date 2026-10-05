@@ -2,6 +2,7 @@ package rarengine
 
 import (
 	"errors"
+	"fmt"
 	"io"
 )
 
@@ -47,6 +48,12 @@ type decoder50 struct {
 	payloadBuf []byte     // reusable scratch buffer for compressed block payload
 	codeLength [tableSize5]byte
 	lastBlock  bool
+
+	// dictSize is the dictionary size the member's header declares, for
+	// classifying a refused match; see copyMatch. Set per member by
+	// buildChain, never consulted to refuse anything. Zero (a decoder driven
+	// directly) declares nothing, which classifies as corruption.
+	dictSize int64
 
 	mainDecoder      huffmanDecoder
 	offsetDecoder    huffmanDecoder
@@ -304,7 +311,7 @@ func (d *decoder50) decodeLength(win *window, i int) error {
 	}
 	d.length, err = slotToLength(d.br, sl)
 	if err == nil {
-		err = win.CopyBytes(d.length, d.offset[0])
+		err = d.copyMatch(win)
 	}
 	if err == nil {
 		d.decoded += int64(d.length)
@@ -365,11 +372,45 @@ func (d *decoder50) decodeOffset(win *window, i int) error {
 	d.offset[1] = d.offset[0]
 	d.offset[0] = offset
 	d.length = length
-	if err := win.CopyBytes(d.length, d.offset[0]); err != nil {
+	if err := d.copyMatch(win); err != nil {
 		return err
 	}
 	d.decoded += int64(d.length)
 	return nil
+}
+
+// copyMatch performs the match the decoder's current length and offset[0]
+// describe, and classifies a refusal.
+//
+// window.CopyBytes decides WHETHER the copy happens and is not touched by the
+// classification: this only chooses which error a refusal is reported as. A
+// refused copy moves nothing, so the window's state afterwards is the state
+// the refusal was decided on, and the classification reads it from there.
+//
+// A refusal is a capacity limit, ErrDictionaryTooLarge, only when all three
+// hold:
+//
+//   - the history already spans the whole window. A stream cannot legitimately
+//     reference bytes its file has not produced, whatever dictionary the
+//     header declares, so a short history is corruption.
+//   - the distance exceeds the window. With full history that is exactly what
+//     CopyBytes refused it for.
+//   - the header declared a dictionary larger than the window. One that
+//     fits was exceeded by the stream itself, which is corruption.
+//
+// Anything else keeps ErrWindowOffsetBounds alone. The capacity case wraps
+// both, so errors.Is(err, ErrWindowOffsetBounds) stays true for everything
+// that matched it before.
+func (d *decoder50) copyMatch(win *window) error {
+	err := win.CopyBytes(d.length, d.offset[0])
+	if err == nil {
+		return nil
+	}
+	if win.historyLen() == win.size && d.offset[0] > win.size && d.dictSize > int64(win.size) {
+		return fmt.Errorf("%w: stream references %d bytes back but the window holds %d and the header declares a %d-byte dictionary: %w",
+			ErrDictionaryTooLarge, d.offset[0], win.size, d.dictSize, err)
+	}
+	return err
 }
 
 // decodeSymbol maps a decoded symbol to its sliding window or filter action.
@@ -384,7 +425,7 @@ func (d *decoder50) decodeSymbol(win *window, sym int) error {
 	case sym >= 258:
 		return d.decodeLength(win, sym-258)
 	case sym == 257:
-		if err := win.CopyBytes(d.length, d.offset[0]); err != nil {
+		if err := d.copyMatch(win); err != nil {
 			return err
 		}
 		d.decoded += int64(d.length)

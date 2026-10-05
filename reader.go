@@ -162,6 +162,13 @@ type Reader struct {
 }
 
 // NewReader constructs a Reader over volumes, allocating the 32 MB window.
+//
+// The window is fixed, so a member whose compressed stream references history
+// further back than 32 MiB cannot be decoded: it is delivered up to the point
+// the stream first needs more and then fails with ErrDictionaryTooLarge. Only
+// an archive made with a dictionary above 32 MiB (rar -md64m and up) can
+// do that. The declared dictionary size alone never refuses a member, because
+// it is the encoder's maximum rather than what the stream used.
 func NewReader(volumes <-chan io.ReadCloser) *Reader {
 	return &Reader{
 		done:    make(chan struct{}),
@@ -804,6 +811,7 @@ func (r *Reader) buildChain(fh *FileHeader, src io.Reader) (io.Reader, error) {
 		return &storeReader{r: src, win: r.win}, nil
 	}
 	r.dec50.init(src, fh.FirstBlock)
+	r.dec50.dictSize = fh.DictSize
 	return &lz50Reader{dec: r.dec50, win: r.win}, nil
 }
 
