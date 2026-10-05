@@ -148,9 +148,12 @@ var (
 	// ErrDictionaryTooLarge is returned when a member's compressed stream
 	// references history further back than this library's fixed 32 MiB window
 	// and the member's header declares a dictionary larger than that window.
-	// It is a capacity limit of the library, not damage in the archive: the
-	// archive may be perfectly valid (unrar extracts it), and the same bytes
-	// would decode with a larger window.
+	// It most likely means a capacity limit of the library rather than
+	// damage: a valid archive (unrar extracts it) would decode with a larger
+	// window. It cannot be proven, though. A corrupt stream in an archive
+	// that declares a large dictionary, once 32 MiB of history exists,
+	// produces the same error, because a header cannot say what distances
+	// the stream legitimately used.
 	//
 	// It is deliberately narrow. A refusal is reported this way only when the
 	// member's history already spans the whole window, the requested distance
