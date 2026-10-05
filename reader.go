@@ -828,7 +828,14 @@ func (r *Reader) buildChain(fh *FileHeader, src io.Reader) (io.Reader, error) {
 		src = decSrc
 	}
 	if fh.Method == 0 {
-		return &storeReader{r: src, win: r.win}, nil
+		// In a non-solid archive, a stored member cannot be referenced by a
+		// successor, so recordHistory would touch the window with no benefit.
+		// Pass nil to skip it entirely.
+		var win *window
+		if r.solid {
+			win = r.win
+		}
+		return &storeReader{r: src, win: win}, nil
 	}
 	r.dec50.init(src, fh.FirstBlock)
 	r.dec50.dictSize = fh.DictSize
@@ -850,7 +857,9 @@ type storeReader struct {
 }
 
 // Read delivers the stored member's bytes from the source and records them as
-// window history, so a solid successor can back-reference them.
+// window history when the member can be referenced by a successor (in a solid
+// archive). In a non-solid archive the window is nil and recordHistory is skipped,
+// so the window is never dirtied by stored members.
 //
 // recordHistory rather than writeBytes: these bytes are not staged for anyone
 // to read back -- they went to the caller from s.r -- and writeBytes would
@@ -859,7 +868,7 @@ type storeReader struct {
 // and Available describing a buffer that no longer existed.
 func (s *storeReader) Read(p []byte) (int, error) {
 	n, err := s.r.Read(p)
-	if n > 0 {
+	if n > 0 && s.win != nil {
 		s.win.recordHistory(p[:n])
 	}
 	return n, err
