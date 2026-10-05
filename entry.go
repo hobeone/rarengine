@@ -1,6 +1,7 @@
 package rarengine
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"hash/crc32"
@@ -77,14 +78,69 @@ type Entry struct {
 }
 
 func newEntry(fh *FileHeader, src io.Reader, cancelled <-chan struct{}) *Entry {
-	return &Entry{
+	e := &Entry{
 		Header:    fh,
 		cur:       fh,
-		src:       src,
 		size:      fh.UnpackedSize,
 		remaining: fh.UnpackedSize,
 		cancelled: cancelled,
 	}
+	if src != nil {
+		e.setSource(src)
+	}
+	return e
+}
+
+// hashedSource is a member's byte source with BLAKE2sp computed over what
+// passes through it. It is installed ONLY for a member whose FIRST header
+// records a BLAKE2 digest, so a member that records none has no hasher, no
+// wrapper and no extra indirection: the CRC32-only path is untouched.
+//
+// It is a wrapper around the source, not a field of Entry, for a measured
+// reason: a pointer field took Entry from 80 bytes to 88, which is past the
+// 80-byte allocator size class, and every NextEntry on every archive -- hashed
+// or not -- paid +16 B/op (Store 1144 -> 1160, Compress 1824 -> 1856). Here
+// only the members that need a hasher pay for one.
+//
+// Deciding from the first header is right, and that was measured rather than
+// assumed (rar 7.12, -m0 and -m3 archives split across 3 to 6 volumes, every
+// part parsed with parseFileHeader). Under -htb EVERY part carries a BLAKE2
+// record and none carries a CRC32; under the default every part carries a
+// CRC32 and none a BLAKE2 record. What differs between parts is what the
+// record covers: on a non-final part it is the PACKED bytes of that part
+// (unrar lists it as "Pack-BLAKE2"), and only the final part's record is the
+// whole-file hash of the plaintext. So the first part names the algorithm even
+// though it does not carry the digest that matters, and verifyChecksum
+// compares the digest in e.cur, the last part's, at the end.
+//
+// Not installed for an encrypted member: -htb over encryption records a
+// key-derived MAC on the final part (UseMac, which a non-final part does not
+// yet show), so a plaintext hash would be computed and never compared. That
+// is pure waste on a path -- encrypted multi-volume -htb -- that is not rare.
+type hashedSource struct {
+	src io.Reader
+	h   blake2sp
+}
+
+func (s *hashedSource) Read(p []byte) (int, error) {
+	n, err := s.src.Read(p)
+	if n > 0 {
+		_, _ = s.h.Write(p[:n])
+	}
+	return n, err
+}
+
+// setSource installs the member's byte source, wrapping it in a hasher when
+// the first header calls for one. The one place e.src is assigned, so the
+// decision cannot be made differently on two paths.
+func (e *Entry) setSource(src io.Reader) {
+	fh := e.Header
+	if fh.HasBlake2sp && !fh.Encrypted && !fh.UseMac {
+		hs := &hashedSource{src: src}
+		hs.h.init()
+		src = hs
+	}
+	e.src = src
 }
 
 // terminalEntry builds a member that is already finished, carrying cause.
@@ -329,12 +385,11 @@ func (e *Entry) verifyChecksum() error {
 	if e.size == 0 {
 		return nil
 	}
-	// The member produced bytes and there is nothing to compare them against.
+	// The member produced bytes. Whether anything can be compared against them
+	// is decided in one place, so the ordering above cannot drift apart from it.
+	// Three archive classes cannot be compared, and they are one verdict:
 	//
-	// Three archive classes reach here and they are deliberately one verdict,
-	// tested in one place so the ordering above cannot drift back apart:
-	//
-	//   - UseMac: the digest field holds a key-derived MAC rather than a CRC32
+	//   - UseMac: the digest field holds a key-derived MAC rather than a hash
 	//     of the plaintext. The gate is UseMac and not Encrypted -- encryption
 	//     alone does not make a digest uncheckable, and RAR says which it is by
 	//     setting this flag; gating on Encrypted would hand the archive a bit
@@ -344,25 +399,36 @@ func (e *Entry) verifyChecksum() error {
 	//     the first part's cleared copy and compared a plaintext CRC32 against
 	//     a MAC -- a guaranteed false mismatch on every encrypted multi-volume
 	//     file.
-	//   - A BLAKE2sp-only header, written by rar -htb, which records no CRC32.
+	//   - A BLAKE2sp digest recorded by the header in force that this entry
+	//     never computed: no hasher was started because the FIRST header
+	//     recorded none, or the member is encrypted. Unreachable from any
+	//     archive rar writes (see hashedSource), and refused rather than passed
+	//     because a header that disagrees with itself must not be able to
+	//     choose "nothing to check".
 	//   - A header recording no digest at all.
 	//
-	// The last two returned nil here, so they delivered their bytes and
-	// completed as though verified -- indistinguishable, to a caller, from a
-	// digest that matched. Which digest is uncheckable is a distinction for
-	// the message, not for the verdict: a caller can only accept unverifiable
-	// content or reject it, and that decision is the same for all three.
-	//
-	// Implementing BLAKE2sp would move that class from unverifiable to
-	// verified and is the better answer; nothing here depends on it, and until
-	// then the class is at least observable.
-	if e.cur.UseMac || !e.cur.HasCRC32 {
+	// Which one is a distinction for the message, not for the verdict: a
+	// caller can only accept unverifiable content or reject it.
+	hs, hashed := e.src.(*hashedSource)
+	if e.cur.UseMac || (e.cur.HasBlake2sp && !hashed) ||
+		(!e.cur.HasCRC32 && !e.cur.HasBlake2sp) {
 		return fmt.Errorf("%w: file %q: %s", ErrChecksumUnsupported,
 			e.Header.Name, uncheckableDigest(e.cur))
 	}
-	if e.crc != e.cur.CRC32 {
-		return fmt.Errorf("%w: file %q: computed=%08x header=%08x",
+	// Every digest the header in force records is compared, and every one
+	// must match: a header carrying both is not allowed to have one of them
+	// ignored, because an archive that could pick which check runs could
+	// pick none that fails. The CRC32 is compared first only because it is
+	// cheaper; BLAKE2sp's digest is not computed until it is needed.
+	if e.cur.HasCRC32 && e.crc != e.cur.CRC32 {
+		return fmt.Errorf("%w: file %q: CRC32 computed=%08x header=%08x",
 			ErrCRCMismatch, e.Header.Name, e.crc, e.cur.CRC32)
+	}
+	if e.cur.HasBlake2sp {
+		if got := hs.h.sum(); !bytes.Equal(got[:], e.cur.Blake2sp) {
+			return fmt.Errorf("%w: file %q: BLAKE2sp computed=%x header=%x",
+				ErrCRCMismatch, e.Header.Name, got[:], e.cur.Blake2sp)
+		}
 	}
 	return nil
 }
@@ -378,11 +444,13 @@ func (e *Entry) truncated() error {
 		ErrTruncatedFile, e.Header.Name, e.size-e.remaining, e.size)
 }
 
-// uncheckableDigest describes what the member recorded in place of a
-// comparable CRC32, for the error message only. The verdict does not depend on
-// it -- all of these mean the same thing to a caller -- but "records only a
-// BLAKE2sp digest" tells someone reading a log that their archive was written
-// with -htb, which "could not be verified" alone does not.
+// uncheckableDigest describes why nothing could be compared, for the error
+// message only. The verdict does not depend on it -- all of these mean the
+// same thing to a caller.
+//
+// A BLAKE2sp-only header is NOT among the reasons any more: this library
+// computes BLAKE2sp, so that class is verified. The BLAKE2sp arm below is the
+// residue where a digest is recorded but was never computed.
 //
 // UseMac is composed with the digest kind rather than short-circuiting it.
 // The flag says the recorded value is a key-derived MAC; it does not say WHICH
@@ -400,7 +468,10 @@ func uncheckableDigest(fh *FileHeader) string {
 	case fh.UseMac:
 		return "records a key-derived MAC"
 	case fh.HasBlake2sp:
-		return "records only a BLAKE2sp digest, which this library cannot compute"
+		// Reached only when no hasher ran, so this is not "cannot compute":
+		// the digest is computable and this member was simply never hashed.
+		return "records a BLAKE2sp digest that was not computed for this " +
+			"member (its first header recorded none, or it is encrypted)"
 	default:
 		return "records no checksum"
 	}

@@ -42,19 +42,12 @@ func assertUnverifiable(t *testing.T, e *Entry, wantContent, wantReason string) 
 	}
 }
 
-// TestBlake2spOnlyMemberReportsUnverifiable is the fixture-backed half of the
-// silent path: a real archive written with `rar -htb` carries a BLAKE2sp
-// digest and no CRC32 at all.
-//
-// Before this, verifyChecksum's `!HasCRC32` arm returned nil, so the member
-// delivered its bytes and Close reported success with nothing having been
-// compared against anything. A caller could not tell that apart from a
-// member whose CRC32 matched -- which is the one thing the checksum machinery
-// exists to make distinguishable.
-//
-// Mutation check: restore `if e.size == 0 || !e.cur.HasCRC32 { return nil }`
-// and this fails with a nil verdict.
-func TestBlake2spOnlyMemberReportsUnverifiable(t *testing.T) {
+// A real `rar -htb` archive carries a BLAKE2sp digest and no CRC32 at all. It
+// used to be the unverifiable class (issue #31 made it observable, #78 is why
+// it is gone): the member now reads cleanly because its digest is computed and
+// compared. The fixture is asserted to still have that shape, so a regenerated
+// archive that quietly grew a CRC32 cannot make this pass by a different road.
+func TestBlake2spOnlyMemberIsVerified(t *testing.T) {
 	r := readerFor(fixtureBytes(t, "rar5_blake2.rar"))
 	e, err := r.NextEntry()
 	if err != nil {
@@ -64,7 +57,13 @@ func TestBlake2spOnlyMemberReportsUnverifiable(t *testing.T) {
 		t.Fatalf("fixture %q has HasCRC32=%v HasBlake2sp=%v; it no longer "+
 			"exercises this path", e.Header.Name, e.Header.HasCRC32, e.Header.HasBlake2sp)
 	}
-	assertUnverifiable(t, e, "hello rardecode", "records only a BLAKE2sp digest")
+	got, readErr := io.ReadAll(e)
+	if readErr != nil || string(got) != "hello rardecode" {
+		t.Fatalf("ReadAll = %q, %v; want the content and no error", got, readErr)
+	}
+	if err := e.Close(); err != nil {
+		t.Fatalf("Close = %v, want nil", err)
+	}
 }
 
 // A member carrying no digest of any kind is the same verdict. Nothing was
@@ -98,7 +97,6 @@ func TestUncheckableDigestNamesWhatTheHeaderActuallyRecords(t *testing.T) {
 		password   string
 		wantReason string
 	}{
-		{"rar5_blake2.rar", "", "records only a BLAKE2sp digest"},
 		{"rar5_encrypted.rar", "test", "records a key-derived MAC in place of a CRC32"},
 		{"rar5_blake2_encrypted.rar", "test", "records a key-derived MAC over a BLAKE2sp digest"},
 	} {

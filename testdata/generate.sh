@@ -268,6 +268,46 @@ open('$TMPDIR/after.txt','w').write(' '.join(random.choice(w) for _ in range(200
 rar a -m3 -ma5 -ep rar5_abandon_large.rar "$TMPDIR/huge.bin" "$TMPDIR/after.txt"
 echo "  -> rar5_abandon_large.rar"
 
+# 23. RAR5, BLAKE2sp (-htb) members large enough to mean something.
+#
+# rar5_blake2.rar above is 15 bytes: less than one BLAKE2s block, so it never
+# reaches a second lane. These cross every lane many times over and hit a
+# partial final block.
+#
+# 23a. Single volume, compressed, 1,200,037 bytes (over 1 MiB, not a multiple
+# of 64). The content is a 3000-byte noise block repeated, which keeps the
+# archive a few KB while the expansion ratio (~400) stays under the rar-bomb
+# guard that refuses 1000x on members over 1 MB.
+#
+# 23b. Multi-volume, stored. 23c. Multi-volume, compressed. Measured with rar
+# 7.12 on archives of 3 to 6 volumes in both methods: under -htb EVERY part
+# records a BLAKE2 digest and NONE records a CRC32 (under -htc it is the
+# reverse). On a non-final part that digest covers the part's PACKED bytes
+# ("Pack-BLAKE2" in `unrar lt`); only the final part's is the whole-file hash.
+# That is what lets the first header decide whether to hash at all, and
+# TestBlake2spMultiVolumeFirstHeaderDecides pins it against these fixtures.
+#
+# Keep the volume sizes small enough to produce at least three parts.
+python3 - "$TMPDIR" <<'PY'
+import random, sys
+d = sys.argv[1]
+random.seed(78)
+blk = bytes(random.getrandbits(8) for _ in range(3000))
+open(d + '/b2_large.bin', 'wb').write((blk * 401)[:1200037])
+random.seed(79)
+open(d + '/b2_store.bin', 'wb').write(bytes(random.getrandbits(8) for _ in range(6001)))
+random.seed(80)
+w = [''.join(random.choice('abcdefghijklmnopqrstuvwxyz') for _ in range(random.randint(3, 9))) for _ in range(900)]
+open(d + '/b2_comp.bin', 'w').write(' '.join(random.choice(w) for _ in range(3500)))
+PY
+rm -f rar5_blake2_large.rar rar5_blake2_store_multi.part*.rar rar5_blake2_comp_multi.part*.rar
+rar a -m3 -ma5 -htb -ep -inul rar5_blake2_large.rar "$TMPDIR/b2_large.bin"
+echo "  rar5_blake2_large.rar"
+rar a -m0 -ma5 -htb -v2k -ep -inul rar5_blake2_store_multi.rar "$TMPDIR/b2_store.bin"
+echo "  rar5_blake2_store_multi.part*.rar"
+rar a -m3 -ma5 -htb -v3k -ep -inul rar5_blake2_comp_multi.rar "$TMPDIR/b2_comp.bin"
+echo "  rar5_blake2_comp_multi.part*.rar"
+
 echo ""
 echo "=== Done. $(ls -1 *.rar | wc -l) archives generated. ==="
 ls -lhS *.rar
