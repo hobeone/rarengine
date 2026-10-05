@@ -317,6 +317,51 @@ echo "  rar5_blake2_store_multi.part*.rar"
 rar a -m3 -ma5 -htb -v3k -ep -inul rar5_blake2_comp_multi.rar "$TMPDIR/b2_comp.bin"
 echo "  rar5_blake2_comp_multi.part*.rar"
 
+# 24. RAR5 link members: a symlink, a hard link, a link in the MIDDLE of a solid
+# archive, and a hard link whose target is over 1 MiB.
+#
+# A link is a file header carrying a redirection extra record (type 5) and no
+# payload: Packed size is 0 and the CRC32 field is present but zero. The
+# declared size is NOT a content size -- for a symlink it is the length of the
+# target string, for a hard link it is the size of the file it points at.
+#
+# Everything runs inside $LINKDIR with -ep so the member names (and the link
+# targets, which rar records as given) are bare file names.
+LINKDIR="$TMPDIR/links"
+mkdir -p "$LINKDIR"
+OUTDIR="$(pwd)"
+rm -f rar5_link_symlink.rar rar5_link_hard.rar rar5_link_solid.rar rar5_link_hard_large.rar
+(
+  cd "$LINKDIR"
+  printf 'real text' > real.txt
+  ln -s real.txt link.txt
+  printf 'orig content' > orig.txt
+  ln orig.txt hard.txt
+  rar a -ol -ma5 -m0 -ep -inul "$OUTDIR/rar5_link_symlink.rar" real.txt link.txt
+  rar a -oh -ma5 -m0 -ep -inul "$OUTDIR/rar5_link_hard.rar" orig.txt hard.txt
+
+  # Solid, with the link in the middle. -ds stops rar sorting its input, so the
+  # link really is the second of three members -- without it rar stores links
+  # last and nothing follows one, which proves nothing about the window. The
+  # third member is short enough that rar encodes it almost entirely as a
+  # back-reference into the first, so it only decodes if the link left the
+  # window history alone.
+  printf 'AAAA first member text, compressible compressible compressible' > a.txt
+  printf 'BBBB third member text, compressible compressible compressible a.txt' > c.txt
+  ln -s a.txt mid.lnk
+  rar a -s -ds -ol -ma5 -m3 -ep -inul "$OUTDIR/rar5_link_solid.rar" a.txt mid.lnk c.txt
+
+  # A hard link declaring 1100000 bytes -- over the 1 MiB rar-bomb threshold --
+  # with a packed size of zero. The target is added so rar records the link,
+  # then deleted so the fixture stays under 100 bytes; the link member's header
+  # is unaffected.
+  head -c 1100000 /dev/zero > z.bin
+  ln z.bin zhard.bin
+  rar a -oh -ma5 -m5 -ep -inul "$OUTDIR/rar5_link_hard_large.rar" z.bin zhard.bin
+  rar d -inul "$OUTDIR/rar5_link_hard_large.rar" z.bin
+)
+echo "  rar5_link_{symlink,hard,solid,hard_large}.rar"
+
 echo ""
 echo "=== Done. $(ls -1 *.rar | wc -l) archives generated. ==="
 ls -lhS *.rar

@@ -422,3 +422,107 @@ func TestIntegration_Oracle(t *testing.T) {
 		})
 	}
 }
+
+// TestIntegration_OracleLinks checks the link kind and target this library
+// reports against what real unrar creates from the same archive: a symlink
+// whose Readlink is the target, and a hard link that is the very same file as
+// its target. Ordinary members are compared by content as in
+// TestIntegration_Oracle.
+func TestIntegration_OracleLinks(t *testing.T) {
+	unrarPath, err := exec.LookPath("unrar")
+	if err != nil {
+		t.Skip("unrar binary not found on path, skipping oracle test")
+	}
+
+	for _, name := range []string{
+		"rar5_link_symlink.rar", "rar5_link_hard.rar", "rar5_link_solid.rar",
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			var stderr bytes.Buffer
+			cmd := exec.Command(unrarPath, "x", "-y", "-p-", filepath.Join("testdata", name), dir+string(filepath.Separator))
+			cmd.Stderr = &stderr
+			if err := cmd.Run(); err != nil {
+				t.Fatalf("unrar failed: %v, stderr: %s", err, stderr.String())
+			}
+
+			f, err := os.Open(filepath.Join("testdata", name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = f.Close() })
+			volumes := make(chan io.ReadCloser, 1)
+			volumes <- f
+			close(volumes)
+			r := rarengine.NewReader(volumes)
+
+			links := 0
+			for {
+				e, err := r.NextEntry()
+				if errors.Is(err, io.EOF) {
+					break
+				}
+				if err != nil {
+					t.Fatalf("NextEntry: %v", err)
+				}
+				fh := e.Header
+				onDisk := filepath.Join(dir, fh.Name)
+				// A link has nothing to read, and says so rather than ending
+				// as though it were an empty file.
+				var data []byte
+				if fh.LinkType == rarengine.LinkNone {
+					data, err = io.ReadAll(e)
+					if err != nil {
+						t.Fatalf("read %s: %v", fh.Name, err)
+					}
+				} else if _, rerr := e.Read(make([]byte, 8)); !errors.Is(rerr, rarengine.ErrLinkEntry) {
+					t.Fatalf("Read of link %s = %v, want ErrLinkEntry", fh.Name, rerr)
+				}
+				if cerr := e.Close(); cerr != nil {
+					t.Fatalf("Close %s: %v", fh.Name, cerr)
+				}
+
+				switch fh.LinkType {
+				case rarengine.LinkNone:
+					want, err := os.ReadFile(onDisk)
+					if err != nil {
+						t.Fatalf("read oracle %s: %v", fh.Name, err)
+					}
+					if !bytes.Equal(data, want) {
+						t.Errorf("%s: content %q, unrar wrote %q", fh.Name, data, want)
+					}
+
+				case rarengine.LinkUnixSymlink:
+					links++
+					target, err := os.Readlink(onDisk)
+					if err != nil {
+						t.Fatalf("unrar did not create a symlink for %s: %v", fh.Name, err)
+					}
+					if target != fh.LinkTarget {
+						t.Errorf("%s: LinkTarget %q, unrar's symlink points at %q", fh.Name, fh.LinkTarget, target)
+					}
+
+				case rarengine.LinkHardLink:
+					links++
+					a, err := os.Lstat(onDisk)
+					if err != nil {
+						t.Fatalf("unrar did not create %s: %v", fh.Name, err)
+					}
+					b, err := os.Lstat(filepath.Join(dir, fh.LinkTarget))
+					if err != nil {
+						t.Fatalf("LinkTarget %q is not a file unrar created: %v", fh.LinkTarget, err)
+					}
+					if !os.SameFile(a, b) {
+						t.Errorf("%s and its LinkTarget %q are different files on disk", fh.Name, fh.LinkTarget)
+					}
+
+				default:
+					t.Fatalf("%s: unexpected link kind %v", fh.Name, fh.LinkType)
+				}
+			}
+			if links != 1 {
+				t.Errorf("saw %d link members, want exactly one", links)
+			}
+		})
+	}
+}

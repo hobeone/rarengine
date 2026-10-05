@@ -579,6 +579,26 @@ func (r *Reader) dispatch(h *blockHeader) (*Entry, error) {
 				"version %d (RAR 5.0)", ErrUnsupportedFormat, fh.Name,
 			fh.UnpackVersion, unpackVersionRAR5), done), nil
 	}
+	// A link is admitted here, AHEAD of the bomb ratio and of BeginFile, and
+	// each of those is a reason, not an accident of ordering.
+	//
+	// It has no payload (parseFileHeader refused any link declaring one), so
+	// it cannot be a bomb: its UnpackedSize is the length of a target string
+	// or the size of the file a hard link points at, neither of which this
+	// member will ever produce. Below the guard, a hard link to a 2 MiB file
+	// was refused as ErrRarBombDetected -- PackedSize 0 expands without limit
+	// -- and never reached the truncation error it would otherwise have had.
+	// The guard's predicate and constants are unchanged; only which members
+	// reach it is.
+	//
+	// And it never decodes, so it must not touch the window at all. BeginFile
+	// on a header whose own Solid flag is false would reset the history that
+	// the members after it, in a solid archive, depend on; MarkIncomplete
+	// would refuse every solid successor for damage that did not happen.
+	// r.entry is not set either: there is no chain to abandon or sever.
+	if fh.LinkType != LinkNone {
+		return linkEntry(fh, done), nil
+	}
 	// The multiplication is guarded, not replaced by a division: a
 	// division floors, so it would let a member declaring exactly one
 	// byte past the ratio through, and this guard must not be weakened.

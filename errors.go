@@ -180,6 +180,20 @@ var (
 	// failure before it serves what that step had already produced.
 	ErrDictionaryTooLarge = errors.New("rarengine: stream needs a larger dictionary window than this library provides")
 
+	// ErrLinkEntry is returned by Entry.Read for a link member
+	// (Header.LinkType != LinkNone): a symlink, hard link or file copy has no
+	// content to read, and its declared UnpackedSize is not one. It is an error
+	// rather than an immediate io.EOF so that a consumer that copies every
+	// entry to disk without looking at LinkType fails, instead of writing an
+	// empty file in place of what the archive meant. It does not satisfy
+	// io.EOF.
+	//
+	// A consumer that checks LinkType, handles the link itself and never calls
+	// Read gets a nil error from Close. The error is not recorded as the
+	// member's verdict: reading a link does not make Close fail. Once Close
+	// has run, Read reports the member's recorded verdict, as for any member.
+	ErrLinkEntry = errors.New("rarengine: member is a link and has no content to read; check Header.LinkType")
+
 	// ErrSolidStreamBroken is returned when a solid file cannot be decoded
 	// because an earlier file in the same solid run was damaged.
 	//

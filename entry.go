@@ -153,6 +153,25 @@ func terminalEntry(fh *FileHeader, cause error, cancelled <-chan struct{}) *Entr
 	return &Entry{Header: fh, cur: fh, done: cause, cancelled: cancelled}
 }
 
+// linkEntry builds the member for a link: a header, and nothing to read.
+//
+// Header.UnpackedSize stays as the archive declared it -- the header is
+// faithful -- but the entry's own byte budget is zero, because the declared
+// size of a link is not a content size (a symlink declares its target's
+// length, a hard link its target's). Close therefore reaches the same
+// zero-length completion a directory or an empty file does: finish(nil),
+// where verifyChecksum's e.size == 0 gate finds nothing to compare.
+//
+// Read does NOT take that completion. It reports ErrLinkEntry at its entrance,
+// so a consumer that copies every entry without looking at LinkType fails
+// where it would otherwise write an empty file and report success. src stays
+// nil because there is nothing to read, and the entrance arm is above the
+// ErrNoActiveFile check, which would otherwise describe a link as "no active
+// file".
+func linkEntry(fh *FileHeader, cancelled <-chan struct{}) *Entry {
+	return &Entry{Header: fh, cur: fh, cancelled: cancelled}
+}
+
 // advanceVolume replaces the header in force when the member continues into
 // the next volume. It is a named transition rather than a bare field write so
 // that the one place allowed to swap the header mid-member stays visible.
@@ -167,6 +186,15 @@ func (e *Entry) short() bool { return e.remaining > 0 }
 
 // Read produces the member's decompressed bytes, and is the only path that
 // advances the byte budget or the running checksum.
+//
+// A link member (Header.LinkType != LinkNone) has no content: Read returns
+// ErrLinkEntry, every time until Close, and does not record it as the
+// member's verdict, so Close still reports nil. A caller that copies every
+// entry without looking at LinkType therefore fails rather than writing an
+// empty file; a caller that checks LinkType, creates the link (or declines to)
+// and never reads gets a clean Close. After Close, Read reports the recorded
+// verdict like it does for every member. Header.UnpackedSize is not a content
+// size for a link.
 func (e *Entry) Read(p []byte) (int, error) {
 	// A terminated member yields no further bytes. io.Reader does not forbid a
 	// reader from producing data after reporting a failure, and the decoders
@@ -175,6 +203,12 @@ func (e *Entry) Read(p []byte) (int, error) {
 	// caller was already told had failed.
 	if e.done != nil {
 		return 0, e.done
+	}
+	// A link has nothing to read. Above the nil-src check on purpose: a link's
+	// src is nil, and ErrNoActiveFile would say something different. cur is
+	// nil only on a zero-value Entry, which has no header at all.
+	if e.cur != nil && e.cur.LinkType != LinkNone {
+		return 0, ErrLinkEntry
 	}
 	if e.src == nil {
 		return 0, ErrNoActiveFile
