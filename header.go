@@ -67,6 +67,16 @@ const (
 
 	fileCompSolid = 0x00000040
 
+	// fileCompDictShift and fileCompDictMask locate the dictionary-size
+	// exponent in the compression-information vint of an unpack-version-0
+	// header: bits 10..13, a 4-bit exponent e meaning 128 KiB << e, so the
+	// largest size the format can express is 128 KiB << 15 = 4 GiB. Bit 14 is
+	// not part of the field in version 0 (RAR 7.0 widened it, which is the
+	// version bump). dictBaseSize is the e = 0 size.
+	fileCompDictShift = 10
+	fileCompDictMask  = 0x0f
+	dictBaseSize      = 128 << 10
+
 	// File Encryption Extra Flags
 	fileEncCheckPresent = 0x0001
 	fileEncUseMac       = 0x0002
@@ -117,6 +127,18 @@ type FileHeader struct {
 	// same vint encoding -- so this field is the only place the difference is
 	// visible. Reader.dispatch refuses anything else; see unpackVersionRAR5.
 	UnpackVersion int
+
+	// DictSize is the dictionary size, in bytes, this member's header
+	// DECLARES: 128 KiB << e for the 4-bit exponent e in the
+	// compression-information vint. It is what the encoder was permitted to
+	// use, not what the stream did use, so a member is never refused for it
+	// -- a 60 MB file archived with -md64m declares 64 MB and can decode
+	// inside a 32 MiB window, when its matches never reach that far. It is read
+	// for one purpose: telling a stream that outran this library's window
+	// apart from a corrupt one (see ErrDictionaryTooLarge). Zero when the
+	// header's unpack version is not 0, where the field has a different
+	// layout this library does not interpret.
+	DictSize int64
 
 	CRC32       uint32
 	HasCRC32    bool
@@ -621,6 +643,9 @@ func parseFileHeader(h *blockHeader) (*FileHeader, error) {
 		return nil, err
 	}
 	fh.UnpackVersion = int(compFlags & fileCompVersion)
+	if fh.UnpackVersion == unpackVersionRAR5 {
+		fh.DictSize = dictBaseSize << ((compFlags >> fileCompDictShift) & fileCompDictMask)
+	}
 	fh.Solid = compFlags&fileCompSolid > 0
 	fh.Method = int((compFlags >> 7) & 7)
 	payload = payload[nComp:]

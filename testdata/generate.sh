@@ -113,6 +113,15 @@ echo "  rar7_unpack_version.rar"
 printf 'hello rardecode' | rar a -si"hello.txt" -md4g -m1 -inul rar5_dict4g.rar
 echo "  rar5_dict4g.rar"
 
+# 5c'. The declared dictionary size at several exponents, for
+# TestFileHeaderDictSizeAgainstRealArchives. Same -si trick as above, for the
+# same reason: with a known input size rar shrinks the dictionary to fit and
+# every row would read 128 KB.
+for md in 128k 1m 32m 64m 1g; do
+    printf 'hello rardecode' | rar a -si"hello.txt" -md$md -m1 -inul "rar5_dict_$md.rar"
+    echo "  rar5_dict_$md.rar"
+done
+
 # 5d. RAR5, MIXED encryption: one unencrypted member, then an encrypted one.
 # Two separate `rar a` invocations -- a single one applies one policy to every
 # file. unrar lists the second with a leading '*'. This is the archive that

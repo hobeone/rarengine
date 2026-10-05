@@ -149,6 +149,37 @@ var (
 	// NextEntry call returns it again without reading further.
 	ErrUnsupportedEncryptionVersion = errors.New("rarengine: archive declares an unsupported encryption version")
 
+	// ErrDictionaryTooLarge is returned when a member's compressed stream
+	// references history further back than this library's fixed 32 MiB window
+	// and the member's header declares a dictionary larger than that window.
+	// It most likely means a capacity limit of the library rather than
+	// damage: a valid archive (unrar extracts it) would decode with a larger
+	// window. It cannot be proven, though. A corrupt stream in an archive
+	// that declares a large dictionary, once 32 MiB of history exists,
+	// produces the same error, because a header cannot say what distances
+	// the stream legitimately used.
+	//
+	// It is deliberately narrow. A refusal is reported this way only when the
+	// member's history already spans the whole window, the requested distance
+	// exceeds the window, and the declared dictionary exceeds the window. A
+	// stream that reaches behind bytes its file has not produced, or beyond a
+	// dictionary its header declared small, is corrupt and reports
+	// ErrWindowOffsetBounds alone. The declared size is never a reason to
+	// refuse a member by itself: it is what the encoder was allowed to use,
+	// not what the stream used, so archives declaring 64 MB routinely decode.
+	//
+	// The error also satisfies errors.Is(err, ErrWindowOffsetBounds), so a
+	// caller written before this sentinel existed still matches. It does not
+	// satisfy io.EOF. The message carries the distance, the window size and
+	// the declared size, all as numbers.
+	//
+	// The member ends short, and a solid successor is refused with
+	// ErrSolidStreamBroken, exactly as for any other failed member. Bytes the
+	// caller had already read stay delivered; output decoded in the same
+	// decode step that hit the failure is not, because Read reports a decode
+	// failure before it serves what that step had already produced.
+	ErrDictionaryTooLarge = errors.New("rarengine: stream needs a larger dictionary window than this library provides")
+
 	// ErrSolidStreamBroken is returned when a solid file cannot be decoded
 	// because an earlier file in the same solid run was damaged.
 	//
