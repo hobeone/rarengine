@@ -169,9 +169,11 @@ var (
 	// satisfy io.EOF. The message carries the distance, the window size and
 	// the declared size, all as numbers.
 	//
-	// The member ends short: the bytes decoded before the stream outran the
-	// window were delivered, and a solid successor is refused with
-	// ErrSolidStreamBroken, exactly as for any other failed member.
+	// The member ends short, and a solid successor is refused with
+	// ErrSolidStreamBroken, exactly as for any other failed member. Bytes the
+	// caller had already read stay delivered; output decoded in the same
+	// decode step that hit the failure is not, because Read reports a decode
+	// failure before it serves what that step had already produced.
 	ErrDictionaryTooLarge = errors.New("rarengine: stream needs a larger dictionary window than this library provides")
 
 	// ErrSolidStreamBroken is returned when a solid file cannot be decoded

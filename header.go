@@ -132,8 +132,8 @@ type FileHeader struct {
 	// DECLARES: 128 KiB << e for the 4-bit exponent e in the
 	// compression-information vint. It is what the encoder was permitted to
 	// use, not what the stream did use, so a member is never refused for it
-	// -- a 60 MB file archived with -md64m declares 64 MB and decodes inside
-	// a 32 MiB window, because its matches never reach that far. It is read
+	// -- a 60 MB file archived with -md64m declares 64 MB and can decode
+	// inside a 32 MiB window, when its matches never reach that far. It is read
 	// for one purpose: telling a stream that outran this library's window
 	// apart from a corrupt one (see ErrDictionaryTooLarge). Zero when the
 	// header's unpack version is not 0, where the field has a different

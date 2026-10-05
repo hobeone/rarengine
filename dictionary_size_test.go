@@ -292,6 +292,68 @@ func TestDictionaryClassificationDefaultsToCorruption(t *testing.T) {
 	}
 }
 
+// A distance past even the dictionary the header declared contradicts that
+// header, so no larger window would have made the stream valid: it is
+// corruption, not a capacity limit, however large the declared dictionary is.
+// The classification must not claim the library could have decoded it.
+func TestDictionaryClassificationBoundedByDeclaredDictionary(t *testing.T) {
+	const size = 0x40000
+	w := newWindow(size)
+	w.writeBytes(make([]byte, size))
+	w.r, w.full = w.w, false
+
+	d := &decoder50{length: 1, dictSize: 2 * size}
+	for _, tc := range []struct {
+		distance     int
+		wantCapacity bool
+	}{
+		{size + 1, true},
+		{2 * size, true}, // exactly the declared dictionary still fits it
+		{2*size + 1, false},
+		{4 * size, false},
+	} {
+		d.offset[0] = tc.distance
+		err := d.copyMatch(w)
+		if err == nil || !errors.Is(err, ErrWindowOffsetBounds) {
+			t.Fatalf("distance %d: err = %v, want a refusal wrapping ErrWindowOffsetBounds", tc.distance, err)
+		}
+		if got := errors.Is(err, ErrDictionaryTooLarge); got != tc.wantCapacity {
+			t.Errorf("distance %d against a declared %d: ErrDictionaryTooLarge = %v, want %v (%v)",
+				tc.distance, d.dictSize, got, tc.wantCapacity, err)
+		}
+	}
+}
+
+// The only thing connecting a parsed header to the classifier is the line in
+// buildChain that hands FileHeader.DictSize to the decoder. The tests that
+// reach it through real far-reference archives need the rar binary, which CI
+// does not install, so this one reads the decoder's field after admission
+// instead. The second member's smaller value shows the field is reassigned
+// per member rather than left at the previous member's.
+func TestBuildChainHandsTheDeclaredDictionaryToTheDecoder(t *testing.T) {
+	r := NewReader(fileVolumesOf(t, filepath.Join("testdata", "rar5_dict_64m.rar")))
+	t.Cleanup(func() { _ = r.Close() })
+	e, err := r.NextEntry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.Header.Method == 0 {
+		t.Fatalf("fixture is not a compressed member, so buildChain never reaches the decoder: %+v", e.Header)
+	}
+	if got := r.dec50.dictSize; got != 64<<20 {
+		t.Fatalf("decoder dictSize after a 64 MiB member = %d, want %d", got, 64<<20)
+	}
+
+	r.Reset(fileVolumesOf(t, filepath.Join("testdata", "rar5_dict_128k.rar")))
+	if _, err := r.NextEntry(); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.dec50.dictSize; got != 128<<10 {
+		t.Fatalf("decoder dictSize after a 128 KiB member = %d, want %d (stale value from the previous member?)",
+			got, 128<<10)
+	}
+}
+
 // The window a SOLID member sees carries its predecessors' history, and the
 // classification reads that, not the bytes the current member produced.
 func TestDictionaryClassificationCountsSolidHistory(t *testing.T) {
@@ -457,7 +519,7 @@ func TestFarReferenceReportsDictionaryTooLarge(t *testing.T) {
 	if e.Header.DictSize != 1<<20 {
 		t.Fatalf("DictSize = %d, want 1 MiB", e.Header.DictSize)
 	}
-	if !e.Header.Solid && e.Header.Method == 0 {
+	if e.Header.Method == 0 {
 		t.Fatalf("fixture is not a compressed member: %+v", e.Header)
 	}
 	n, err := io.Copy(io.Discard, e)
@@ -582,6 +644,10 @@ func TestIssue79FarArchivesAtFullSize(t *testing.T) {
 	if !errors.Is(err, ErrDictionaryTooLarge) || !errors.Is(err, ErrWindowOffsetBounds) || errors.Is(err, io.EOF) {
 		t.Fatalf("far_64m verdict = %v", err)
 	}
+	// Records current behaviour, not a promise: Read reports a decode failure
+	// before serving the output that decode step had already produced, so this
+	// is less than the 40 MiB at which the first far match sits. Documented on
+	// ErrDictionaryTooLarge.
 	if n != 33554432 {
 		t.Fatalf("far_64m delivered %d bytes, want 33554432", n)
 	}

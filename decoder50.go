@@ -387,7 +387,7 @@ func (d *decoder50) decodeOffset(win *window, i int) error {
 // refused copy moves nothing, so the window's state afterwards is the state
 // the refusal was decided on, and the classification reads it from there.
 //
-// A refusal is a capacity limit, ErrDictionaryTooLarge, only when all three
+// A refusal is a capacity limit, ErrDictionaryTooLarge, only when all four
 // hold:
 //
 //   - the history already spans the whole window. A stream cannot legitimately
@@ -397,6 +397,9 @@ func (d *decoder50) decodeOffset(win *window, i int) error {
 //     CopyBytes refused it for.
 //   - the header declared a dictionary larger than the window. One that
 //     fits was exceeded by the stream itself, which is corruption.
+//   - the distance fits inside that declared dictionary. One beyond it
+//     contradicts the header the stream arrived with, so no larger window
+//     would have made it valid: that is corruption too.
 //
 // Anything else keeps ErrWindowOffsetBounds alone. The capacity case wraps
 // both, so errors.Is(err, ErrWindowOffsetBounds) stays true for everything
@@ -406,7 +409,8 @@ func (d *decoder50) copyMatch(win *window) error {
 	if err == nil {
 		return nil
 	}
-	if win.historyLen() == win.size && d.offset[0] > win.size && d.dictSize > int64(win.size) {
+	if win.historyLen() == win.size && d.offset[0] > win.size &&
+		d.dictSize > int64(win.size) && int64(d.offset[0]) <= d.dictSize {
 		return fmt.Errorf("%w: stream references %d bytes back but the window holds %d and the header declares a %d-byte dictionary: %w",
 			ErrDictionaryTooLarge, d.offset[0], win.size, d.dictSize, err)
 	}
