@@ -189,6 +189,11 @@ func (e *Entry) short() bool { return e.remaining > 0 }
 
 // Read produces the member's decompressed bytes, and is the only path that
 // advances the byte budget or the running checksum.
+//
+// A link member (Header.LinkType != LinkNone) produces none: Read returns
+// io.EOF at once and Close reports nil, whatever Header.UnpackedSize says. A
+// caller that does not look at LinkType therefore sees an empty file, not an
+// error; creating the link, or refusing to, is the caller's job.
 func (e *Entry) Read(p []byte) (int, error) {
 	// A terminated member yields no further bytes. io.Reader does not forbid a
 	// reader from producing data after reporting a failure, and the decoders
