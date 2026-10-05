@@ -197,9 +197,9 @@ func TestRefusedFile_RarBombPayloadIsDropped(t *testing.T) {
 
 	var arc bytes.Buffer
 	arc.Write(rar5ArchiveHeader())
-	// UnpackedSize is over the 1 MiB floor and more than 1000x the packed
+	// UnpackedSize is over the 1 MiB floor and more than 65536x the packed
 	// size, which is what the guard rejects.
-	arc.Write(rar5FileEntry("bomb.txt", 2_000_000, 0, evil))
+	arc.Write(rar5FileEntry("bomb.txt", 2_097_152, 0, evil))
 	arc.Write(rar5EndHeader())
 
 	r := readerFor(arc.Bytes())

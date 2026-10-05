@@ -100,6 +100,36 @@ func TestRarBombIsRefusedAsTerminalEntry(t *testing.T) {
 	}
 }
 
+// TestZerosBombRatioFixtureAdmitted verifies that a member with a ratio just
+// below the bomb guard (65536:1) decodes and verifies without ErrRarBombDetected.
+// The fixture is 64 MiB of zeros compressed to ~2.8 KiB with rar -m3, a ratio
+// of ~24,140:1, which was refused at the old 1000:1 guard but is admitted at
+// the new 65536:1 guard.
+func TestZerosBombRatioFixtureAdmitted(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("testdata", "rar5_zeros_bomb_ratio.rar"))
+	if err != nil {
+		t.Skipf("fixture not found: %v", err)
+	}
+
+	r := NewReader(volumesOf(data))
+	e, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("NextEntry: %v", err)
+	}
+	// The fixture is a single uncompressed member of 64 MiB, so reading all of it
+	// should deliver the full size without error.
+	n, err := io.Copy(io.Discard, e)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if n != 64*1024*1024 {
+		t.Fatalf("got %d bytes, want 67108864 (64 MiB)", n)
+	}
+	if err := e.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
 // A member whose file header does not parse is skipped, and the archive stays
 // readable past it. Under the old design this ended the traversal, because
 // nothing could say where the stream was.
