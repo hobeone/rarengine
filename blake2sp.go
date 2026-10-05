@@ -167,6 +167,83 @@ type blake2sp struct {
 	buf [blake2sBlockSize]byte
 	n   int
 	cur int
+	// lanes and stage are scratch for dealStrides, kept here so Write
+	// allocates nothing: the leaf states transposed so word j of leaf i is
+	// lanes[j][i], and the leaves' held-back blocks laid out as one stride.
+	lanes [8][8]uint32
+	stage [blake2spStride]byte
+}
+
+// blake2spStride is the input one trip round the leaves consumes: eight
+// 64-byte blocks, one for each leaf.
+const blake2spStride = blake2spLeaves * blake2sBlockSize
+
+// blake2sp8 compresses len(p)/blake2spStride strides of p, none of them the
+// last block of anything, into eight leaf states held transposed in h (word j
+// of leaf i is h[j][i]); leaf i takes bytes 64*i..64*i+63 of each stride. t is
+// the byte counter the first block of each leaf ends at, and advances by 64
+// per stride. Architecture files replace it with a SIMD kernel; this is the
+// reference every kernel must match.
+var blake2sp8 = blake2sp8Generic
+
+func blake2sp8Generic(h *[8][8]uint32, p []byte, t uint64) {
+	var s blake2s
+	for ; len(p) >= blake2spStride; p = p[blake2spStride:] {
+		t += blake2sBlockSize
+		for lane := range blake2spLeaves {
+			for j := range s.h {
+				s.h[j] = h[j][lane]
+			}
+			s.t = t
+			s.compress((*[blake2sBlockSize]byte)(p[blake2sBlockSize*lane:]), false)
+			for j := range s.h {
+				h[j][lane] = s.h[j]
+			}
+		}
+	}
+}
+
+// dealStrides deals every whole stride of p to the leaves, which must be
+// block-aligned (cur == 0), and returns what is left. At least one block per
+// leaf is always held back, exactly as the one-block-at-a-time path does,
+// because only sum knows which block is the last.
+//
+// Leaves are always in step when cur == 0: every one has buffered a full
+// block or none has seen input yet, so the kernel sees eight equal counters.
+func (s *blake2sp) dealStrides(p []byte) []byte {
+	k := len(p) / blake2spStride
+	if k == 0 {
+		return p
+	}
+	t := s.leaf[0].t
+	for i := range s.leaf {
+		for j, w := range s.leaf[i].h {
+			s.lanes[j][i] = w
+		}
+	}
+	if s.leaf[0].n == blake2sBlockSize {
+		// The held-back blocks now provably are not last: compress them.
+		for i := range s.leaf {
+			copy(s.stage[blake2sBlockSize*i:], s.leaf[i].buf[:])
+		}
+		blake2sp8(&s.lanes, s.stage[:], t)
+		t += blake2sBlockSize
+	}
+	if k > 1 {
+		blake2sp8(&s.lanes, p[:(k-1)*blake2spStride], t)
+		t += uint64(k-1) * blake2sBlockSize
+	}
+	last := p[(k-1)*blake2spStride:]
+	for i := range s.leaf {
+		l := &s.leaf[i]
+		for j := range l.h {
+			l.h[j] = s.lanes[j][i]
+		}
+		l.t = t
+		copy(l.buf[:], last[blake2sBlockSize*i:])
+		l.n = blake2sBlockSize
+	}
+	return p[k*blake2spStride:]
 }
 
 func (s *blake2sp) init() {
@@ -194,6 +271,10 @@ func (s *blake2sp) Write(p []byte) (int, error) {
 		s.n = 0
 	}
 	for len(p) >= blake2sBlockSize {
+		if s.cur == 0 && len(p) >= blake2spStride {
+			p = s.dealStrides(p)
+			continue
+		}
 		s.deal(p[:blake2sBlockSize])
 		p = p[blake2sBlockSize:]
 	}
