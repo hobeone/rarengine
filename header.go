@@ -150,10 +150,12 @@ type FileHeader struct {
 	LastBlock  bool // true if this is the last block/volume-part of the file
 
 	// LinkType is LinkNone for an ordinary member. Anything else means this
-	// member is a link: it carries no payload, Read returns io.EOF at once,
-	// and UnpackedSize is NOT a content size -- a symlink declares the length
-	// of its target string and a hard link the size of the file it points at.
-	// Creating the link is the caller's job; this library writes nothing.
+	// member is a link: it carries no payload, Read returns ErrLinkEntry, and
+	// UnpackedSize is NOT a content size -- a symlink declares the length of
+	// its target string and a hard link the size of the file it points at.
+	// Creating the link is the caller's job; this library writes nothing. A
+	// consumer that handles links checks LinkType first and does not Read;
+	// Close still reports nil.
 	LinkType LinkType
 
 	// Encrypted reports that the member's content is encrypted, from RAR5's
@@ -202,14 +204,23 @@ type FileHeader struct {
 	HostOS           uint64
 	Attributes       uint64
 
-	// LinkTarget is the target the archive names, exactly as stored. It is
-	// attacker-controlled and deliberately NOT sanitized the way Name is: a
-	// legitimate target such as "../lib/x" is exactly what a consumer needs
-	// to see, and rewriting it would destroy it. A consumer must validate it
-	// before creating anything -- an absolute path or a ".." that escapes the
-	// extraction root is a traversal -- and must do the same for Name. It is
-	// never empty and never contains a NUL byte when LinkType is not
-	// LinkNone. Empty for an ordinary member.
+	// LinkTarget is the target the archive names. It is never empty and never
+	// contains a NUL byte when LinkType is not LinkNone, and is empty for an
+	// ordinary member. What else is true of it depends on the kind:
+	//
+	// For LinkHardLink and LinkFileCopy the target is another member of the
+	// archive, and it is sanitized exactly as Name is, so a consumer finds the
+	// member by comparing the two strings and can resolve it without
+	// escaping the extraction root. As with Name, evidence that the archive
+	// attempted a traversal is destroyed.
+	//
+	// For the symlink and junction kinds it is exactly as stored, and
+	// attacker-controlled. It is deliberately NOT sanitized: a legitimate
+	// target such as "../lib/x" is what a consumer needs to see, and
+	// rewriting it would destroy it. A consumer must validate it before
+	// creating anything -- an absolute path, or a ".." that climbs out of the
+	// extraction root once resolved against the link's own directory, is a
+	// traversal.
 	LinkTarget string
 }
 
@@ -602,8 +613,30 @@ func parseRedirectionRecord(fh *FileHeader, b []byte) error {
 		return fmt.Errorf("%w: redirection target contains a NUL byte", ErrCorruptFileHeader)
 	}
 
+	name := string(target)
+	if kind == uint64(LinkHardLink) || kind == uint64(LinkFileCopy) {
+		// These two name ANOTHER MEMBER of the archive, in the same namespace
+		// as FileHeader.Name, so they get the same treatment Name does: a
+		// consumer matches the target to a member by comparing the two, and
+		// resolves it by reading a file. Raw, a backslash or a leading slash
+		// breaks that comparison, and a "../.." target handed to os.Link or a
+		// file copy is an arbitrary-file read. unrar does the same, converting
+		// slashes and confining the target to the destination before use.
+		// A symlink's target is relative to the link's own directory and may
+		// legitimately climb out of it, so those kinds stay raw.
+		//
+		// A target that is nothing once sanitized (".." or "/") names no
+		// member, and is refused like an empty one rather than left to
+		// resolve to the archive root.
+		name = sanitizePath(name)
+		if name == "" {
+			return fmt.Errorf("%w: redirection target %q names no member",
+				ErrCorruptFileHeader, target)
+		}
+	}
+
 	fh.LinkType = LinkType(kind)
-	fh.LinkTarget = string(target)
+	fh.LinkTarget = name
 	return nil
 }
 

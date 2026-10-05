@@ -3,6 +3,7 @@ package rarengine
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"testing"
@@ -52,16 +53,20 @@ func fixtureReader(t *testing.T, name string) *Reader {
 	return NewReader(fileVolumesOf(t, "testdata/"+name))
 }
 
-// assertLinkEntry checks everything a clean link member promises: it reads as
-// empty with io.EOF, repeatably, and closes with nil -- with no
+// assertLinkEntry checks everything a link member promises: Read reports
+// ErrLinkEntry, repeatably and never as io.EOF, and Close is nil -- with no
 // ErrTruncatedFile and no checksum comparison, though the header declares a
-// size and a zero CRC32.
+// size and a zero CRC32. Reading it does not make Close fail.
 func assertLinkEntry(t *testing.T, e *Entry) {
 	t.Helper()
 	buf := make([]byte, 64)
 	for i := range 2 {
-		if n, err := e.Read(buf); n != 0 || err != io.EOF {
-			t.Fatalf("Read #%d of link %q = %d, %v; want 0, io.EOF", i, e.Header.Name, n, err)
+		n, err := e.Read(buf)
+		if n != 0 || !errors.Is(err, ErrLinkEntry) {
+			t.Fatalf("Read #%d of link %q = %d, %v; want 0, ErrLinkEntry", i, e.Header.Name, n, err)
+		}
+		if errors.Is(err, io.EOF) {
+			t.Fatalf("Read #%d of link %q reported %v, which satisfies io.EOF: a copy loop would take it for a clean end", i, e.Header.Name, err)
 		}
 	}
 	if err := e.Close(); err != nil {
@@ -306,32 +311,148 @@ func TestBombGuardStillRefusesAnOrdinaryMemberWithALinksSizes(t *testing.T) {
 	})
 }
 
-// Every kind the format defines is admitted, and the target comes out exactly
-// as stored: not path-cleaned, not stripped of its "..", not made relative.
-func TestLinkKindsAndRawTargets(t *testing.T) {
+// Every kind the format defines is admitted. A symlink or junction target
+// comes out exactly as stored -- not path-cleaned, not stripped of its "..",
+// not made relative -- because it is relative to the link's own directory and
+// may legitimately climb out of it. A hard link or file copy names another
+// member, so its target is sanitized the way Name is.
+func TestLinkKindsAndTargets(t *testing.T) {
 	cases := []struct {
-		name   string
-		kind   uint64
-		want   LinkType
-		target string
+		name       string
+		kind       uint64
+		want       LinkType
+		target     string
+		wantTarget string
 	}{
-		{"unix symlink", 1, LinkUnixSymlink, "../lib/x"},
-		{"windows symlink", 2, LinkWindowsSymlink, `..\lib\x`},
-		{"windows junction", 3, LinkWindowsJunction, `C:\Windows`},
-		{"hard link", 4, LinkHardLink, "dir/orig.txt"},
-		{"file copy", 5, LinkFileCopy, "/etc/passwd"},
+		{"unix symlink", 1, LinkUnixSymlink, "../lib/x", "../lib/x"},
+		{"unix symlink to its parent", 1, LinkUnixSymlink, "..", ".."},
+		{"windows symlink", 2, LinkWindowsSymlink, `..\lib\x`, `..\lib\x`},
+		{"windows junction", 3, LinkWindowsJunction, `C:\Windows`, `C:\Windows`},
+		{"absolute unix symlink", 1, LinkUnixSymlink, "/etc/passwd", "/etc/passwd"},
+		{"hard link", 4, LinkHardLink, "dir/orig.txt", "dir/orig.txt"},
+		{"file copy", 5, LinkFileCopy, "/etc/passwd", "etc/passwd"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			stream := rar5Archive(t, false,
 				linkMember("l", 9, redirection(redirectionBody(tc.kind, tc.target))))
 			e := nextOrFatal(t, NewReader(volumesOf(stream)))
-			if e.Header.LinkType != tc.want || e.Header.LinkTarget != tc.target {
+			if e.Header.LinkType != tc.want || e.Header.LinkTarget != tc.wantTarget {
 				t.Fatalf("link = %v %q, want %v %q",
-					e.Header.LinkType, e.Header.LinkTarget, tc.want, tc.target)
+					e.Header.LinkType, e.Header.LinkTarget, tc.want, tc.wantTarget)
 			}
 			assertLinkEntry(t, e)
 		})
+	}
+}
+
+// A hard link or file copy target is sanitized by the function that sanitizes
+// Name, so a consumer finds the member it names by comparing the two strings,
+// and can resolve it without leaving the extraction root. The symlink kinds
+// are NOT touched, for the same inputs.
+func TestMemberNamingLinkTargetsAreSanitizedLikeName(t *testing.T) {
+	for _, tc := range []struct{ raw, want string }{
+		{`\dir\a`, "dir/a"},
+		{"/dir/a", "dir/a"},
+		{"./dir/a", "dir/a"},
+		{"dir/../a", "a"},
+		{"dir//sub/./a", "dir/sub/a"},
+		{`dir\sub\a`, "dir/sub/a"},
+		{"../../etc/shadow", "etc/shadow"},
+		{"dir/a", "dir/a"},
+	} {
+		for _, kind := range []uint64{uint64(LinkHardLink), uint64(LinkFileCopy)} {
+			t.Run(fmt.Sprintf("kind %d %q", kind, tc.raw), func(t *testing.T) {
+				fh, err := parseBuiltHeader(t, linkMember("l", 9, redirection(redirectionBody(kind, tc.raw))))
+				if err != nil {
+					t.Fatalf("parse: %v", err)
+				}
+				if fh.LinkTarget != tc.want {
+					t.Fatalf("LinkTarget = %q, want %q", fh.LinkTarget, tc.want)
+				}
+				if fh.LinkTarget != sanitizePath(tc.raw) {
+					t.Fatalf("LinkTarget %q is not what sanitizePath gives %q", fh.LinkTarget, sanitizePath(tc.raw))
+				}
+			})
+		}
+		t.Run(fmt.Sprintf("symlink %q stays raw", tc.raw), func(t *testing.T) {
+			fh, err := parseBuiltHeader(t, linkMember("l", 9, redirection(redirectionBody(uint64(LinkUnixSymlink), tc.raw))))
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			if fh.LinkTarget != tc.raw {
+				t.Fatalf("symlink LinkTarget = %q, want it untouched: %q", fh.LinkTarget, tc.raw)
+			}
+		})
+	}
+
+	// The point of it: a member whose archive name needed sanitizing is found
+	// by a link that names it the way the archive spelled it.
+	name := `\dir\a`
+	spec := memberSpec{
+		name: name, hostOS: 1, unpackedSz: new(int64(1)), packedSz: new(int64(0)),
+		rawCRC:       new(uint32(0)),
+		extraRecords: []extraRecordSpec{redirection(redirectionBody(uint64(LinkHardLink), "/dir/a"))},
+	}
+	fh, err := parseBuiltHeader(t, buildRAR5Member(spec))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if fh.Name != fh.LinkTarget {
+		t.Fatalf("Name %q != LinkTarget %q for the same spelling", fh.Name, fh.LinkTarget)
+	}
+}
+
+// A consumer that copies every entry without looking at LinkType must fail,
+// not write an empty file. io.Copy and io.ReadAll are what such a consumer
+// calls, and neither may see a clean end.
+func TestLinkReadFailsForAConsumerThatIgnoresLinkType(t *testing.T) {
+	stream := rar5Archive(t, false,
+		linkMember("l", 9, redirection(redirectionBody(uint64(LinkHardLink), "orig.txt"))))
+
+	e := nextOrFatal(t, NewReader(volumesOf(stream)))
+	n, err := io.Copy(io.Discard, e)
+	if n != 0 || !errors.Is(err, ErrLinkEntry) {
+		t.Fatalf("io.Copy = %d, %v; want 0, ErrLinkEntry", n, err)
+	}
+	if _, err := io.ReadAll(e); !errors.Is(err, ErrLinkEntry) {
+		t.Fatalf("io.ReadAll = %v, want ErrLinkEntry", err)
+	}
+	// Reading it did not fail the member.
+	if err := e.Close(); err != nil {
+		t.Fatalf("Close after a failed Read = %v, want nil", err)
+	}
+}
+
+// The consumer that does handle links never reads: Close alone is clean, and
+// the traversal carries on to the member after it. Once Close has recorded the
+// member's clean verdict, Read reports that verdict like any other closed
+// member; the loud failure is for a consumer that reads, and none does after
+// closing.
+func TestLinkCloseWithoutReadIsClean(t *testing.T) {
+	stream := rar5Archive(t, false,
+		linkMember("l", 9, redirection(redirectionBody(uint64(LinkUnixSymlink), "t"))),
+		rar5Member(t, memberSpec{name: "after.txt", content: "after", withCRC: true}))
+	r := NewReader(volumesOf(stream))
+	e := nextOrFatal(t, r)
+	if err := e.Close(); err != nil {
+		t.Fatalf("Close without Read = %v, want nil", err)
+	}
+	if err := e.Close(); err != nil {
+		t.Fatalf("second Close = %v, want nil", err)
+	}
+	if n, _ := e.Read(make([]byte, 8)); n != 0 {
+		t.Fatalf("Read after Close delivered %d bytes", n)
+	}
+	expectContent(t, nextOrFatal(t, r), "after.txt", "after")
+}
+
+// A zero-value Entry has no header at all. The link arm in Read must not
+// dereference it: that is still ErrNoActiveFile.
+func TestZeroValueEntryStillReportsNoActiveFile(t *testing.T) {
+	var e Entry
+	if _, err := e.Read(make([]byte, 1)); !errors.Is(err, ErrNoActiveFile) {
+		t.Fatalf("Read of a zero-value Entry = %v, want ErrNoActiveFile", err)
 	}
 }
 
@@ -377,6 +498,10 @@ func TestMalformedLinksAreRefusedByName(t *testing.T) {
 			spec: memberSpec{extraRecords: []extraRecordSpec{redirection(maxLen.Bytes())}}},
 		{name: "record ends after the kind", want: ErrCorruptFileHeader,
 			spec: memberSpec{extraRecords: []extraRecordSpec{redirection(encodeVint(1))}}},
+		{name: "hard link target that is nothing once sanitized", want: ErrCorruptFileHeader,
+			spec: memberSpec{extraRecords: []extraRecordSpec{redirection(redirectionBody(4, ".."))}}},
+		{name: "file copy target of a bare slash", want: ErrCorruptFileHeader,
+			spec: memberSpec{extraRecords: []extraRecordSpec{redirection(redirectionBody(5, "/"))}}},
 		{name: "record ends after the flags", want: ErrCorruptFileHeader,
 			spec: memberSpec{extraRecords: []extraRecordSpec{redirection(append(encodeVint(1), encodeVint(0)...))}}},
 		{name: "empty record", want: ErrCorruptFileHeader,

@@ -467,9 +467,16 @@ func TestIntegration_OracleLinks(t *testing.T) {
 				}
 				fh := e.Header
 				onDisk := filepath.Join(dir, fh.Name)
-				data, err := io.ReadAll(e)
-				if err != nil {
-					t.Fatalf("read %s: %v", fh.Name, err)
+				// A link has nothing to read, and says so rather than ending
+				// as though it were an empty file.
+				var data []byte
+				if fh.LinkType == rarengine.LinkNone {
+					data, err = io.ReadAll(e)
+					if err != nil {
+						t.Fatalf("read %s: %v", fh.Name, err)
+					}
+				} else if _, rerr := e.Read(make([]byte, 8)); !errors.Is(rerr, rarengine.ErrLinkEntry) {
+					t.Fatalf("Read of link %s = %v, want ErrLinkEntry", fh.Name, rerr)
 				}
 				if cerr := e.Close(); cerr != nil {
 					t.Fatalf("Close %s: %v", fh.Name, cerr)
@@ -487,9 +494,6 @@ func TestIntegration_OracleLinks(t *testing.T) {
 
 				case rarengine.LinkUnixSymlink:
 					links++
-					if len(data) != 0 {
-						t.Errorf("%s: link delivered %d bytes", fh.Name, len(data))
-					}
 					target, err := os.Readlink(onDisk)
 					if err != nil {
 						t.Fatalf("unrar did not create a symlink for %s: %v", fh.Name, err)
@@ -500,9 +504,6 @@ func TestIntegration_OracleLinks(t *testing.T) {
 
 				case rarengine.LinkHardLink:
 					links++
-					if len(data) != 0 {
-						t.Errorf("%s: link delivered %d bytes", fh.Name, len(data))
-					}
 					a, err := os.Lstat(onDisk)
 					if err != nil {
 						t.Fatalf("unrar did not create %s: %v", fh.Name, err)
