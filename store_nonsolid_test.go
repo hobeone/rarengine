@@ -3,7 +3,6 @@ package rarengine
 import (
 	"bytes"
 	"io"
-	"os"
 	"path/filepath"
 	"testing"
 )
@@ -20,23 +19,10 @@ import (
 // r.win), and this test fails because the window will be dirtied by recordHistory.
 func TestNonSolidArchiveStoredMemberLeavesWindowUntouched(t *testing.T) {
 	// rar5_store.rar is a non-solid archive with a single stored member
-	f, err := os.Open(filepath.Join("testdata", "rar5_store.rar"))
-	if err != nil {
-		t.Skipf("fixture not found: %v", err)
-	}
-	defer f.Close() //nolint:errcheck
-
-	volChan := make(chan io.ReadCloser, 1)
-	volChan <- f
-	close(volChan)
+	volChan := fileVolumesOf(t, filepath.Join("testdata", "rar5_store.rar"))
 
 	r := NewReader(volChan)
 	defer r.Close() //nolint:errcheck
-
-	// Verify the archive is non-solid
-	if r.solid {
-		t.Fatal("fixture is solid; test needs a non-solid archive")
-	}
 
 	// Capture initial window state
 	initialHistLen := r.win.historyLen()
@@ -50,6 +36,11 @@ func TestNonSolidArchiveStoredMemberLeavesWindowUntouched(t *testing.T) {
 		t.Fatalf("NextEntry: %v", err)
 	}
 	defer e.Close() //nolint:errcheck
+
+	// Verify the archive is non-solid (r.solid is populated after NextEntry reads the archive header)
+	if r.solid {
+		t.Fatal("fixture is solid; test needs a non-solid archive")
+	}
 
 	if e.Header.Method != 0 {
 		t.Fatalf("fixture member has Method=%d, want 0 (stored)", e.Header.Method)
