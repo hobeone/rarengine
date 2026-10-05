@@ -18,11 +18,13 @@ var (
 	ErrRarBombDetected = errors.New("rarengine: possible RAR-bomb detected")
 
 	// ErrCRCMismatch is returned by Read once a file's fully decompressed
-	// content has been read, if its CRC32 doesn't match the value recorded
-	// in the RAR file header. Only checked when the header carries a CRC32
-	// (fileFlagHasCRC32); verification is unconditional -- there is no
-	// method to disable it.
-	ErrCRCMismatch = errors.New("rarengine: decompressed content CRC32 does not match file header")
+	// content has been read, if it does not match a checksum recorded in the
+	// RAR file header. That is the CRC32 or the BLAKE2sp digest, whichever
+	// failed; a header recording both must match both. The message names which
+	// one. The name predates BLAKE2sp verification and was left alone because
+	// callers match on it. Verification is unconditional -- there is no method
+	// to disable it.
+	ErrCRCMismatch = errors.New("rarengine: decompressed content does not match the checksum in the file header")
 
 	// ErrWrongPassword is returned when an encrypted file's password check
 	// value (PSWCHECK) doesn't match the supplied password. Wrap-checked
@@ -97,8 +99,10 @@ var (
 	//     digest, which for a multi-volume file is the last part's. It composes
 	//     with the class below rather than excluding it: rar -htb -p sets
 	//     UseMac over a BLAKE2sp digest with no CRC32 present.
-	//   - BLAKE2sp only: written by rar -htb, which records a BLAKE2sp hash and
-	//     no CRC32 at all. This library does not compute BLAKE2sp.
+	//   - A BLAKE2sp digest this library did not compute for the member: its
+	//     first header recorded none, or it is encrypted. A plain `rar -htb`
+	//     member is NOT in this class -- BLAKE2sp is computed and compared, and
+	//     a mismatch is ErrCRCMismatch.
 	//   - No digest recorded at all.
 	//
 	// Completing such a file without an error would report unverified content as

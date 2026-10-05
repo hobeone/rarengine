@@ -600,7 +600,7 @@ func (r *Reader) dispatch(h *blockHeader) (*Entry, error) {
 		r.win.MarkIncomplete()
 		return terminalEntry(fh, err, done), nil
 	}
-	e.src = src
+	e.setSource(src)
 	r.entry = e
 	return e, nil
 }

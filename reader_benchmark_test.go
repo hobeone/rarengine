@@ -190,3 +190,43 @@ func BenchmarkReaderResetReusesWindow(b *testing.B) {
 		}
 	}
 }
+
+// BenchmarkDecompress_Blake2sp reads a 1.2 MB member that records only a
+// BLAKE2sp digest, so the whole body is hashed. It is slower than the
+// benchmarks above on purpose and by a known amount: BLAKE2sp is pure Go here,
+// where CRC32 is a hardware instruction. Its allocs/op is what to read: the
+// extra allocations over a CRC32 member are the hasher, once per member, not
+// anything per Read.
+func BenchmarkDecompress_Blake2sp(b *testing.B) {
+	data, err := os.ReadFile(filepath.Join("testdata", "rar5_blake2_large.rar"))
+	if err != nil {
+		b.Fatal(err)
+	}
+	dummyVol := make(chan io.ReadCloser, 1)
+	dummyVol <- io.NopCloser(bytes.NewReader(data))
+	close(dummyVol)
+	r := rarengine.NewReader(dummyVol)
+	buf := make([]byte, 32*1024)
+
+	b.ReportAllocs()
+	for b.Loop() {
+		volChan := make(chan io.ReadCloser, 1)
+		volChan <- io.NopCloser(bytes.NewReader(data))
+		close(volChan)
+		r.Reset(volChan)
+		e, err := r.NextEntry()
+		if err != nil {
+			b.Fatal(err)
+		}
+		for {
+			_, err := e.Read(buf)
+			if err != nil {
+				if err == io.EOF { //nolint:errorlint // sentinel comparison, matches the benchmarks above
+					break
+				}
+				b.Fatal(err)
+			}
+		}
+		b.SetBytes(e.Header.UnpackedSize)
+	}
+}

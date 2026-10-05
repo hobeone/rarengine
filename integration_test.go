@@ -230,7 +230,29 @@ func TestIntegration_Oracle(t *testing.T) {
 		name     string
 		volumes  []string
 		password string
+		// wantClean demands a nil verdict from the member, not merely the
+		// right bytes. The default tolerates ErrChecksumUnsupported (see the
+		// read below); a member whose digest this library DOES compute has no
+		// excuse for it, and tolerating it would let a BLAKE2sp regression
+		// back into "unverifiable" without this test noticing.
+		wantClean bool
 	}{
+		// rar -htb: a BLAKE2sp digest and no CRC32. unrar is the oracle for the
+		// content AND for the verdict -- it extracts these without complaint,
+		// so this library must read them cleanly too. Large single-volume
+		// compressed, then multi-volume stored and compressed, where the
+		// whole-file digest is on the last part and every earlier part records
+		// a digest of its own packed bytes.
+		{name: "rar5_blake2.rar", volumes: []string{"rar5_blake2.rar"}, wantClean: true},
+		{name: "rar5_blake2_large.rar", volumes: []string{"rar5_blake2_large.rar"}, wantClean: true},
+		{name: "rar5_blake2_store_multi", wantClean: true, volumes: []string{
+			"rar5_blake2_store_multi.part1.rar", "rar5_blake2_store_multi.part2.rar",
+			"rar5_blake2_store_multi.part3.rar", "rar5_blake2_store_multi.part4.rar",
+		}},
+		{name: "rar5_blake2_comp_multi", wantClean: true, volumes: []string{
+			"rar5_blake2_comp_multi.part01.rar", "rar5_blake2_comp_multi.part02.rar",
+			"rar5_blake2_comp_multi.part03.rar", "rar5_blake2_comp_multi.part04.rar",
+		}},
 		{name: "rar5_store.rar", volumes: []string{"rar5_store.rar"}},
 		{name: "rar5_compress.rar", volumes: []string{"rar5_compress.rar"}},
 		{name: "rar5_solid.rar", volumes: []string{"rar5_solid.rar"}},
@@ -360,8 +382,13 @@ func TestIntegration_Oracle(t *testing.T) {
 				// so that specific verdict is tolerated here rather than
 				// dropping the fixture.
 				data, err := io.ReadAll(e)
-				if err != nil && !errors.Is(err, rarengine.ErrChecksumUnsupported) {
+				if err != nil && (tc.wantClean || !errors.Is(err, rarengine.ErrChecksumUnsupported)) {
 					t.Fatalf("failed to read content of %s: %v", fh.Name, err)
+				}
+				if tc.wantClean {
+					if err := e.Close(); err != nil {
+						t.Fatalf("Close of %s = %v, want nil", fh.Name, err)
+					}
 				}
 				if int64(len(data)) != fh.UnpackedSize {
 					t.Fatalf("read %d bytes of %s, header declares %d", len(data), fh.Name, fh.UnpackedSize)
