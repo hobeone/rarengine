@@ -15,7 +15,7 @@ This document details the co-development methodology, algorithmic design choices
 
 ### Phase 2: Security & Password Decryption Hardening
 - **Path Sanitization**: Developed OS-independent traversal sanitization to safely filter out `..` and absolute paths.
-- **Rar-Bomb Guards**: Prevented disk depletion attacks by proactively blocking >1000x expansion ratios on files >1MB.
+- **Rar-Bomb Guards**: Prevented disk depletion attacks by proactively blocking >65536x expansion ratios on files >1MB.
 - **AES-256-CBC Decryption**: Implemented PBKDF2-HMAC-SHA256 key derivation with IV-aligned streaming AES block decryptors.
 - **Fuzzing & Oracle Testing**: Built native Go fuzzer targets for Huffman trees and dynamic byte-for-byte Oracle verification against the system-installed canonical `unrar` binary.
 

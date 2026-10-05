@@ -548,7 +548,7 @@ func TestSkipDamagedFile_ChecksumFailureDamagesWindow(t *testing.T) {
 // INSIDE that bound -- the successor would read an earlier file's bytes
 // rather than reading past the end -- so nothing else catches it.
 func TestSkipDamagedFile_RefusedFileDamagesWindow(t *testing.T) {
-	// A rar bomb: declared unpacked size far exceeds both 1 MiB and 1000x the
+	// A rar bomb: declared unpacked size far exceeds both 1 MiB and 65536x the
 	// packed size, so dispatch refuses it before any decoding.
 	bomb := rar5FileEntry("bomb.bin", 2*1024*1024, 0x1234, []byte("ten bytes!"))
 

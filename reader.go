@@ -602,12 +602,12 @@ func (r *Reader) dispatch(h *blockHeader) (*Entry, error) {
 	// The multiplication is guarded, not replaced by a division: a
 	// division floors, so it would let a member declaring exactly one
 	// byte past the ratio through, and this guard must not be weakened.
-	// A packed size above MaxInt64/1000 cannot reach the ratio at all --
+	// A packed size above MaxInt64/bombRatio cannot reach the ratio at all --
 	// no unpacked size fits -- so it is not a bomb, whereas the
 	// unguarded product wrapped negative there and refused every member
 	// over 1 MB.
 	expands := fh.PackedSize == 0 ||
-		(fh.PackedSize <= math.MaxInt64/1000 && fh.UnpackedSize > 1000*fh.PackedSize)
+		(fh.PackedSize <= math.MaxInt64/bombRatio && fh.UnpackedSize > bombRatio*fh.PackedSize)
 	if fh.UnpackedSize > 1024*1024 && expands {
 		r.win.MarkIncomplete()
 		return terminalEntry(fh, ErrRarBombDetected, done), nil
@@ -795,6 +795,17 @@ func (r *Reader) resolveHeaderPassword(ch *cryptHeader) (string, error) {
 // other, but there is nothing to cross-check it against: a RAR7 member is a
 // well-formed header for a format we do not decode, not a malformed one.
 const unpackVersionRAR5 = 0
+
+// bombRatio is the maximum allowed ratio of unpacked size to packed size before
+// a member is refused as a probable rar-bomb.
+//
+// RAR5's longest match is 4097 bytes per symbol and a symbol costs at least one
+// bit, so about 32,800:1 is the most a block of literal LZ output can expand.
+// 65536:1 sits above that with margin and still refuses a header that declares
+// gigabytes from a few bytes. The guard's predicate treats PackedSize==0 as
+// infinitely expanding (for links and large empty files above the 1 MiB floor),
+// the 1 MiB floor, and guarded multiplication are unchanged.
+const bombRatio = 65536
 
 // buildChain assembles the decode chain for a member:
 //
