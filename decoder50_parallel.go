@@ -519,6 +519,20 @@ func (d *decoder50) fillParallel(win *window) error {
 				return nil // target reached mid-block
 			}
 			if j.err != nil {
+				// Serial checks the target before each symbol, so it stops
+				// short of the one that failed and delivers what is staged;
+				// the error comes on the next call, which finds the job here
+				// with its items exhausted.
+				if win.Available() >= target {
+					return nil
+				}
+				if j.err == ErrDecoderOutOfData {
+					// Serial keeps the block's reader and resumes it on the
+					// next fill from where the truncated symbol left it,
+					// which is j.resume; finish the block inline from there.
+					p.inline = true
+					return j.err
+				}
 				err := j.err
 				p.pop()
 				return err
@@ -536,8 +550,11 @@ func (d *decoder50) fillParallel(win *window) error {
 		}
 		done, err := d.finishBlockInline(win, j, target)
 		if err != nil {
+			if !done {
+				return err // out of data: the block stays at the head, d.br resumes it
+			}
 			p.pop()
-			return mapInnerErr(err)
+			return err
 		}
 		if done {
 			last := j.lastBlock

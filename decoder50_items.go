@@ -234,7 +234,7 @@ type itemKind uint8
 
 const (
 	itemLiteral   itemKind = iota // value: the byte
-	itemMatch                     // length, value: distance
+	itemMatch                     // length, value: distance-1
 	itemRepDist                   // aux: slot 0..3, length
 	itemRepLast                   //
 	itemFilter                    // aux: ftype, length: param, value: offset (raw, <= 0xFFFFFFFF)
@@ -244,9 +244,11 @@ const (
 // item is one decoded symbol with everything the block's bits determined on
 // their own. What depends on earlier output -- the distance history, the
 // decode position a filter is relative to, the window's history bound -- is
-// resolved when the item is replayed. 8 bytes: a distance fits uint32
-// exactly (slot 63 with every extra bit set is 4294967295) and a length
-// fits uint16 (slot 43 is 3586 before the at most +3 adjustment).
+// resolved when the item is replayed. 8 bytes. A match stores distance-1:
+// the largest distance, offset slot 63 with all 26 extra bits set and low
+// offset 15, is 1 + (3<<30) + ((1<<26 - 1) << 4) + 15 = 1<<32, one past
+// uint32, and the smallest is 1, so distance-1 fits exactly. A length fits
+// uint16: slot 43 reaches 4097, 4100 after the at most +3 adjustment.
 type item struct {
 	kind   itemKind
 	aux    uint8
@@ -323,7 +325,7 @@ func decodeBlockItems(j *blockJob) {
 				j.err = mapInnerErr(err)
 				return
 			}
-			*it = item{kind: itemMatch, length: uint16(length), value: uint32(distance)}
+			*it = item{kind: itemMatch, length: uint16(length), value: uint32(distance - 1)}
 			j.n++
 		case sym >= 258:
 			length, err := decodeLengthBits(br, ts)
@@ -375,7 +377,7 @@ func (d *decoder50) replayItems(win *window, j *blockJob, idx *int, target int) 
 			win.writeByte(byte(it.value))
 			d.decoded++
 		case itemMatch:
-			err = d.applyMatch(win, int(it.length), int(it.value))
+			err = d.applyMatch(win, int(it.length), int(it.value)+1)
 		case itemRepDist:
 			err = d.applyRepDist(win, int(it.aux), int(it.length))
 		case itemRepLast:
@@ -400,12 +402,18 @@ func (d *decoder50) replayItems(win *window, j *blockJob, idx *int, target int) 
 	return true, nil
 }
 
-// finishBlockInline continues a block the worker left partial. The serial
-// code takes over from the saved reader position with the job's tables,
-// and runs until the block ends or the window stages target bytes. While
-// it runs, d.br is the live reader, so a caller that sees blockDone false
-// must call again before touching any other block. It returns true when
-// the block has ended.
+// finishBlockInline continues a block the worker left partial, or one it
+// stopped in with ErrDecoderOutOfData. The serial code takes over from the
+// saved reader position with the job's tables, and runs until the block
+// ends or the window stages target bytes. While it runs, d.br is the live
+// reader, so a caller that sees blockDone false must call again before
+// touching any other block. It returns true when the block has ended.
+//
+// ErrDecoderOutOfData does not end the block: serial fill returns it with
+// d.br still positioned after the bits the truncated symbol consumed, and
+// the next fill resumes there. So it comes back with blockDone false and
+// d.br kept. Any other error ends the block and clears d.br, so no later
+// job adopts this block's reader.
 func (d *decoder50) finishBlockInline(win *window, j *blockJob, target int) (blockDone bool, err error) {
 	if d.br == nil {
 		d.tables.copyFrom(j.tables)
@@ -416,14 +424,19 @@ func (d *decoder50) finishBlockInline(win *window, j *blockJob, target int) (blo
 	for win.Available() < target {
 		sym, err := d.tables.main.ReadSym(d.br)
 		if err != nil {
+			d.br = nil
 			if err == io.EOF {
-				d.br = nil
 				return true, nil
 			}
 			return true, err
 		}
 		if err := d.decodeSymbol(win, sym); err != nil {
-			return true, mapInnerErr(err)
+			err = mapInnerErr(err)
+			if err == ErrDecoderOutOfData {
+				return false, err
+			}
+			d.br = nil
+			return true, err
 		}
 	}
 	return false, nil

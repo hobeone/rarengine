@@ -119,9 +119,9 @@ func firstCompressedMember(t *testing.T, r *Reader) *Entry {
 // member whose blocks carry filter records. The exe case also requires that
 // an itemFilter was produced, so it cannot pass without the filter arm.
 // Mutation check: pass int(it.aux)&1 as the slot in replayItems' itemRepDist
-// arm, or store distance+1 in decodeBlockItems' itemMatch, and the first
-// block's bytes differ. A mutation inside applyMatch would not do: serial
-// and replay share it.
+// arm, or store distance rather than distance-1 in decodeBlockItems'
+// itemMatch, and the first block's bytes differ. A mutation inside
+// applyMatch would not do: serial and replay share it.
 func TestReplayMatchesSerialBlockForBlock(t *testing.T) {
 	for _, tc := range []struct {
 		file        string
