@@ -141,7 +141,16 @@ func (d *decoder50) setPipeline(workers int) {
 		if d.pipe != nil {
 			d.pipe.stop()
 		}
-		d.pipe = newBlockPipeline(workers)
+		p := newBlockPipeline(workers)
+		d.pipeMu.Lock()
+		d.pipe = p
+		stopped := d.pipeStopped
+		d.pipeMu.Unlock()
+		if stopped {
+			// A Close landed before this pipeline existed; honour it. start
+			// refuses the fired quit, so engage starts nothing.
+			p.stop()
+		}
 	}
 	d.pipe.engage(d)
 }
@@ -163,16 +172,29 @@ func (p *blockPipeline) engage(d *decoder50) {
 
 // stopWorkers ends the pipeline's goroutines. It is the one call Reader.Close
 // makes into the decoder, and touches neither the window nor the ring.
+// It latches the stop on the decoder, so a Close that precedes the first
+// pipeline is honoured by setPipeline. The pipeline is stopped after pipeMu is
+// released: stop waits for workers, and nothing here should hold the lock
+// across that wait.
 func (d *decoder50) stopWorkers() {
-	if d.pipe != nil {
-		d.pipe.stop()
+	d.pipeMu.Lock()
+	d.pipeStopped = true
+	p := d.pipe
+	d.pipeMu.Unlock()
+	if p != nil {
+		p.stop()
 	}
 }
 
-// restartWorkers arms the pipeline to start goroutines again after a stop.
+// restartWorkers clears the latch and arms the pipeline to start goroutines
+// again after a stop.
 func (d *decoder50) restartWorkers() {
-	if d.pipe != nil {
-		d.pipe.restart()
+	d.pipeMu.Lock()
+	d.pipeStopped = false
+	p := d.pipe
+	d.pipeMu.Unlock()
+	if p != nil {
+		p.restart()
 	}
 }
 

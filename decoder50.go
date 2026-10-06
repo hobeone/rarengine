@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 )
 
 var (
@@ -55,8 +56,18 @@ type decoder50 struct {
 	// directly) declares nothing, which classifies as corruption.
 	dictSize int64
 
-	tables        tableSet
-	pipe          *blockPipeline // block read-ahead, nil until a Reader asks for workers
+	tables tableSet
+	// pipe is the block read-ahead, nil until a Reader asks for workers.
+	// pipeMu and pipeStopped are the only decoder state Close touches from
+	// another goroutine. pipe is written only under pipeMu (setPipeline) and
+	// read under it by stopWorkers and restartWorkers; the traversal
+	// goroutine, which is its only writer, may read it without the lock, as
+	// fillParallel and the rest of the decode path do. pipeStopped latches a
+	// Close until Reset, so one that lands before the first pipeline exists is
+	// honoured when setPipeline publishes it.
+	pipe          *blockPipeline
+	pipeMu        sync.Mutex
+	pipeStopped   bool
 	bitlenDecoder huffmanDecoder // scratch for ReadCodeLengthTable
 	headBuf       [5]byte        // scratch for readBlockHead; a local would escape through io.Reader
 

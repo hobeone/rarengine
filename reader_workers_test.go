@@ -392,6 +392,56 @@ func TestCloseDuringNextEntryLeavesNoWorkers(t *testing.T) {
 	goroutinesSettle(t, base)
 }
 
+// The same sweep on a Reader whose decoder has never had a pipeline: the
+// Close lands during the first NextEntry of the Reader's life. Mutation
+// check: make stopWorkers a no-op while d.pipe is nil and offsets that land
+// before setPipeline leave running workers.
+func TestCloseDuringFirstNextEntryLeavesNoWorkers(t *testing.T) {
+	file := filepath.Join("testdata", "rar5_solid_bench.rar")
+	data, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := runtime.NumGoroutine()
+	for at := range 400 {
+		r := NewReader(fileVolumesOf(t, file))
+		r.SetWorkers(4)
+		vols := make(chan io.ReadCloser, 1)
+		vols <- &closeAfter{Reader: bytes.NewReader(data), r: r, at: at}
+		close(vols)
+		r.Reset(vols)
+		_, _ = r.NextEntry()
+		if p := r.dec50.pipe; p != nil && chanClosed(r.done) && p.running {
+			t.Fatalf("Close at offset %d left decode workers running", at)
+		}
+		_ = r.Close()
+	}
+	goroutinesSettle(t, base)
+}
+
+// A decoder whose Close preceded its first pipeline starts no workers when
+// the pipeline is chosen. Mutation check: drop the pipeStopped test in
+// setPipeline and the pipeline runs.
+func TestStopWorkersBeforeFirstPipelineIsRemembered(t *testing.T) {
+	base := runtime.NumGoroutine()
+	d := &decoder50{}
+	d.stopWorkers()
+	d.setPipeline(2)
+	if d.pipe == nil || d.pipe.running {
+		t.Fatal("pipeline missing, or running after a Close that preceded it")
+	}
+	if g := runtime.NumGoroutine(); g > base {
+		t.Fatalf("%d goroutines, baseline %d", g, base)
+	}
+	d.restartWorkers() // Reset revives it
+	d.pipe.start()
+	if !d.pipe.running {
+		t.Fatal("start after restartWorkers did not run workers")
+	}
+	d.stopWorkers()
+	goroutinesSettle(t, base)
+}
+
 // SetWorkers is latched per member: changing it mid-member has no effect
 // until the next member, and n above maxWorkers is clamped.
 func TestSetWorkersTakesEffectAtTheNextMember(t *testing.T) {
