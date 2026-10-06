@@ -621,6 +621,7 @@ func TestFillStopsAtTheCapOnALargeWindow(t *testing.T) {
 	close(ch)
 	r := NewReader(ch)
 	t.Cleanup(func() { _ = r.Close() })
+	r.SetMaxWindow(64 << 20) // above the non-Linux default cap
 	e, err := r.NextEntry()
 	if err != nil {
 		t.Fatal(err)
@@ -677,6 +678,7 @@ func TestIssue79FarArchivesAtFullSize(t *testing.T) {
 		close(ch)
 		r := NewReader(ch)
 		t.Cleanup(func() { _ = r.Close() })
+		r.SetMaxWindow(64 << 20) // above the non-Linux default cap
 		return r
 	}
 	decodes := func(name string, dict int64) {

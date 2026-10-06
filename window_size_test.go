@@ -39,7 +39,9 @@ func TestWindowGrowsToTheDeclaredDictionary(t *testing.T) {
 			if e.Header.DictSize != tc.dict {
 				t.Fatalf("DictSize = %d, want %d", e.Header.DictSize, tc.dict)
 			}
-			want := int(max(tc.dict, minWindowSize))
+			// Off Linux the default cap is 32 MiB, so the larger
+			// declarations stop there; the cap itself is pinned by this.
+			want := int(min(max(tc.dict, minWindowSize), defaultMaxWindow))
 			if r.win.size != want {
 				t.Fatalf("window after admission = %d, want %d", r.win.size, want)
 			}
@@ -391,7 +393,8 @@ func TestWindowGrowDiscardsHistoryAndNeverShrinks(t *testing.T) {
 	}
 
 	first := w.backing
-	if err := w.grow(2 << 20); err != nil {
+	// Above decommitThreshold, so the decommit below is not a no-op.
+	if err := w.grow(64 << 20); err != nil {
 		t.Fatalf("second grow: %v", err)
 	}
 	if w.backing == first {
@@ -406,7 +409,7 @@ func TestWindowGrowDiscardsHistoryAndNeverShrinks(t *testing.T) {
 	w.writeBytes([]byte("x"))
 	w.Reset(false)
 	w.decommit()
-	if w.size != 2<<20 || w.backing == nil {
+	if w.size != 64<<20 || w.backing == nil {
 		t.Fatal("decommit changed the window's size or dropped its reservation")
 	}
 	w.writeBytes([]byte("still writable"))
@@ -438,7 +441,8 @@ func TestFillTargetIsHalfTheWindowUpToACap(t *testing.T) {
 // a smaller declaration does not shrink it.
 func TestResetKeepsTheGrownWindow(t *testing.T) {
 	r := NewReader(fileVolumesOf(t, filepath.Join("testdata", "rar5_dict_64m.rar")))
-	defer r.Close() //nolint:errcheck
+	defer r.Close()          //nolint:errcheck
+	r.SetMaxWindow(64 << 20) // above the non-Linux default cap
 	if _, err := r.NextEntry(); err != nil {
 		t.Fatalf("NextEntry: %v", err)
 	}

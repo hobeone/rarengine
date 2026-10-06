@@ -10,9 +10,9 @@ import (
 var ErrWindowOffsetBounds = errors.New("rarengine: window offset out of bounds")
 
 const (
-	// minWindowSize is the smallest dictionary RAR5 can declare (128 KiB << 1)
-	// and the size a Reader's window starts at, before any member has said
-	// what it needs.
+	// minWindowSize is the size a Reader's window starts at, before any
+	// member has said what it needs: twice the smallest dictionary RAR5 can
+	// declare (128 KiB << 1).
 	minWindowSize = 0x40000
 
 	// maxDictSize is the largest dictionary the format can express: the size
