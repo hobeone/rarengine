@@ -276,6 +276,8 @@ type blockJob struct {
 	resume  bitReader // the reader state at the first undecoded symbol
 	err     error     // the error that ended decoding, nil at a clean block end
 
+	oversize bool // payload is the serial buffer; the block is finished inline
+
 	done chan struct{} // buffered 1; the worker sends when the job is complete
 }
 

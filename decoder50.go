@@ -56,6 +56,7 @@ type decoder50 struct {
 	dictSize int64
 
 	tables        tableSet
+	pipe          *blockPipeline // block read-ahead, nil until a Reader asks for workers
 	bitlenDecoder huffmanDecoder // scratch for ReadCodeLengthTable
 
 	offset [4]int
@@ -95,6 +96,9 @@ func (d *decoder50) init(r io.Reader, reset bool) {
 	// reset: a new source always means the buffered bits belong to a stream
 	// this decoder is no longer reading.
 	d.br = nil
+	if d.pipe != nil {
+		d.pipe.drain()
+	}
 	if reset {
 		for i := range d.offset {
 			d.offset[i] = 0
@@ -114,65 +118,29 @@ func (d *decoder50) init(r io.Reader, reset bool) {
 
 // readBlockHeader parses block bit limits and dynamic Huffman tables from the stream.
 func (d *decoder50) readBlockHeader() error {
-	var temp [2]byte
-	_, err := io.ReadFull(d.r, temp[:])
+	h, err := readBlockHead(d.r)
 	if err != nil {
 		return err
 	}
-	flags := temp[0]
-	hsum := temp[1]
-
-	bytecount := (flags>>3)&3 + 1
-	if bytecount == 4 {
-		return ErrCorruptDecodeHeader
-	}
-
-	blockBits := int(flags)&0x07 + 1
-	blockBytes := 0
-	sum := 0x5a ^ flags
-
-	var blockBytesBuf [3]byte
-	_, err = io.ReadFull(d.r, blockBytesBuf[:bytecount])
-	if err != nil {
-		return err
-	}
-
-	for i := range bytecount {
-		n := blockBytesBuf[i]
-		sum ^= n
-		blockBytes |= int(n) << (i * 8)
-	}
-
-	if sum != hsum {
-		return ErrCorruptDecodeHeader
-	}
-
-	blockBits += (blockBytes - 1) * 8
-
-	if cap(d.payloadBuf) < blockBytes {
-		d.payloadBuf = make([]byte, blockBytes)
+	if cap(d.payloadBuf) < h.blockBytes {
+		d.payloadBuf = make([]byte, h.blockBytes)
 	} else {
-		d.payloadBuf = d.payloadBuf[:blockBytes]
+		d.payloadBuf = d.payloadBuf[:h.blockBytes]
 	}
-	_, err = io.ReadFull(d.r, d.payloadBuf)
-	if err != nil {
+	if _, err = io.ReadFull(d.r, d.payloadBuf); err != nil {
 		return err
 	}
-
-	d.bitReader.Reset(d.payloadBuf, blockBits)
+	d.bitReader.Reset(d.payloadBuf, h.blockBits)
 	d.br = &d.bitReader
-	d.lastBlock = flags&0x40 > 0
-
-	if flags&0x80 > 0 {
-		err = readCodeLengthTable(d.br, d.codeLength[:], &d.bitlenDecoder)
-		if err != nil {
+	d.lastBlock = h.lastBlock
+	if h.newTables {
+		if err = readCodeLengthTable(d.br, d.codeLength[:], &d.bitlenDecoder); err != nil {
 			return err
 		}
 		if err = d.tables.load(d.codeLength[:]); err != nil {
 			return err
 		}
 	}
-
 	return nil
 }
 
@@ -305,6 +273,9 @@ func (d *decoder50) decodeSymbol(win *window, sym int) error {
 // stopping once the window stages fillTarget bytes of unread output; see
 // window.fillTarget for why that is not simply half the window.
 func (d *decoder50) fill(win *window) error {
+	if d.pipe != nil && d.pipe.engaged {
+		return d.fillParallel(win)
+	}
 	target := win.fillTarget()
 	for win.Available() < target {
 		if d.br == nil {

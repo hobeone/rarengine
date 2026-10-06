@@ -78,6 +78,10 @@ type Reader struct {
 	entry *Entry
 	dec50 *decoder50
 
+	// workers is the decode goroutine count SetWorkers asked for; at most 1
+	// is the serial decoder.
+	workers int
+
 	// maxWindow caps how large a dictionary the window grows to meet. It
 	// defaults to the format's 4 GiB maximum where the window is a mapping,
 	// so by default every valid archive decodes, and to 32 MiB where it is
@@ -1004,6 +1008,7 @@ func (r *Reader) buildChain(fh *FileHeader, src io.Reader) (io.Reader, error) {
 	}
 	r.dec50.init(src, fh.FirstBlock)
 	r.dec50.dictSize = fh.DictSize
+	r.dec50.setPipeline(r.workers)
 	return &lz50Reader{dec: r.dec50, win: r.win}, nil
 }
 
@@ -1413,3 +1418,8 @@ func (r *Reader) unstage() bool {
 	// --- no lock held below this line ---
 	return owned
 }
+
+// SetWorkers chooses how many goroutines decode blocks of the members read
+// from now on; n <= 1 is the serial decoder. It is a provisional form that
+// records the count and nothing else.
+func (r *Reader) SetWorkers(n int) { r.workers = n }
