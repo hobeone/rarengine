@@ -90,8 +90,8 @@ type blockPipeline struct {
 
 	jobs    chan *blockJob
 	quit    chan struct{}
-	wg      sync.WaitGroup
-	mu      sync.Mutex // guards quit, running, and the start/stop transitions
+	wg      *sync.WaitGroup // the current generation of goroutines
+	mu      sync.Mutex      // guards quit, jobs, wg, running, and the start/stop transitions
 	running bool
 }
 
@@ -183,9 +183,11 @@ func (p *blockPipeline) disengage(d *decoder50) {
 
 // drain waits for every job in flight and empties the ring. After a stop, a
 // job no worker picked up has nobody to complete it, so the wait also
-// watches quit; that job's done channel is then replaced. A worker that
-// received the job before quit may still send on the old channel, which is
-// buffered and unreferenced from then on.
+// watches quit. Once quit has fired, drain waits for the workers of that
+// generation to exit, which settles every token they will ever send, and
+// clears the slot's done channel without blocking before releasing the
+// slot. The channel itself is never replaced: a worker reads it when it
+// sends.
 func (p *blockPipeline) drain() {
 	for p.count > 0 {
 		j := p.slots[p.head]
@@ -193,10 +195,25 @@ func (p *blockPipeline) drain() {
 			select {
 			case <-j.done:
 			case <-p.quitChan():
-				j.done = make(chan struct{}, 1)
+				p.waitWorkers()
+				select {
+				case <-j.done:
+				default:
+				}
 			}
 		}
 		p.pop()
+	}
+}
+
+// waitWorkers blocks until the goroutines of the current generation have
+// exited. It does not ask them to; that is quit's job.
+func (p *blockPipeline) waitWorkers() {
+	p.mu.Lock()
+	wg := p.wg
+	p.mu.Unlock()
+	if wg != nil {
+		wg.Wait()
 	}
 }
 
@@ -290,7 +307,9 @@ func (p *blockPipeline) readAhead(d *decoder50) {
 	}
 }
 
-// start launches the decode goroutines if they are not running.
+// start launches the decode goroutines if they are not running. A pipeline
+// whose quit has fired starts nothing until restart renews it: submit and
+// wait then report the closed Reader.
 func (p *blockPipeline) start() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -299,12 +318,16 @@ func (p *blockPipeline) start() {
 	}
 	if p.quit == nil {
 		p.quit = make(chan struct{})
+	} else if chanClosed(p.quit) {
+		return
 	}
 	p.jobs = make(chan *blockJob, len(p.slots))
 	p.running = true
 	quit, jobs := p.quit, p.jobs
+	wg := new(sync.WaitGroup)
+	p.wg = wg
 	for range p.workers {
-		p.wg.Go(func() {
+		wg.Go(func() {
 			for {
 				select {
 				case <-quit:
@@ -333,18 +356,39 @@ func (p *blockPipeline) stop() {
 	}
 	close(p.quit)
 	p.running = false
+	wg := p.wg
 	p.mu.Unlock()
-	p.wg.Wait()
+	wg.Wait()
 }
 
-// restart arms a fresh quit channel so the next engage can start workers.
+// restart arms the pipeline for the next engage after a stop. It runs on the
+// traversal goroutine, which owns the ring: it waits for the stopped
+// generation to exit (bounded by one block), releases every slot still in
+// flight, clearing the tokens the workers left, drops the abandoned job
+// queue, and only then installs a fresh quit. A running pipeline is left
+// as it is.
 func (p *blockPipeline) restart() {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	if p.running {
+		p.mu.Unlock()
 		return
 	}
+	wg := p.wg
+	p.mu.Unlock()
+	if wg != nil {
+		wg.Wait()
+	}
+	for p.count > 0 {
+		select {
+		case <-p.slots[p.head].done:
+		default:
+		}
+		p.pop()
+	}
+	p.mu.Lock()
+	p.jobs = nil
 	p.quit = make(chan struct{})
+	p.mu.Unlock()
 }
 
 func (p *blockPipeline) quitChan() chan struct{} {
@@ -367,8 +411,10 @@ func (p *blockPipeline) submit(j *blockJob) {
 	select {
 	case p.jobs <- j:
 	case <-p.quitChan():
-		// Closed under us: complete the job with the closed error so wait
-		// reports it without blocking.
+		// Closed under us: complete the job with the closed error and no
+		// items, so wait reports it without blocking and nothing stale from
+		// the slot's previous block is replayed.
+		j.n, j.partial = 0, false
 		j.err = ErrReaderClosed
 		j.done <- struct{}{}
 	}

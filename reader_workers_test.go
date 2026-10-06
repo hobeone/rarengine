@@ -25,7 +25,9 @@ func goroutinesSettle(t *testing.T, want int) {
 }
 
 // Close stops the workers and a Close after Close is harmless.
-// Mutation check: make stop skip wg.Wait and the goroutine count stays up.
+// Mutation check: make stop skip closing quit and this hangs (the workers
+// never exit, so Wait never returns). The wg.Wait itself is pinned by
+// TestCloseWhileWaitingForWorkers.
 func TestCloseStopsDecodeWorkers(t *testing.T) {
 	base := runtime.NumGoroutine()
 	r := NewReader(fileVolumesOf(t, filepath.Join("testdata", "rar5_solid_bench.rar")))
@@ -106,9 +108,12 @@ func TestCloseWhileWaitingForWorkers(t *testing.T) {
 // slot the new member reuses (the race detector is the oracle; run with
 // -race -count=100).
 func TestAbandonedMemberDrainsInFlightJobs(t *testing.T) {
-	// Two compressed members in one archive: the far fixtures are single
-	// member, so use the solid bench archive twice through Reset.
-	r := NewReader(fileVolumesOf(t, filepath.Join("testdata", "rar5_solid_bench.rar")))
+	file := filepath.Join("testdata", "rar5_abandon_large.rar")
+	want := decodeAll(t, []string{file}, nil)
+	if len(want) != 2 {
+		t.Fatalf("fixture has %d members, want 2", len(want))
+	}
+	r := NewReader(fileVolumesOf(t, file))
 	defer r.Close() //nolint:errcheck
 	r.SetWorkers(4)
 	e, err := r.NextEntry()
@@ -118,35 +123,124 @@ func TestAbandonedMemberDrainsInFlightJobs(t *testing.T) {
 	if _, err := e.Read(make([]byte, 1)); err != nil {
 		t.Fatal(err)
 	}
-	// Abandon: Reset to the same archive with jobs in flight.
-	r.Reset(fileVolumesOf(t, filepath.Join("testdata", "rar5_solid_bench.rar")))
-	want := decodeAll(t, []string{filepath.Join("testdata", "rar5_solid_bench.rar")}, nil)
-	for i := range want {
-		e, err := r.NextEntry()
-		if err != nil {
-			t.Fatalf("after abandon, NextEntry %d: %v", i, err)
-		}
-		h := sha256.New()
-		n, err := io.Copy(h, e)
-		if err != nil {
-			t.Fatalf("after abandon, member %d: %v", i, err)
-		}
-		if n != want[i].n || hex.EncodeToString(h.Sum(nil)) != want[i].sum {
-			t.Fatalf("after abandon, member %d differs from the serial decode", i)
-		}
+	// The first member is abandoned with its ring full of jobs.
+	e, err = r.NextEntry()
+	if err != nil {
+		t.Fatalf("after abandon, NextEntry: %v", err)
+	}
+	h := sha256.New()
+	n, err := io.Copy(h, e)
+	if err != nil {
+		t.Fatalf("after abandon: %v", err)
+	}
+	if n != want[1].n || hex.EncodeToString(h.Sum(nil)) != want[1].sum {
+		t.Fatal("member after abandon differs from the serial decode")
 	}
 }
 
-// Reset revives a closed Reader's pipeline.
+// holdWorkers makes every decode worker wait until unblock is called.
+func holdWorkers(t *testing.T) (unblock func()) {
+	t.Helper()
+	release := make(chan struct{})
+	var once sync.Once
+	unblock = func() { once.Do(func() { close(release) }) }
+	saved := decodeHook
+	decodeHook = func() { <-release }
+	t.Cleanup(func() { decodeHook = saved; unblock() })
+	return unblock
+}
+
+// Reset revives a closed Reader's pipeline, including when Close left jobs
+// queued that no worker ever took: the next member must neither hang on them
+// nor see their results.
+// Mutation check: make restart skip waiting and releasing the ring and the
+// decode after Reset hangs on a job nobody completes (about half the runs).
 func TestResetRevivesWorkersAfterClose(t *testing.T) {
-	r := NewReader(fileVolumesOf(t, filepath.Join("testdata", "rar5_solid_bench.rar")))
+	file := filepath.Join("testdata", "rar5_solid_bench.rar")
+	want := decodeAll(t, []string{file}, nil)
+	unblock := holdWorkers(t)
+	r := NewReader(fileVolumesOf(t, file))
+	defer r.Close() //nolint:errcheck
+	r.SetWorkers(2)
+	e, err := r.NextEntry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	readErr := make(chan error, 1)
+	go func() {
+		_, err := io.Copy(io.Discard, e)
+		readErr <- err
+	}()
+	time.Sleep(50 * time.Millisecond) // the workers hold two jobs, two more are queued
+	closeErr := make(chan error, 1)
+	go func() { closeErr <- r.Close() }()
+	if err := <-readErr; !errors.Is(err, ErrReaderClosed) {
+		t.Fatalf("Read after Close = %v, want ErrReaderClosed", err)
+	}
+	unblock()
+	if err := <-closeErr; err != nil {
+		t.Fatal(err)
+	}
+	r.Reset(fileVolumesOf(t, file))
+	res := make(chan error, 1)
+	go func() {
+		e, err := r.NextEntry()
+		if err != nil {
+			res <- err
+			return
+		}
+		h := sha256.New()
+		n, err := io.Copy(h, e)
+		if err == nil && (n != want[0].n || hex.EncodeToString(h.Sum(nil)) != want[0].sum) {
+			err = errors.New("decode after Reset differs from the serial decode")
+		}
+		res <- err
+	}()
+	select {
+	case err := <-res:
+		if err != nil {
+			t.Fatalf("decode after Reset: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("decode after Reset hung")
+	}
+}
+
+// A Close that lands between member setup steps leaves a quit that has
+// fired. engage must not start workers on it, restart must renew it even
+// though nothing is running, and a second stop must not close it again.
+// Mutation check: let start run workers on a closed quit and the final stop
+// panics with "close of closed channel".
+func TestStopEngageRestartStopDoesNotPanic(t *testing.T) {
+	base := runtime.NumGoroutine()
+	p := newBlockPipeline(2)
+	p.start()
+	p.stop()
+	p.start() // what engage does after a Close that raced the member's setup
+	if p.running {
+		t.Fatal("start ran workers on a quit that had fired")
+	}
+	p.restart()
+	p.start()
+	if !p.running {
+		t.Fatal("start after restart did not run workers")
+	}
+	p.stop()
+	p.stop()
+	goroutinesSettle(t, base)
+}
+
+// The same sequence through the Reader: Close, Reset, decode, Close twice.
+func TestCloseResetDecodeCloseTwice(t *testing.T) {
+	base := runtime.NumGoroutine()
+	file := filepath.Join("testdata", "rar5_solid_bench.rar")
+	r := NewReader(fileVolumesOf(t, file))
 	r.SetWorkers(2)
 	if _, err := r.NextEntry(); err != nil {
 		t.Fatal(err)
 	}
 	_ = r.Close()
-	r.Reset(fileVolumesOf(t, filepath.Join("testdata", "rar5_solid_bench.rar")))
-	defer r.Close() //nolint:errcheck
+	r.Reset(fileVolumesOf(t, file))
 	e, err := r.NextEntry()
 	if err != nil {
 		t.Fatal(err)
@@ -154,6 +248,13 @@ func TestResetRevivesWorkersAfterClose(t *testing.T) {
 	if _, err := io.Copy(io.Discard, e); err != nil {
 		t.Fatalf("decode after Reset: %v", err)
 	}
+	if err := r.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatal(err)
+	}
+	goroutinesSettle(t, base)
 }
 
 // SetWorkers is latched per member: changing it mid-member has no effect
