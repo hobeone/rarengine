@@ -356,6 +356,14 @@ func (p *blockPipeline) start() {
 				case <-quit:
 					return
 				case j := <-jobs:
+					// select picks at random when quit and a queued job are
+					// both ready; without this a stopped worker could decode
+					// every queued block before seeing quit. A job dropped
+					// here is never completed, which drain and restart
+					// already handle for jobs no worker took.
+					if chanClosed(quit) {
+						return
+					}
 					if decodeHook != nil {
 						decodeHook()
 					}

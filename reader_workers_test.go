@@ -62,12 +62,7 @@ func TestCloseStopsDecodeWorkers(t *testing.T) {
 // test's own timeout catches it).
 func TestCloseWhileWaitingForWorkers(t *testing.T) {
 	base := runtime.NumGoroutine()
-	release := make(chan struct{})
-	saved := decodeHook
-	decodeHook = func() { <-release }
-	var releaseOnce sync.Once
-	unblock := func() { releaseOnce.Do(func() { close(release) }) }
-	t.Cleanup(func() { decodeHook = saved; unblock() })
+	entered, unblock := holdWorkers(t, 2)
 
 	r := NewReader(fileVolumesOf(t, filepath.Join("testdata", "rar5_solid_bench.rar")))
 	r.SetWorkers(2)
@@ -80,7 +75,8 @@ func TestCloseWhileWaitingForWorkers(t *testing.T) {
 		_, err := io.Copy(io.Discard, e)
 		readErr <- err
 	}()
-	time.Sleep(50 * time.Millisecond) // let the traversal goroutine block in wait
+	// Both workers hold a block, so the Read can only wait on them.
+	waitEntered(t, entered, 2)
 	// Close waits for the held workers, so it runs aside; the Read must be
 	// released by quit alone, while the workers are still held.
 	closeErr := make(chan error, 1)
@@ -140,27 +136,61 @@ func TestAbandonedMemberDrainsInFlightJobs(t *testing.T) {
 	}
 }
 
-// holdWorkers makes every decode worker wait until unblock is called.
-func holdWorkers(t *testing.T) (unblock func()) {
+// holdWorkers makes every decode worker wait, on entering a block, until
+// unblock is called. entered receives once for each of the first n entries,
+// so a test can wait for the workers to be held rather than sleep and hope.
+func holdWorkers(t *testing.T, n int) (entered <-chan struct{}, unblock func()) {
 	t.Helper()
 	release := make(chan struct{})
+	ch := make(chan struct{}, n)
 	var once sync.Once
 	unblock = func() { once.Do(func() { close(release) }) }
 	saved := decodeHook
-	decodeHook = func() { <-release }
+	decodeHook = func() {
+		select {
+		case ch <- struct{}{}:
+		default: // past the first n; nobody is counting
+		}
+		<-release
+	}
 	t.Cleanup(func() { decodeHook = saved; unblock() })
-	return unblock
+	return ch, unblock
+}
+
+// waitEntered waits for n workers to enter the hook holdWorkers installed.
+func waitEntered(t *testing.T, entered <-chan struct{}, n int) {
+	t.Helper()
+	for i := range n {
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%d of %d workers picked up a block", i, n)
+		}
+	}
+}
+
+// queuedJobs is how many submitted blocks no worker has taken yet.
+func queuedJobs(d *decoder50) int {
+	d.pipeMu.Lock()
+	p := d.pipe
+	d.pipeMu.Unlock()
+	p.mu.Lock()
+	jobs := p.jobs
+	p.mu.Unlock()
+	return len(jobs)
 }
 
 // Reset revives a closed Reader's pipeline, including when Close left jobs
 // queued that no worker ever took: the next member must neither hang on them
 // nor see their results.
 // Mutation check: make restart skip waiting and releasing the ring and the
-// decode after Reset hangs on a job nobody completes (about half the runs).
+// decode after Reset hangs on a job nobody completes, every run: a stopped
+// worker never takes a queued job, so the queued jobs' slots are never
+// completed.
 func TestResetRevivesWorkersAfterClose(t *testing.T) {
 	file := filepath.Join("testdata", "rar5_solid_bench.rar")
 	want := decodeAll(t, []string{file}, nil)
-	unblock := holdWorkers(t)
+	entered, unblock := holdWorkers(t, 2)
 	r := NewReader(fileVolumesOf(t, file))
 	defer r.Close() //nolint:errcheck
 	r.SetWorkers(2)
@@ -173,7 +203,15 @@ func TestResetRevivesWorkersAfterClose(t *testing.T) {
 		_, err := io.Copy(io.Discard, e)
 		readErr <- err
 	}()
-	time.Sleep(50 * time.Millisecond) // the workers hold two jobs, two more are queued
+	// The workers hold two jobs and two more are queued.
+	waitEntered(t, entered, 2)
+	deadline := time.Now().Add(5 * time.Second)
+	for queuedJobs(r.dec50) < 2 {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d jobs queued, want 2", queuedJobs(r.dec50))
+		}
+		time.Sleep(time.Millisecond)
+	}
 	closeErr := make(chan error, 1)
 	go func() { closeErr <- r.Close() }()
 	if err := <-readErr; !errors.Is(err, ErrReaderClosed) {
