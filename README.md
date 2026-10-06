@@ -124,7 +124,13 @@ r.Reset(newVolumesChan)
 // a member whose stream reaches further back than the cap ends short with
 // ErrDictionaryTooLarge.
 r.SetMaxWindow(512 << 20)
+
+r.SetWorkers(4) // decode compressed members on four goroutines (default: one)
 ```
+
+`SetWorkers` helps on large compressed members, where block decoding dominates;
+it costs roughly 1.5x the CPU for the shorter wall time, and does nothing for
+stored members.
 
 ### Inspecting an archive without decoding it
 

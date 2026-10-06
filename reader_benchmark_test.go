@@ -3,6 +3,7 @@ package rarengine_test
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -103,6 +104,20 @@ func BenchmarkDecompress_Compress(b *testing.B) {
 }
 
 func BenchmarkDecompress_Solid(b *testing.B) {
+	benchmarkSolid(b, nil)
+}
+
+func BenchmarkDecompress_SolidWorkers(b *testing.B) {
+	for _, w := range []int{2, 4, 8} {
+		b.Run(fmt.Sprintf("workers=%d", w), func(b *testing.B) {
+			benchmarkSolid(b, func(r *rarengine.Reader) { r.SetWorkers(w) })
+		})
+	}
+}
+
+// benchmarkSolid decodes the solid fixture repeatedly through one Reader;
+// configure, when non-nil, runs on the Reader before the first decode.
+func benchmarkSolid(b *testing.B, configure func(*rarengine.Reader)) {
 	archivePath := filepath.Join("testdata", "rar5_solid_bench.rar")
 	data, err := os.ReadFile(archivePath)
 	if err != nil {
@@ -113,6 +128,10 @@ func BenchmarkDecompress_Solid(b *testing.B) {
 	dummyVol <- io.NopCloser(bytes.NewReader(data))
 	close(dummyVol)
 	r := rarengine.NewReader(dummyVol)
+	defer r.Close() //nolint:errcheck
+	if configure != nil {
+		configure(r)
+	}
 
 	buf := make([]byte, 4096)
 
