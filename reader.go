@@ -191,7 +191,7 @@ type Reader struct {
 // dictionary it declared, and the default cap is the format's 4 GiB maximum.
 // Elsewhere the window is a heap slice and the default cap is 32 MiB, because
 // a heap allocation is committed at once and cannot fail gracefully. A stored
-// member in a non-solid archive never touches the window at all.
+// member never touches the window at all.
 //
 // Reading an Entry concurrently with NextEntry or Reset on the same Reader
 // was always a data race; because growth replaces the window's storage, it
@@ -649,10 +649,9 @@ func (r *Reader) dispatch(h *blockHeader) (*Entry, error) {
 	// archive header and on every member of a solid run. A member claiming
 	// to continue a solid stream in an archive that never declared one
 	// contradicts it, and the two flags drive different mechanisms -- this
-	// one picks BeginFile's reset-or-keep, the archive's picks whether a
-	// stored member records history at all (buildChain) and whether an
+	// one picks BeginFile's reset-or-keep, the archive's picks whether an
 	// abandoned member is decoded out (finishActive). Disagreeing, they
-	// leave a solid successor reading history a stored member never wrote.
+	// leave a solid successor reading history its predecessors never wrote.
 	// Refused as corrupt rather than reconciled: no honest writer produces
 	// it, so there is no reading of it to prefer.
 	//
@@ -769,8 +768,8 @@ func (r *Reader) handleNonFileBlock(h *blockHeader) error {
 		}
 		// The first archive header seen sets the flag; a later one (each
 		// volume repeats its own) must agree. A sticky OR let a second
-		// volume turn solidity on mid-member, after the member's chain
-		// had already been built without history recording.
+		// volume turn solidity on mid-member, so that finishActive would
+		// treat as solid a member admitted under a non-solid archive.
 		if r.solidSeen && r.solid != ah.Solid {
 			return fmt.Errorf("%w: archive header solid flag is %v, "+
 				"an earlier volume declared %v",
@@ -913,11 +912,11 @@ const bombRatio = 65536
 // sizeWindow makes the window at least as large as the member's declared
 // dictionary allows, within the SetMaxWindow cap.
 //
-// Only a member that will touch the window is considered. A stored member in
-// a non-solid archive is served straight from its source (buildChain hands it
-// no window), so sizing for it would reserve address space nothing writes to;
-// this is the case that lets a Reader verify a stored video with the window at
-// its 256 KiB starting size. A header that declares no dictionary (DictSize 0,
+// Only a member that will touch the window is considered. A stored member is
+// served straight from its source whatever the archive's solidity (buildChain
+// hands it no window), so sizing for it would reserve address space nothing
+// writes to; this is the case that lets a Reader verify a stored video with
+// the window at its 256 KiB starting size. A header that declares no dictionary (DictSize 0,
 // which parseFileHeader reports for a version it did not decode the field for)
 // leaves the window as it is.
 //
