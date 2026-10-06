@@ -1,0 +1,48 @@
+rar5_abandon_large.rar	0	huge.bin	17897472	ff83a2f9fef1d3d586268654554c89615edc85364c8bf8bb07723a81ccf34923	
+rar5_abandon_large.rar	1	after.txt	99999	4aaeb41fb658f1658f64728b491fa0ac34e105b2ab445aed1657a645400e2d15	
+rar5_blake2.rar	0	hello.txt	15	243a8cb7ba267196050e534d154f41a658b3f5c29d1d9da2a5924e5e795100e3	
+rar5_blake2_encrypted.rar	0	hello.txt	0	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	rarengine: password required for encrypted file
+rar5_blake2_large.rar	0	b2_large.bin	1200037	ac1524ad726f16cb3d77385a6d3e2be4472d202ab9a5f0e7943313a4dd860219	
+rar5_comment.rar	0	hello.txt	15	243a8cb7ba267196050e534d154f41a658b3f5c29d1d9da2a5924e5e795100e3	
+rar5_compress.rar	0	hello.txt	15	243a8cb7ba267196050e534d154f41a658b3f5c29d1d9da2a5924e5e795100e3	
+rar5_compress.rar	1	second.txt	23	c75fb28f09160e418f8b14d2b6431d37cf270467b1d21a00ddaf1a1d96bae4fe	
+rar5_corrupt_header.rar	0		0		rarengine: bad header CRC
+rar5_dict4g.rar	0	hello.txt	15	243a8cb7ba267196050e534d154f41a658b3f5c29d1d9da2a5924e5e795100e3	
+rar5_dict_128k.rar	0	hello.txt	15	243a8cb7ba267196050e534d154f41a658b3f5c29d1d9da2a5924e5e795100e3	
+rar5_dict_1g.rar	0	hello.txt	15	243a8cb7ba267196050e534d154f41a658b3f5c29d1d9da2a5924e5e795100e3	
+rar5_dict_1m.rar	0	hello.txt	15	243a8cb7ba267196050e534d154f41a658b3f5c29d1d9da2a5924e5e795100e3	
+rar5_dict_32m.rar	0	hello.txt	15	243a8cb7ba267196050e534d154f41a658b3f5c29d1d9da2a5924e5e795100e3	
+rar5_dict_64m.rar	0	hello.txt	15	243a8cb7ba267196050e534d154f41a658b3f5c29d1d9da2a5924e5e795100e3	
+rar5_directory.rar	0	tmp/tmp.lPdeYmNHLq/subdir/top.txt	9	cfde079781fe5327deed2f9cc4d91c913954e2dec7d17171dfbb958817e3b54e	
+rar5_directory.rar	1	tmp/tmp.lPdeYmNHLq/subdir/nested/deep.txt	14	b509163964e822915ea7e822759ecae39dd696626e70b74b96de6ac7396415d0	
+rar5_directory.rar	2	tmp/tmp.lPdeYmNHLq/subdir/nested	0	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	
+rar5_encrypted.rar	0	hello.txt	0	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	rarengine: password required for encrypted file
+rar5_encrypted_header.rar	0		0		rarengine: password required for encrypted file
+rar5_exe_filter.rar	0	own.exe	218656	f44631a38eeecdd8e9c5f5e211d6aa7deed2ee0af6ab996efd24835ad10d18da	
+rar5_link_hard.rar	0	orig.txt	12	3f8fd92cf886ab7b9060c209653650c8e7faed1f6c6d56144b8317f4ab85a4bd	
+rar5_link_hard.rar	1	hard.txt	0	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	rarengine: member is a link and has no content to read; check Header.LinkType
+rar5_link_hard_large.rar	0	zhard.bin	0	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	rarengine: member is a link and has no content to read; check Header.LinkType
+rar5_link_solid.rar	0	a.txt	62	0fc17ca2f99424ead76eca0fde3d5632f606b6b82122be6ed93587ce50fdc8b1	
+rar5_link_solid.rar	1	mid.lnk	0	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	rarengine: member is a link and has no content to read; check Header.LinkType
+rar5_link_solid.rar	2	c.txt	68	eb65e5436db56ff1eafc76b01181373fac2a9a2d88b2118e5d6386d219d9dcf9	
+rar5_link_symlink.rar	0	real.txt	9	2d672fe1b342f59456763611d405aa1572663de1a15f6cac0298e7f6663b9b07	
+rar5_link_symlink.rar	1	link.txt	0	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	rarengine: member is a link and has no content to read; check Header.LinkType
+rar5_locked.rar	0	hello.txt	18	be4da69a16d58b9e9516c56f8dadb82b88c2beca88fbfb31ddf9d3e7dbd2d889	
+rar5_mixed_encryption.rar	0	plain.txt	13	d0f4a72f5b3b8508821659668535743fe692e21516dcc26395888c9ad4003227	
+rar5_mixed_encryption.rar	1	secret.txt	0	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	rarengine: password required for encrypted file
+rar5_recovery.rar	0	hello.txt	15	243a8cb7ba267196050e534d154f41a658b3f5c29d1d9da2a5924e5e795100e3	
+rar5_solid.rar	0	hello.txt	15	243a8cb7ba267196050e534d154f41a658b3f5c29d1d9da2a5924e5e795100e3	
+rar5_solid.rar	1	second.txt	23	c75fb28f09160e418f8b14d2b6431d37cf270467b1d21a00ddaf1a1d96bae4fe	
+rar5_solid_bench.rar	0	payload.bin	5242952	29d2034fe27fcdb215ded7e943b04ae56f687407839b43a2a41adf045984b9f9	
+rar5_solid_stored_mid.rar	0	in/a_first.txt	24004	e7f640783863fb8199089239415ad06bd92a56c5b58ae8a60d07dfeb713b49ca	
+rar5_solid_stored_mid.rar	1	in/b_stored.jpg	6000	e6aab2a8bf2ff7326dd7e839f58a4f63e091d076400bcfdb9c2bab1805b7e686	
+rar5_solid_stored_mid.rar	2	in/c_after.txt	24004	a6045f4c833f43c9e6bbdbccd68500441f5c4da8aaac53273abbcabd905067d3	
+rar5_store.rar	0	hello.txt	15	243a8cb7ba267196050e534d154f41a658b3f5c29d1d9da2a5924e5e795100e3	
+rar5_symlink.rar	0	tmp/tmp.lPdeYmNHLq/link.txt	0	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	rarengine: member is a link and has no content to read; check Header.LinkType
+rar5_times.rar	0	hello.txt	15	243a8cb7ba267196050e534d154f41a658b3f5c29d1d9da2a5924e5e795100e3	
+rar5_truncated.rar	0		0		unexpected EOF
+rar5_unix_owner.rar	0	hello.txt	15	243a8cb7ba267196050e534d154f41a658b3f5c29d1d9da2a5924e5e795100e3	
+rar5_version.rar	0	hello.txt	15	243a8cb7ba267196050e534d154f41a658b3f5c29d1d9da2a5924e5e795100e3	
+rar5_version.rar	1	hello.txt	18	be4da69a16d58b9e9516c56f8dadb82b88c2beca88fbfb31ddf9d3e7dbd2d889	
+rar5_zeros_bomb_ratio.rar	0	zeros_64m.bin	67108864	3b6a07d0d404fab4e23b6d34bc6696a6a312dd92821332385e5af7c01c421351	
+rar7_unpack_version.rar	0	hello.txt	0	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	rarengine: unsupported archive format: file "hello.txt" declares unpack version 1, this library decodes version 0 (RAR 5.0)
