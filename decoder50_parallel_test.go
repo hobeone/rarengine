@@ -276,17 +276,22 @@ func TestNewTablesFailingDoesNotDisturbInFlightBlocks(t *testing.T) {
 	}
 }
 
+// testPayloadLimit is a payload limit the fixture's blocks exceed, so they
+// take the oversize path.
+const testPayloadLimit = 16 << 10
+
 // A block larger than maxParallelPayload is decoded inline with the serial
 // buffer, not held in a slot. Forced by lowering the limit through a test
 // hook, since no fixture has a 4 MiB block.
 func TestOversizeBlockIsDecodedInline(t *testing.T) {
-	saved := parallelPayloadLimit
-	t.Cleanup(func() { parallelPayloadLimit = saved })
-	parallelPayloadLimit = 16 << 10 // blocks in the fixture exceed it
 	file := []string{filepath.Join("testdata", "rar5_solid_bench.rar")}
 	serial := decodeAll(t, file, nil)
 	var rd *Reader
-	par := decodeAll(t, file, func(r *Reader) { rd = r; r.SetWorkers(4) })
+	par := decodeAll(t, file, func(r *Reader) {
+		rd = r
+		r.dec50.payloadLimit = testPayloadLimit // blocks in the fixture exceed it
+		r.SetWorkers(4)
+	})
 	if len(par) != len(serial) {
 		t.Fatalf("%d outcomes, serial %d", len(par), len(serial))
 	}
@@ -308,10 +313,6 @@ func TestOversizeBlockIsDecodedInline(t *testing.T) {
 // Mutation check: assign j.payload = d.payloadBuf before the payload read,
 // as the oversize path first did, and the alias assertion fails.
 func TestOversizeReadFailureDoesNotLeaveSlotAliased(t *testing.T) {
-	saved := parallelPayloadLimit
-	t.Cleanup(func() { parallelPayloadLimit = saved })
-	parallelPayloadLimit = 16 << 10
-
 	data := fixtureBytes(t, "rar5_solid_bench.rar")
 	offsets := blockHeaderOffsets(t, data)
 	if len(offsets) < 4 {
@@ -342,6 +343,7 @@ func TestOversizeReadFailureDoesNotLeaveSlotAliased(t *testing.T) {
 
 		r := readerFor(data[:cut])
 		defer r.Close() //nolint:errcheck
+		r.dec50.payloadLimit = testPayloadLimit
 		r.SetWorkers(4)
 		failed := readOutcomes(r)
 		if len(failed) == 0 || failed[0].err == "" {
@@ -369,7 +371,7 @@ func TestOversizeReadFailureDoesNotLeaveSlotAliased(t *testing.T) {
 		target := -1
 		for i := 1; i+1 < len(offsets); i++ {
 			size := offsets[i+1] - offsets[i]
-			if data[offsets[i]]&0x80 != 0 && size > parallelPayloadLimit {
+			if data[offsets[i]]&0x80 != 0 && size > testPayloadLimit {
 				target = offsets[i]
 				break
 			}
@@ -387,6 +389,7 @@ func TestOversizeReadFailureDoesNotLeaveSlotAliased(t *testing.T) {
 
 		r := readerFor(v)
 		defer r.Close() //nolint:errcheck
+		r.dec50.payloadLimit = testPayloadLimit
 		r.SetWorkers(4)
 		got := readOutcomes(r)
 		if len(got) == 0 || got[0].line() != serial[0].line() {

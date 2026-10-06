@@ -92,7 +92,7 @@ func handTables(offsetSym, lowSym int) []byte {
 type decodeMode struct {
 	name    string
 	workers int
-	limit   int // parallelPayloadLimit; 0 sends every block inline
+	limit   int // decoder50.payloadLimit; 0 sends every block inline
 }
 
 var handModes = []decodeMode{
@@ -106,11 +106,8 @@ var handModes = []decodeMode{
 // ended it (io.EOF at a clean end).
 func decodeHand(t *testing.T, m decodeMode, cl, data []byte, dictSize int64) ([]byte, error) {
 	t.Helper()
-	saved := parallelPayloadLimit
-	parallelPayloadLimit = m.limit
-	defer func() { parallelPayloadLimit = saved }()
-
 	d := newDecoder50()
+	d.payloadLimit = m.limit
 	if err := d.tables.load(cl); err != nil {
 		t.Fatal(err)
 	}

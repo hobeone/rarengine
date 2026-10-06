@@ -11,14 +11,6 @@ const (
 	maxParallelPayload = 4 << 20 // a block bigger than this is decoded inline
 )
 
-// parallelPayloadLimit is the size above which readAhead hands a block to
-// the caller goroutine instead of a slot. A variable so a test can lower it.
-var parallelPayloadLimit = maxParallelPayload
-
-// decodeHook, when set, runs in a worker before it decodes a block. It
-// exists so a test can hold a worker; it costs one nil check per block.
-var decodeHook func()
-
 // blockHead is a parsed block header, before its payload is read.
 type blockHead struct {
 	blockBytes int
@@ -68,6 +60,14 @@ func readBlockHead(r io.Reader, buf *[5]byte) (blockHead, error) {
 type blockPipeline struct {
 	workers int
 
+	// payloadLimit is the size above which readAhead reads a block into the
+	// serial buffer instead of a slot.
+	payloadLimit int
+	// beforeDecode, when set, runs in a worker before it decodes a block. start
+	// captures it, so it must be set before the workers start. It exists so a
+	// test can hold a worker; it costs one nil check per block.
+	beforeDecode func()
+
 	slots       []*blockJob // ring storage, len R = 2*workers
 	head, count int         // ring: slots[head] is the oldest in flight
 	idx         int         // replay position within slots[head]
@@ -103,16 +103,14 @@ type blockPipeline struct {
 func newBlockPipeline(workers int) *blockPipeline {
 	r := 2 * workers
 	p := &blockPipeline{
-		workers: workers,
-		slots:   make([]*blockJob, r),
-		tables:  make([]*tableSet, r+1),
-		inUse:   make([]int, r+1),
+		workers:      workers,
+		payloadLimit: maxParallelPayload,
+		slots:        make([]*blockJob, r),
+		tables:       make([]*tableSet, r+1),
+		inUse:        make([]int, r+1),
 	}
 	for i := range p.slots {
-		p.slots[i] = &blockJob{
-			items: make([]item, itemCap),
-			done:  make(chan struct{}, 1),
-		}
+		p.slots[i] = &blockJob{done: make(chan struct{}, 1)}
 	}
 	for i := range p.tables {
 		p.tables[i] = &tableSet{}
@@ -144,6 +142,8 @@ func (d *decoder50) setPipeline(workers int) {
 			d.pipe.stop()
 		}
 		p := newBlockPipeline(workers)
+		p.payloadLimit = d.payloadLimit
+		p.beforeDecode = d.beforeDecode
 		d.pipeMu.Lock()
 		d.pipe = p
 		stopped := d.pipeStopped
@@ -266,7 +266,10 @@ func (p *blockPipeline) readAhead(d *decoder50) {
 			return
 		}
 		j := p.slots[(p.head+p.count)%len(p.slots)]
-		oversize := h.blockBytes > parallelPayloadLimit
+		if j.items == nil {
+			j.items = make([]item, itemCap)
+		}
+		oversize := h.blockBytes > p.payloadLimit
 		var payload []byte
 		if oversize {
 			// Too big to hold in a slot: read it into the serial buffer, as
@@ -343,6 +346,7 @@ func (p *blockPipeline) start() {
 	p.jobs = make(chan *blockJob, len(p.slots))
 	p.running = true
 	jobs := p.jobs
+	beforeDecode := p.beforeDecode
 	wg := new(sync.WaitGroup)
 	p.wg = wg
 	for range p.workers {
@@ -360,8 +364,8 @@ func (p *blockPipeline) start() {
 					if chanClosed(quit) {
 						return
 					}
-					if decodeHook != nil {
-						decodeHook()
+					if beforeDecode != nil {
+						beforeDecode()
 					}
 					decodeBlockItems(j)
 					j.done <- struct{}{}
