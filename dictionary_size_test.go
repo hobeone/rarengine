@@ -157,8 +157,7 @@ func TestFullWindowHasHistoryLenEqualToSize(t *testing.T) {
 				w.writeByte(1)
 			}
 		},
-		"writeBytes":    func(w *window) { w.writeBytes(make([]byte, size)) },
-		"recordHistory": func(w *window) { w.recordHistory(make([]byte, size)) },
+		"writeBytes": func(w *window) { w.writeBytes(make([]byte, size)) },
 		"CopyBytes": func(w *window) {
 			w.writeByte(1)
 			if err := w.CopyBytes(size-1, 1); err != nil {

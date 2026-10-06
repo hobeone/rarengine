@@ -119,8 +119,10 @@ func TestSolidMemberAfterRefusedPredecessorIsBrokenNotCorrupt(t *testing.T) {
 // rather than decoded against history nobody wrote.
 func TestSizeWindowRefusalDamagesTheWindow(t *testing.T) {
 	first := rar5Member(t, memberSpec{name: "a.bin", content: "first", withCRC: true})
+	// Declared as method 3: a stored member is exempt from sizing, and the
+	// refusal under test happens before any byte of payload is decoded.
 	grown := rar5Member(t, memberSpec{name: "b.bin", content: "second", withCRC: true,
-		solid: true, extraCompFlags: 8 << fileCompDictShift})
+		solid: true, extraCompFlags: 8<<fileCompDictShift | 3<<7})
 	third := rar5Member(t, memberSpec{name: "c.bin", content: "third", withCRC: true, solid: true})
 	r := NewReader(volumesOf(rar5Archive(t, true, first, grown, third)))
 	defer r.Close() //nolint:errcheck
@@ -249,9 +251,11 @@ func TestStoredMemberInNonSolidArchiveDoesNotGrowTheWindow(t *testing.T) {
 func TestSolidMemberDeclaringALargerDictionaryIsRefused(t *testing.T) {
 	first := rar5Member(t, memberSpec{name: "a.bin", content: "first member", withCRC: true})
 	// e = 8: 128 KiB << 8 = 32 MiB, far more than the 256 KiB the first
-	// member left the window at.
+	// member left the window at. Declared as method 3, because a stored
+	// member is exempt from sizing; the refusal comes before any payload is
+	// decoded, so the stored payload behind the header is never read.
 	grown := rar5Member(t, memberSpec{name: "b.bin", content: "second", withCRC: true,
-		solid: true, extraCompFlags: 8 << fileCompDictShift})
+		solid: true, extraCompFlags: 8<<fileCompDictShift | 3<<7})
 	r := NewReader(volumesOf(rar5Archive(t, true, first, grown)))
 	defer r.Close() //nolint:errcheck
 
@@ -292,7 +296,7 @@ func TestSizeWindowDecisionTable(t *testing.T) {
 	}{
 		{name: "compressed non-solid grows", fh: FileHeader{Method: 3, DictSize: 1 << 20}, wantSize: 1 << 20},
 		{name: "stored in non-solid archive is exempt", fh: FileHeader{Method: 0, DictSize: 1 << 20}, wantSize: minWindowSize},
-		{name: "stored in solid archive grows", solidArc: true, fh: FileHeader{Method: 0, DictSize: 1 << 20}, wantSize: 1 << 20},
+		{name: "stored in solid archive is exempt too", solidArc: true, fh: FileHeader{Method: 0, DictSize: 1 << 20}, wantSize: minWindowSize},
 		{name: "no declaration leaves the window alone", fh: FileHeader{Method: 3}, wantSize: minWindowSize},
 		{name: "declaration within the window is a no-op", fh: FileHeader{Method: 3, DictSize: 128 << 10}, wantSize: minWindowSize},
 		{name: "cap bounds growth", fh: FileHeader{Method: 3, DictSize: 64 << 20}, max: 1 << 20, wantSize: 1 << 20},

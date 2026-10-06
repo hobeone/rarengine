@@ -2,8 +2,6 @@ package rarengine
 
 import (
 	"bytes"
-	"errors"
-	"io"
 	"testing"
 	"time"
 )
@@ -124,115 +122,19 @@ func TestWindowReadReportsWhatItActuallyMoved(t *testing.T) {
 	}
 }
 
-// TestStoreReaderLeavesWindowPointersConsistent covers the source of that
-// state: storeReader records every byte it delivers as history so a solid
-// successor can back-reference it, but it never reads from the window, so
-// nothing advanced r behind the writes.
-//
-// Once w laps r, full and Available stop describing the buffer. The fix is
-// not a drain -- there is nothing to drain, the bytes went to the caller
-// straight from the source -- but recording them as history that is already
-// accounted for, which is what they are.
-//
-// Mutation check: change storeReader.Read back to win.writeBytes and this
-// fails on the pointer assertions.
-func TestStoreReaderLeavesWindowPointersConsistent(t *testing.T) {
-	win := newWindow(0x40000)
-	// Three and a bit laps, in chunks that do not divide the window, so a
-	// chunk boundary lands on r at some point rather than by construction.
-	content := bytes.Repeat([]byte("stored member payload. "), 60000)
-	if len(content) < 3*win.size {
-		t.Fatalf("fixture is %d bytes, need more than %d to lap the window",
-			len(content), 3*win.size)
-	}
-
-	s := &storeReader{r: bytes.NewReader(content), win: win}
-	got := make([]byte, 0, len(content))
-	buf := make([]byte, 7919) // prime, so chunks straddle the ring boundary
-	for {
-		n, err := s.Read(buf)
-		got = append(got, buf[:n]...)
-		if err != nil {
-			// Only io.EOF ends this loop. Breaking on any error let a
-			// mid-stream failure end the read silently and surface as a
-			// content-length mismatch below, naming the wrong cause.
-			if !errors.Is(err, io.EOF) {
-				t.Fatalf("storeReader.Read after %d bytes: %v", len(got), err)
-			}
-			break
-		}
-	}
-
-	// The member's own bytes are unaffected: they come from the source, not
-	// from the window. This is the regression guard on the fix itself.
-	if !bytes.Equal(got, content) {
-		t.Fatalf("storeReader delivered %d bytes, want %d", len(got), len(content))
-	}
-	if win.full {
-		t.Error("full is set after a store pass: nothing is pending in the " +
-			"window, so nothing can be full")
-	}
-	if win.r != win.w {
-		t.Errorf("r=%d w=%d: a stored member leaves nothing unread, so the "+
-			"pointers must not diverge", win.r, win.w)
-	}
-	if avail := win.Available(); avail != 0 {
-		t.Errorf("Available() = %d, want 0", avail)
-	}
-	// The history itself must survive -- that is why storeReader touches the
-	// window at all. A full lap means the whole buffer is referenceable.
-	if !win.wrapped || win.historyLen() != win.size {
-		t.Errorf("wrapped=%v historyLen=%d, want true and %d: a solid "+
-			"successor must still reach the stored member's bytes",
-			win.wrapped, win.historyLen(), win.size)
-	}
-}
-
-// A solid member following a large stored one must still be able to
-// back-reference the stored bytes. This is the property the window write
-// exists for, asserted end to end so the fix cannot quietly drop it.
-func TestSolidSuccessorReachesStoredHistory(t *testing.T) {
-	win := newWindow(0x40000)
-	content := bytes.Repeat([]byte("stored member payload. "), 60000)
-
-	s := &storeReader{r: bytes.NewReader(content), win: win}
-	if _, err := io.Copy(io.Discard, s); err != nil {
-		t.Fatalf("store pass: %v", err)
-	}
-
-	// The solid successor opens on the history the stored member left.
-	if err := win.BeginFile(true); err != nil {
-		t.Fatalf("BeginFile(solid): %v", err)
-	}
-	// Reach back into it, at the deepest distance the window allows.
-	if err := win.CopyBytes(64, win.size-1); err != nil {
-		t.Fatalf("CopyBytes at the full window depth: %v", err)
-	}
-	out := make([]byte, 64)
-	n, _ := win.Read(out)
-	if n != 64 {
-		t.Fatalf("read %d bytes back from the solid copy, want 64", n)
-	}
-	if bytes.Equal(out, make([]byte, 64)) {
-		t.Fatal("solid successor read zeroes: the stored member's history " +
-			"was not recorded")
-	}
-}
-
 // TestMemberBoundaryClearsStaleFull documents why the two defects above are
 // latent rather than reachable through the public API today, and pins the
 // mechanism that makes them so.
 //
 // BeginFile resets r to w and clears full at every member boundary, both for
-// a solid member and a non-solid one. A stored member's stale pointers
-// therefore never survive into the member that would read the window, and
-// nothing reads it during the stored member itself -- storeReader delivers
-// from its source. That is why a 40 MB stored member laps the window and
-// still round-trips byte-for-byte, before and after the fix.
+// a solid member and a non-solid one. Stale pointers therefore never survive
+// into the next member. Since #94 a stored member does not touch the window
+// at all, so the only writer is decoder50, which drains through Read; the
+// reset is what would contain a future writer that did not.
 //
 // Recorded because the reachability argument depends entirely on this reset.
-// A future path that reads the window during a stored member, or that admits
-// a member without going through BeginFile, removes the mask and the
+// A future path that writes the window without draining, or that admits a
+// member without going through BeginFile, removes the mask and the
 // underlying bug becomes live -- so the test that documents the mask belongs
 // next to the fix, not in a commit message.
 func TestMemberBoundaryClearsStaleFull(t *testing.T) {

@@ -153,7 +153,11 @@ func TestCopyBytesRefusesBothSidesOfTheOffsetOverflow(t *testing.T) {
 	if err := w.BeginFile(false); err != nil {
 		t.Fatalf("BeginFile: %v", err)
 	}
-	w.recordHistory([]byte("some history to copy from"))
+	history := []byte("some history to copy from")
+	w.writeBytes(history)
+	if n, _ := w.Read(make([]byte, len(history))); n != len(history) {
+		t.Fatalf("setup drain read %d bytes, want %d", n, len(history))
+	}
 
 	cases := []struct {
 		name     string

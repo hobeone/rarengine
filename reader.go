@@ -936,7 +936,9 @@ const bombRatio = 65536
 // system error: the member needs a window this Reader could not provide,
 // which is the classification its consumers already route to a fallback.
 func (r *Reader) sizeWindow(fh *FileHeader) error {
-	if fh.DictSize <= 0 || (fh.Method == 0 && !r.solid) {
+	// A stored member never touches the window, so its declaration (always
+	// 128 KiB from rar) sizes nothing, in a solid archive or otherwise.
+	if fh.DictSize <= 0 || fh.Method == 0 {
 		return nil
 	}
 	if !r.capLatched {
@@ -963,7 +965,7 @@ func (r *Reader) sizeWindow(fh *FileHeader) error {
 
 // buildChain assembles the decode chain for a member:
 //
-//	decoder50 / storeReader
+//	decoder50 (a stored member reads the layer below directly)
 //	  └─ cbcDecryptReader (if encrypted)
 //	       └─ multiVolumePayloadReader
 //
@@ -993,14 +995,13 @@ func (r *Reader) buildChain(fh *FileHeader, src io.Reader) (io.Reader, error) {
 		src = decSrc
 	}
 	if fh.Method == 0 {
-		// In a non-solid archive, a stored member cannot be referenced by a
-		// successor, so recordHistory would touch the window with no benefit.
-		// Pass nil to skip it entirely.
-		var win *window
-		if r.solid {
-			win = r.win
-		}
-		return &storeReader{r: src, win: win}, nil
+		// A stored member's bytes go straight to the caller and never enter
+		// the window, in a solid archive as much as in any other: rar's
+		// UnstoreFile copies without touching the unpack window, so the
+		// solid stream's history is exactly what the compressed members
+		// produced. Recording the stored bytes shifted every back-reference
+		// the next solid member made and failed its CRC (#94).
+		return src, nil
 	}
 	r.dec50.init(src, fh.FirstBlock)
 	r.dec50.dictSize = fh.DictSize
@@ -1014,29 +1015,6 @@ type lz50Reader struct {
 
 func (l *lz50Reader) Read(p []byte) (int, error) {
 	return l.dec.Read(l.win, p)
-}
-
-type storeReader struct {
-	r   io.Reader
-	win *window
-}
-
-// Read delivers the stored member's bytes from the source and records them as
-// window history when the member can be referenced by a successor (in a solid
-// archive). In a non-solid archive the window is nil and recordHistory is skipped,
-// so the window is never dirtied by stored members.
-//
-// recordHistory rather than writeBytes: these bytes are not staged for anyone
-// to read back -- they went to the caller from s.r -- and writeBytes would
-// leave them counted as unread with no drain step to clear them. A stored
-// member larger than the window then lapped the read pointer and left full
-// and Available describing a buffer that no longer existed.
-func (s *storeReader) Read(p []byte) (int, error) {
-	n, err := s.r.Read(p)
-	if n > 0 && s.win != nil {
-		s.win.recordHistory(p[:n])
-	}
-	return n, err
 }
 
 // chanClosed reports whether ch has been closed, without receiving from it.
