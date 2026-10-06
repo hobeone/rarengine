@@ -39,30 +39,41 @@ func decodeAll(t *testing.T, files []string, configure func(*Reader)) []decodeOu
 		if configure != nil {
 			configure(r)
 		}
-		for i := 0; ; i++ {
-			e, err := r.NextEntry()
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			o := decodeOutcome{file: filepath.Base(file), index: i}
-			if err != nil {
-				o.err = err.Error()
-				out = append(out, o)
-				break
-			}
-			o.name = e.Header.Name
-			h := sha256.New()
-			n, rerr := io.Copy(h, e)
-			o.n = n
-			o.sum = hex.EncodeToString(h.Sum(nil))
-			if rerr != nil {
-				o.err = rerr.Error()
-			}
+		base := filepath.Base(file)
+		for _, o := range readOutcomes(r) {
+			o.file = base
 			out = append(out, o)
 		}
 		_ = r.Close()
 	}
 	return out
+}
+
+// readOutcomes reads every member of r's archive: NextEntry until io.EOF,
+// each member's bytes hashed. A NextEntry error ends the list with an
+// outcome that carries it; a read error is recorded on its member.
+func readOutcomes(r *Reader) []decodeOutcome {
+	var out []decodeOutcome
+	for i := 0; ; i++ {
+		e, err := r.NextEntry()
+		if errors.Is(err, io.EOF) {
+			return out
+		}
+		o := decodeOutcome{index: i}
+		if err != nil {
+			o.err = err.Error()
+			return append(out, o)
+		}
+		o.name = e.Header.Name
+		h := sha256.New()
+		n, rerr := io.Copy(h, e)
+		o.n = n
+		o.sum = hex.EncodeToString(h.Sum(nil))
+		if rerr != nil {
+			o.err = rerr.Error()
+		}
+		out = append(out, o)
+	}
 }
 
 // goldenFixtures is every single-volume fixture under testdata. Multi-volume

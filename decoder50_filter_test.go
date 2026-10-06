@@ -37,6 +37,11 @@ func (bw *bitWriter) flush() {
 	}
 }
 
+// bitLen is the number of bits written so far, including those still pending.
+func (bw *bitWriter) bitLen() int {
+	return len(bw.buf)*8 + int(bw.n)
+}
+
 // writeVarBytes emits the shape readFilter5Data parses: a 2-bit count of value
 // bytes, followed by that many little-endian bytes.
 func writeVarBytes(bw *bitWriter, value int64) {

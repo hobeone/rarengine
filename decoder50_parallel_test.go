@@ -2,9 +2,7 @@ package rarengine
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"errors"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -102,31 +100,6 @@ func pipelineBlocks(r *Reader) int {
 	return r.dec50.pipe.parallelBlocks
 }
 
-// readOutcomes reads every member of r's archive.
-func readOutcomes(r *Reader) []decodeOutcome {
-	var out []decodeOutcome
-	for i := 0; ; i++ {
-		e, err := r.NextEntry()
-		if errors.Is(err, io.EOF) {
-			return out
-		}
-		o := decodeOutcome{index: i}
-		if err != nil {
-			o.err = err.Error()
-			return append(out, o)
-		}
-		o.name = e.Header.Name
-		var buf bytes.Buffer
-		n, rerr := io.Copy(&buf, e)
-		o.n = n
-		o.sum = fmt.Sprintf("%x", sha256.Sum256(buf.Bytes()))
-		if rerr != nil {
-			o.err = rerr.Error()
-		}
-		out = append(out, o)
-	}
-}
-
 // Damaged input decodes identically too: the same bytes before the error
 // and the same error, for byte flips and truncations across the fixture.
 // This is the bit-for-bit agreement rule on the inputs that matter.
@@ -184,6 +157,17 @@ func TestParallelDefersReadAheadErrors(t *testing.T) {
 	}
 }
 
+// blockHeaderLen is the size of a block header that precedes a payload of
+// payloadLen bytes: flags and checksum, then the payload length in the
+// smallest byte width that holds it. It is the inverse of readBlockHead.
+func blockHeaderLen(payloadLen int) int {
+	bc := 1
+	for payloadLen >= 1<<(8*bc) {
+		bc++
+	}
+	return 2 + bc
+}
+
 // blockHeaderOffsets returns the archive offsets of each block header in the
 // first compressed member, by reading the member's packed bytes through a
 // counting reader while the serial decoder parses block heads.
@@ -209,13 +193,7 @@ func blockHeaderOffsets(t *testing.T, archive []byte) []int {
 		if at < 0 {
 			t.Fatal("payload not found in archive")
 		}
-		// The header precedes the payload by 2 + bytecount bytes; bytecount
-		// is the smallest byte width that holds the payload length.
-		bc := 1
-		for len(d.payloadBuf) >= 1<<(8*bc) {
-			bc++
-		}
-		offsets = append(offsets, from+at-2-bc)
+		offsets = append(offsets, from+at-blockHeaderLen(len(d.payloadBuf)))
 		from += at + len(d.payloadBuf)
 		if d.lastBlock {
 			return offsets

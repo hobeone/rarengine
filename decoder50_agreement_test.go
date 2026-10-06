@@ -9,40 +9,21 @@ import (
 	"testing"
 )
 
-// handBits builds a block payload MSB first, as bitReader reads it.
-type handBits struct {
-	buf []byte
-	n   int
-}
-
-// put appends the low k bits of v, most significant first.
-func (w *handBits) put(v uint64, k int) {
-	for i := k - 1; i >= 0; i-- {
-		if w.n%8 == 0 {
-			w.buf = append(w.buf, 0)
-		}
-		if v>>uint(i)&1 == 1 {
-			w.buf[len(w.buf)-1] |= 0x80 >> uint(w.n%8)
-		}
-		w.n++
-	}
-}
-
 // Codes of the hand-built main table: A is "0", B is "10", symbol 262 (a
-// match with length slot 0) is "11".
-func (w *handBits) a()     { w.put(0, 1) }
-func (w *handBits) b()     { w.put(2, 2) }
-func (w *handBits) match() { w.put(3, 2) }
+// match with length slot 0) is "11". Block payloads are built MSB first, as
+// bitReader reads them.
+func (bw *bitWriter) a()     { bw.writeBits(0, 1) }
+func (bw *bitWriter) b()     { bw.writeBits(2, 2) }
+func (bw *bitWriter) match() { bw.writeBits(3, 2) }
 
 // handBlock frames w's bits as one block without tables: flags, checksum,
-// the payload byte count, the payload.
-func handBlock(w *handBits, last bool) []byte {
+// the payload byte count, the payload. It pads w's last byte (flush).
+func handBlock(w *bitWriter, last bool) []byte {
+	bits := w.bitLen()
+	w.flush()
 	nb := len(w.buf)
-	bc := 1
-	for nb >= 1<<(8*bc) {
-		bc++
-	}
-	flags := byte((w.n-1)%8) | byte(bc-1)<<3
+	bc := blockHeaderLen(nb) - 2
+	flags := byte((bits-1)%8) | byte(bc-1)<<3
 	if last {
 		flags |= 0x40
 	}
@@ -63,7 +44,7 @@ func literalBlocks(count, per int) []byte {
 	var out []byte
 	for count > 0 {
 		k := min(count, per)
-		var w handBits
+		var w bitWriter
 		for range k {
 			w.a()
 		}
@@ -165,11 +146,11 @@ func clip(b []byte) []byte {
 // matchBlockMax is one block holding a match at the largest distance the
 // format can name: offset slot 63, all 26 extra bits set, low offset 15.
 func matchBlockMax(last bool) []byte {
-	var w handBits
+	var w bitWriter
 	w.match()
-	w.put(0, 1)        // offset slot 63
-	w.put(1<<26-1, 26) // every extra bit
-	w.put(0, 1)        // low offset 15
+	w.writeBits(0, 1)        // offset slot 63
+	w.writeBits(1<<26-1, 26) // every extra bit
+	w.writeBits(0, 1)        // low offset 15
 	return handBlock(&w, last)
 }
 
@@ -253,18 +234,18 @@ func TestLargestDistanceAgreesWithSerial(t *testing.T) {
 // and the inline mode stops at "AAA" in both cases.
 func TestOutOfDataResumesTheSameBlock(t *testing.T) {
 	cl := handTables(8, -1)
-	truncated := func(w *handBits) {
+	truncated := func(w *bitWriter) {
 		w.a()
 		w.a()
 		w.a()
 		w.match()
-		w.put(0, 1) // offset slot 8
+		w.writeBits(0, 1) // offset slot 8
 	}
-	var tail handBits
+	var tail bitWriter
 	truncated(&tail)
 	tail.a()
 	tail.a()
-	var first, second handBits
+	var first, second bitWriter
 	truncated(&first)
 	for range 4 {
 		second.b()
@@ -295,7 +276,7 @@ func TestErrorAfterFillTargetDeliversStagedBytes(t *testing.T) {
 	target := newWindow(minWindowSize).fillTarget()
 	per := 32000
 	data := literalBlocks(target-target%per, per)
-	var w handBits
+	var w bitWriter
 	for range target % per {
 		w.a()
 	}
