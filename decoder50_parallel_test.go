@@ -14,9 +14,19 @@ import (
 
 // decodeWith returns the outcomes for every fixture with workers decode
 // goroutines (1 is the serial path).
-func decodeWith(t *testing.T, workers int) []decodeOutcome {
+// It also returns how many blocks went through the pipeline.
+func decodeWith(t *testing.T, workers int) ([]decodeOutcome, int) {
 	t.Helper()
-	return decodeAll(t, goldenFixtures(t), func(r *Reader) { r.SetWorkers(workers) })
+	var readers []*Reader
+	out := decodeAll(t, goldenFixtures(t), func(r *Reader) {
+		readers = append(readers, r)
+		r.SetWorkers(workers)
+	})
+	blocks := 0
+	for _, r := range readers {
+		blocks += pipelineBlocks(r)
+	}
+	return out, blocks
 }
 
 // Every fixture decodes identically through the pipeline and the serial
@@ -24,9 +34,15 @@ func decodeWith(t *testing.T, workers int) []decodeOutcome {
 // Mutation check: drop the deferred-error rule (surface pendingErr as soon
 // as readAhead sees it) and the truncated fixtures differ in byte count.
 func TestParallelMatchesSerialOnEveryFixture(t *testing.T) {
-	serial := decodeWith(t, 1)
+	serial, serialBlocks := decodeWith(t, 1)
+	if serialBlocks != 0 {
+		t.Fatalf("the serial path sent %d blocks through the pipeline", serialBlocks)
+	}
 	for _, workers := range []int{2, 4} {
-		par := decodeWith(t, workers)
+		par, blocks := decodeWith(t, workers)
+		if blocks == 0 {
+			t.Fatalf("workers=%d: no block went through the pipeline; the comparison was serial against serial", workers)
+		}
 		if len(par) != len(serial) {
 			t.Fatalf("workers=%d: %d outcomes, serial %d", workers, len(par), len(serial))
 		}
@@ -63,9 +79,31 @@ func corruptVariants(t *testing.T, file string) [][]byte {
 
 func outcomesOf(t *testing.T, archive []byte, workers int) []decodeOutcome {
 	t.Helper()
+	out, _ := outcomesCounted(t, archive, workers)
+	return out
+}
+
+// outcomesCounted is outcomesOf that also reports how many blocks went
+// through the pipeline, so a test can tell that it ran at all.
+func outcomesCounted(t *testing.T, archive []byte, workers int) ([]decodeOutcome, int) {
+	t.Helper()
 	r := NewReader(volumesOf(archive))
 	defer r.Close() //nolint:errcheck
 	r.SetWorkers(workers)
+	out := readOutcomes(r)
+	return out, pipelineBlocks(r)
+}
+
+// pipelineBlocks is the number of blocks r's decoder has read ahead.
+func pipelineBlocks(r *Reader) int {
+	if r.dec50.pipe == nil {
+		return 0
+	}
+	return r.dec50.pipe.parallelBlocks
+}
+
+// readOutcomes reads every member of r's archive.
+func readOutcomes(r *Reader) []decodeOutcome {
 	var out []decodeOutcome
 	for i := 0; ; i++ {
 		e, err := r.NextEntry()
@@ -95,9 +133,11 @@ func outcomesOf(t *testing.T, archive []byte, workers int) []decodeOutcome {
 func TestParallelMatchesSerialOnDamagedInput(t *testing.T) {
 	for _, file := range []string{"rar5_solid_bench.rar", "rar5_compress.rar", "rar5_solid_stored_mid.rar", "rar5_exe_filter.rar"} {
 		variants := corruptVariants(t, filepath.Join("testdata", file))
+		blocks := 0
 		for vi, v := range variants {
 			serial := outcomesOf(t, v, 1)
-			par := outcomesOf(t, v, 4)
+			par, n := outcomesCounted(t, v, 4)
+			blocks += n
 			if len(serial) != len(par) {
 				t.Fatalf("%s variant %d: %d vs %d outcomes", file, vi, len(serial), len(par))
 			}
@@ -106,6 +146,11 @@ func TestParallelMatchesSerialOnDamagedInput(t *testing.T) {
 					t.Errorf("%s variant %d outcome %d\nserial: %s\n   par: %s", file, vi, i, serial[i].line(), par[i].line())
 				}
 			}
+		}
+		// rar5_compress.rar holds only stored members and legitimately
+		// submits nothing; the others hold compressed ones.
+		if file != "rar5_compress.rar" && blocks == 0 {
+			t.Errorf("%s: no variant sent a block through the pipeline", file)
 		}
 	}
 }
@@ -219,7 +264,7 @@ func TestNewTablesFailingDoesNotDisturbInFlightBlocks(t *testing.T) {
 		}
 	}
 	if target < 0 {
-		t.Skip("no later block in the fixture carries new tables")
+		t.Fatal("setup: none of the last eight blocks carries new tables")
 	}
 	bc := int(data[target]>>3)&3 + 1
 	v := bytes.Clone(data)
@@ -258,5 +303,64 @@ func TestOversizeBlockIsDecodedInline(t *testing.T) {
 	}
 	if rd.dec50.pipe.oversizeBlocks == 0 {
 		t.Fatal("no block was read as oversize: the inline path was not exercised")
+	}
+}
+
+// A block that is read into the serial buffer and then fails to read in full
+// must not leave its slot pointing at that buffer: nothing pops a job that
+// never entered the ring, and the next member's blocks would be read into
+// the slot's payload, which is the serial buffer. The member after the
+// failure must decode exactly as it does serially.
+// Mutation check: assign j.payload = d.payloadBuf before the payload read,
+// as the oversize path first did, and the alias assertion fails.
+func TestOversizeReadFailureDoesNotLeaveSlotAliased(t *testing.T) {
+	saved := parallelPayloadLimit
+	t.Cleanup(func() { parallelPayloadLimit = saved })
+	parallelPayloadLimit = 16 << 10
+
+	data, err := os.ReadFile(filepath.Join("testdata", "rar5_solid_bench.rar"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	offsets := blockHeaderOffsets(t, data)
+	if len(offsets) < 4 {
+		t.Fatalf("need at least 4 blocks, found %d", len(offsets))
+	}
+	bc := int(data[offsets[3]]>>3)&3 + 1
+	cut := offsets[3] + 2 + bc + 100 // inside the fourth block's payload
+	if cut >= offsets[4] {
+		t.Fatalf("setup: cut %d is not inside block 3 (next block at %d)", cut, offsets[4])
+	}
+
+	r := NewReader(volumesOf(data[:cut]))
+	defer r.Close() //nolint:errcheck
+	r.SetWorkers(4)
+	failed := readOutcomes(r)
+	if len(failed) == 0 || failed[0].err == "" {
+		t.Fatalf("setup: the truncated archive did not fail: %v", failed)
+	}
+	p := r.dec50.pipe
+	if p.oversizeBlocks == 0 {
+		t.Fatal("setup: no block took the oversize path")
+	}
+	if p.count != 0 {
+		t.Fatalf("setup: %d jobs still in the ring after the member failed", p.count)
+	}
+	for i, j := range p.slots {
+		if len(j.payload) > 0 && len(r.dec50.payloadBuf) > 0 && &j.payload[0] == &r.dec50.payloadBuf[0] {
+			t.Fatalf("slot %d still aliases the serial payload buffer", i)
+		}
+	}
+
+	r.Reset(volumesOf(data))
+	got := readOutcomes(r)
+	want := outcomesOf(t, data, 1)
+	if len(got) != len(want) {
+		t.Fatalf("%d outcomes, serial %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i].line() != want[i].line() {
+			t.Errorf("outcome %d\n par: %s\nserial: %s", i, got[i].line(), want[i].line())
+		}
 	}
 }

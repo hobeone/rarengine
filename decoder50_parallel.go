@@ -76,6 +76,7 @@ type blockPipeline struct {
 	// buffer is in the ring; nothing is read until it is popped.
 	oversizePending bool
 	oversizeBlocks  int // blocks read into the serial buffer, for tests
+	parallelBlocks  int // blocks submitted through the ring, for tests
 
 	codeLength [tableSize5]byte
 	bitlen     huffmanDecoder
@@ -148,8 +149,7 @@ func (p *blockPipeline) disengage(d *decoder50) {
 	p.engaged = false
 }
 
-// drain waits for every job in flight and empties the ring. In this
-// synchronous version nothing is ever in flight.
+// drain waits for every job in flight and empties the ring.
 func (p *blockPipeline) drain() {
 	for p.count > 0 {
 		p.pop()
@@ -180,6 +180,17 @@ func (p *blockPipeline) readAhead(d *decoder50) {
 		}
 		j := p.slots[(p.head+p.count)%len(p.slots)]
 		oversize := h.blockBytes > parallelPayloadLimit
+		// fail records a read-ahead error. A slot that was lent the serial
+		// buffer must not keep it: nothing pops a job that never entered
+		// the ring, and a later block read into the slot would overwrite the
+		// serial buffer under a live job.
+		fail := func(err error) {
+			if oversize {
+				j.payload = nil
+			}
+			p.pendingErr = err
+		}
+		var payload []byte
 		if oversize {
 			// Too big to hold in a slot: read it into the serial buffer, as
 			// the serial path would, and read nothing more until it is gone.
@@ -188,22 +199,23 @@ func (p *blockPipeline) readAhead(d *decoder50) {
 			} else {
 				d.payloadBuf = d.payloadBuf[:h.blockBytes]
 			}
-			j.payload = d.payloadBuf
+			payload = d.payloadBuf
 		} else if cap(j.payload) < h.blockBytes {
-			j.payload = make([]byte, h.blockBytes)
+			payload = make([]byte, h.blockBytes)
 		} else {
-			j.payload = j.payload[:h.blockBytes]
+			payload = j.payload[:h.blockBytes]
 		}
-		if _, err := io.ReadFull(d.r, j.payload); err != nil {
+		if _, err := io.ReadFull(d.r, payload); err != nil {
 			p.pendingErr = err
 			return
 		}
+		j.payload = payload
 		j.bits = h.blockBits
 		j.lastBlock = h.lastBlock
 		j.resume.Reset(j.payload, h.blockBits)
 		if h.newTables {
 			if err := readCodeLengthTable(&j.resume, p.codeLength[:], &p.bitlen); err != nil {
-				p.pendingErr = err
+				fail(err)
 				return
 			}
 			next := p.cur
@@ -215,7 +227,7 @@ func (p *blockPipeline) readAhead(d *decoder50) {
 				// every earlier block was decoded. Record it like any other
 				// read-ahead error; the tables that failed to load are in a
 				// set no block references.
-				p.pendingErr = err
+				fail(err)
 				return
 			}
 			p.cur = next
@@ -225,6 +237,7 @@ func (p *blockPipeline) readAhead(d *decoder50) {
 			p.oversizePending = true
 			p.oversizeBlocks++
 		}
+		p.parallelBlocks++
 		j.tables = p.tables[p.cur]
 		p.inUse[p.cur]++
 		p.count++
