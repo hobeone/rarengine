@@ -8,7 +8,7 @@ Designed specifically for high-throughput Usenet downloaders (like `gonzbd`), `r
 
 ## Key Features
 
-- **Zero-Allocation Pipeline**: Reuses a single `Reader` instance and its pre-allocated 32MB sliding window across streams via `Reset`, keeping steady-state allocations minimal.
+- **Zero-Allocation Pipeline**: Reuses a single `Reader` instance and its sliding window across streams via `Reset`, keeping steady-state allocations minimal. The window is sized from each archive's declared dictionary (up to the format's 4 GiB, or a cap set with `SetMaxWindow`) as an anonymous mapping on Linux, so resident memory follows the history actually produced rather than the dictionary declared.
 - **Process In-Process**: Runs entirely within Go—no slow C++ `unrar` binary subprocess forks or shell pipeline parsing.
 - **Spec Conformance**: Fully audited and tested for strict conformance to the official RAR 5.0 technote specifications.
 - **Differential Oracle Tested**: Verified byte-for-byte against the system-installed canonical `unrar` binary for standard, compressed, solid, and password-encrypted RAR5 archives.
@@ -111,14 +111,19 @@ different cures — a stalled *volume channel* is what `Close` is for, and a
 stalled *underlying stream* is cured by closing that stream, which you own.
 
 After `Close`, `Reset` revives the reader for another archive: `Close` ends an
-archive, not the 32 MB window.
+archive, not the window.
 
 ### High-Throughput Reuse (Zero-Allocation Reset)
 
 ```go
 // Reset the reader to process a new set of volumes, reusing the existing
-// 32MB sliding window memory:
+// sliding window reservation:
 r.Reset(newVolumesChan)
+
+// Optionally bound the window. The default is the format's 4 GiB maximum;
+// a member whose stream reaches further back than the cap ends short with
+// ErrDictionaryTooLarge.
+r.SetMaxWindow(512 << 20)
 ```
 
 ### Inspecting an archive without decoding it
@@ -230,7 +235,7 @@ BenchmarkDecompress_Solid-32              100  11412298 ns/op  459.41 MB/s    34
 BenchmarkReaderResetReusesWindow-32  1777514      680.2 ns/op                1096 B/op   26 allocs/op
 ```
 
-*(`BenchmarkReaderResetReusesWindow` reuses a single `Reader` and its 32MB sliding window across archives via `Reset`, instead of allocating a fresh window per archive.)*
+*(`BenchmarkReaderResetReusesWindow` reuses a single `Reader` and its sliding window across archives via `Reset`, instead of allocating a fresh window per archive.)*
 
 ---
 

@@ -88,7 +88,7 @@ func (d *decoder50) init(r io.Reader, reset bool) {
 	d.r = r
 	d.lastBlock = false
 	// Pointing the decoder at a new reader invalidates whatever bits the last
-	// one left buffered. A member larger than half the window is not decoded
+	// one left buffered. A member larger than the fill target is not decoded
 	// to the end of its block before the caller can abandon it, so d.br
 	// survives non-nil, and fill() reads d.br != nil as "still inside a
 	// block" -- resuming the next member from the previous member's bits,

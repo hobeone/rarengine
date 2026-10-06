@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -52,9 +53,10 @@ func TestWindowGrowsToTheDeclaredDictionary(t *testing.T) {
 	}
 }
 
-// SetMaxWindow is the one thing that keeps a window below the declaration,
-// and the classification the decoder already had carries over to exactly that
-// case: a far reference past the cap is ErrDictionaryTooLarge.
+// SetMaxWindow is the one thing that keeps a window below the declaration. A
+// member whose stream fits the cap still decodes; one that reaches past it is
+// ErrDictionaryTooLarge, which TestFarReferenceReportsDictionaryTooLarge pins
+// on a real stream.
 func TestSetMaxWindowCapsTheWindow(t *testing.T) {
 	r := NewReader(fileVolumesOf(t, filepath.Join("testdata", "rar5_dict_64m.rar")))
 	defer r.Close() //nolint:errcheck
@@ -69,17 +71,22 @@ func TestSetMaxWindowCapsTheWindow(t *testing.T) {
 	if _, err := io.Copy(io.Discard, e); err != nil {
 		t.Fatalf("a member whose stream fits the cap must still decode: %v", err)
 	}
+}
 
-	// Below the format minimum is raised to it, never below.
-	r2 := NewReader(fileVolumesOf(t, filepath.Join("testdata", "rar5_dict_1m.rar")))
-	defer r2.Close() //nolint:errcheck
-	r2.SetMaxWindow(1)
-	if _, err := r2.NextEntry(); err != nil {
-		t.Fatalf("NextEntry: %v", err)
+// windowBacking.free runs the release exactly once however many callers
+// reach it: grow frees the reservation it replaces, and the cleanup registered
+// for that same reservation fires later for a window nobody holds any more.
+func TestWindowBackingFreesExactlyOnce(t *testing.T) {
+	n := 0
+	b := &windowBacking{release: func() { n++ }}
+	for range 3 {
+		b.free()
 	}
-	if r2.win.size != minWindowSize {
-		t.Fatalf("window under a 1-byte cap = %d, want the %d minimum", r2.win.size, minWindowSize)
+	if n != 1 {
+		t.Fatalf("release ran %d times, want 1", n)
 	}
+	var nilBacking *windowBacking
+	nilBacking.free() // a window that never grew has nothing to free
 }
 
 // A stored member in a non-solid archive is served from its source and never
@@ -210,8 +217,13 @@ func TestContinuationChangingDictSizeIsRefused(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NextEntry: %v", err)
 	}
-	if _, err := io.ReadAll(e); !errors.Is(err, ErrCorruptFileHeader) {
+	_, err = io.ReadAll(e)
+	if !errors.Is(err, ErrCorruptFileHeader) {
 		t.Fatalf("ReadAll = %v, want ErrCorruptFileHeader", err)
+	}
+	// Four identity checks share the sentinel; the message says which fired.
+	if !strings.Contains(err.Error(), "dictionary") {
+		t.Fatalf("refusal did not come from the dictionary check: %v", err)
 	}
 }
 

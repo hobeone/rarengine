@@ -9,7 +9,7 @@ import (
 
 // Abandoning a compressed member leaves the shared decoder holding a bit
 // reader positioned inside that member's compressed block, because a member
-// larger than half the window is not decoded to its end before the caller
+// larger than the window's fill target is not decoded to its end before the caller
 // moves on. decoder50.init points the decoder at the next member's bytes,
 // so those buffered bits belong to a stream the decoder is no longer
 // reading; decoding resumed from them, against Huffman tables the abandoned

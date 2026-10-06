@@ -174,16 +174,16 @@ type Reader struct {
 // NewReader constructs a Reader over volumes.
 //
 // The window starts at the format's 256 KiB minimum and grows to the
-// dictionary each member's header declares, capped by MaxWindow (default: the
-// format's 4 GiB maximum). Growth is a reservation, not a commit: on Linux the
+// dictionary each member's header declares, capped by SetMaxWindow (default:
+// the format's 4 GiB maximum). Growth is a reservation, not a commit: on Linux the
 // window is an anonymous mapping whose pages the kernel provides as the
 // stream writes them, so resident memory follows the history a member actually
 // produced rather than the dictionary it declared. A stored member in a
 // non-solid archive never touches the window at all.
 //
 // A member can therefore end short with ErrDictionaryTooLarge only when its
-// stream references history beyond a window that MaxWindow kept smaller than
-// the header declared, or that could not be reserved. The declared dictionary
+// stream references history beyond a window that SetMaxWindow kept smaller
+// than the header declared, or that could not be reserved. The declared dictionary
 // size alone never refuses a member, because it is the encoder's maximum
 // rather than what the stream used.
 func NewReader(volumes <-chan io.ReadCloser) *Reader {
@@ -200,11 +200,11 @@ func NewReader(volumes <-chan io.ReadCloser) *Reader {
 // Reader reads from now on. The default is the format's maximum, 4 GiB, which
 // means every valid archive decodes; a smaller cap bounds the Reader's peak
 // memory and makes a member whose stream genuinely references history beyond
-// it end short with ErrDictionaryTooLarge. Values below the 256 KiB format
-// minimum are raised to it. A window already grown past n is kept for the
-// archive in progress and is not shrunk.
+// it end short with ErrDictionaryTooLarge. A cap below the 256 KiB format
+// minimum has no further effect, because the window never shrinks below that
+// minimum; a window already grown past n is likewise kept and not shrunk.
 func (r *Reader) SetMaxWindow(n int64) {
-	r.maxWindow = max(n, minWindowSize)
+	r.maxWindow = n
 }
 
 // Reset reconfigures the reader for a new archive, reusing the window.
@@ -881,7 +881,7 @@ const unpackVersionRAR5 = 0
 const bombRatio = 65536
 
 // sizeWindow makes the window at least as large as the member's declared
-// dictionary allows, within MaxWindow.
+// dictionary allows, within the SetMaxWindow cap.
 //
 // Only a member that will touch the window is considered. A stored member in
 // a non-solid archive is served straight from its source (buildChain hands it

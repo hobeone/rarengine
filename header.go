@@ -182,13 +182,19 @@ type FileHeader struct {
 	// DictSize is the dictionary size, in bytes, this member's header
 	// DECLARES: 128 KiB << e for the 4-bit exponent e in the
 	// compression-information vint. It is what the encoder was permitted to
-	// use, not what the stream did use, so a member is never refused for it
-	// -- a 60 MB file archived with -md64m declares 64 MB and can decode
-	// inside a 32 MiB window, when its matches never reach that far. It is read
-	// for one purpose: telling a stream that outran this library's window
-	// apart from a corrupt one (see ErrDictionaryTooLarge). Zero when the
-	// header's unpack version is not 0, where the field has a different
-	// layout this library does not interpret.
+	// use, not what the stream did use.
+	//
+	// The Reader sizes its window from it: the window grows to the declared
+	// size, capped by Reader.SetMaxWindow, before the member is decoded, so a
+	// valid archive decodes whatever dictionary it was made with. A member is
+	// never refused for the size it declares; it can be refused for
+	// CONTRADICTING one -- a solid member declaring more than the archive's
+	// window, or a continuation block declaring a different size than its
+	// first block -- because both are shapes no honest writer produces. The
+	// declaration also tells a stream that outran a capped window apart from a
+	// corrupt one (see ErrDictionaryTooLarge). Zero when the header's unpack
+	// version is not 0, where the field has a different layout this library
+	// does not interpret; such a member leaves the window as it is.
 	DictSize int64
 
 	CRC32       uint32

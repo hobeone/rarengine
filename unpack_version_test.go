@@ -230,8 +230,8 @@ func TestRealRAR7ArchiveIsRefused(t *testing.T) {
 	})
 
 	// One step below the boundary: the largest dictionary RAR5 can express.
-	// It must decode, and it must not be refused for declaring a dictionary
-	// far larger than this library's 32 MB window.
+	// It must decode, and it must not be refused for declaring the largest
+	// dictionary the format allows; the window grows to meet it.
 	t.Run("rar5 at the 4GB dictionary ceiling still decodes", func(t *testing.T) {
 		r := readerFor(fixtureBytes(t, "rar5_dict4g.rar"))
 		e, err := r.NextEntry()

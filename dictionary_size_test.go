@@ -586,6 +586,66 @@ func TestFarReferenceWithSmallDeclaredDictionaryIsCorruption(t *testing.T) {
 	}
 }
 
+// With a window above 32 MiB, one fill stages the 16 MiB target rather than
+// half the window. 40 MiB of compressible text under -md64m: a single fill on
+// the 64 MiB window the member grows must stop near 16 MiB, where the old
+// size/2 rule would have staged twice that. Needs rar; skips under -short.
+func TestFillStopsAtTheCapOnALargeWindow(t *testing.T) {
+	if testing.Short() {
+		t.Skip("writes ~40 MB of scratch data")
+	}
+	rar := rarOrSkip(t)
+	dir := t.TempDir()
+	// Deterministic pseudo-text: compressible, yet with enough variety that a
+	// fill produces real output rather than one long match.
+	words := []string{"alpha ", "bravo ", "charlie ", "delta ", "echo ", "foxtrot ", "golf ", "hotel ", "india ", "juliet "}
+	var sb strings.Builder
+	x := uint64(2463534242)
+	for sb.Len() < 40<<20 {
+		x ^= x << 13
+		x ^= x >> 7
+		x ^= x << 17
+		sb.WriteString(words[x%uint64(len(words))])
+	}
+	if err := os.WriteFile(filepath.Join(dir, "text.txt"), []byte(sb.String()), 0o644); err != nil {
+		t.Skipf("cannot write scratch file: %v", err)
+	}
+	runRar(t, rar, dir, "-m3", "-md64m", "text.rar", "text.txt")
+
+	f, err := os.Open(filepath.Join(dir, "text.rar"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch := make(chan io.ReadCloser, 1)
+	ch <- f
+	close(ch)
+	r := NewReader(ch)
+	t.Cleanup(func() { _ = r.Close() })
+	e, err := r.NextEntry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.Header.Method == 0 {
+		t.Fatal("rar stored the text; the fixture needs a compressed member")
+	}
+	if r.win.size != 64<<20 {
+		t.Fatalf("window = %d, want 64 MiB", r.win.size)
+	}
+	if err := r.dec50.fill(r.win); err != nil && !errors.Is(err, io.EOF) {
+		t.Fatalf("fill: %v", err)
+	}
+	staged := r.win.Available()
+	target := r.win.fillTarget()
+	if target != maxFillTarget {
+		t.Fatalf("fillTarget = %d, want the %d cap", target, maxFillTarget)
+	}
+	// One more symbol at most past the target; far below the 32 MiB that
+	// size/2 would have staged.
+	if staged < target || staged > target+4097 {
+		t.Fatalf("one fill staged %d bytes, want between %d and %d", staged, target, target+4097)
+	}
+}
+
 // The issue's archives at full size: 80 MB of data whose second half repeats
 // the first, packed with -md32m (both halves literal) and -md64m (second half
 // a 40 MB match). Both decode now that the window follows the declaration;
