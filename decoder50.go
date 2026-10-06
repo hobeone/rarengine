@@ -58,6 +58,7 @@ type decoder50 struct {
 	tables        tableSet
 	pipe          *blockPipeline // block read-ahead, nil until a Reader asks for workers
 	bitlenDecoder huffmanDecoder // scratch for ReadCodeLengthTable
+	headBuf       [5]byte        // scratch for readBlockHead; a local would escape through io.Reader
 
 	offset [4]int
 	length int
@@ -118,7 +119,7 @@ func (d *decoder50) init(r io.Reader, reset bool) {
 
 // readBlockHeader parses block bit limits and dynamic Huffman tables from the stream.
 func (d *decoder50) readBlockHeader() error {
-	h, err := readBlockHead(d.r)
+	h, err := readBlockHead(d.r, &d.headBuf)
 	if err != nil {
 		return err
 	}

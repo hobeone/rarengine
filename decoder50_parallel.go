@@ -27,14 +27,15 @@ type blockHead struct {
 }
 
 // readBlockHead reads a block's header bytes: flags, checksum, the payload
-// byte count. It reads nothing of the payload.
-func readBlockHead(r io.Reader) (blockHead, error) {
-	var temp [2]byte
-	if _, err := io.ReadFull(r, temp[:]); err != nil {
+// byte count. It reads nothing of the payload. buf is scratch owned by the
+// caller: a slice passed through io.Reader escapes, so a stack-local array
+// here would cost two heap allocations per block.
+func readBlockHead(r io.Reader, buf *[5]byte) (blockHead, error) {
+	if _, err := io.ReadFull(r, buf[:2]); err != nil {
 		return blockHead{}, err
 	}
-	flags := temp[0]
-	hsum := temp[1]
+	flags := buf[0]
+	hsum := buf[1]
 
 	bytecount := (flags>>3)&3 + 1
 	if bytecount == 4 {
@@ -43,7 +44,7 @@ func readBlockHead(r io.Reader) (blockHead, error) {
 
 	h := blockHead{blockBits: int(flags)&0x07 + 1}
 	sum := 0x5a ^ flags
-	var blockBytesBuf [3]byte
+	blockBytesBuf := buf[2:]
 	if _, err := io.ReadFull(r, blockBytesBuf[:bytecount]); err != nil {
 		return blockHead{}, err
 	}
@@ -234,7 +235,7 @@ func (p *blockPipeline) freeTableSet() int {
 // has been replayed, which is when the serial path would have met it.
 func (p *blockPipeline) readAhead(d *decoder50) {
 	for p.count < len(p.slots) && !p.sawLast && p.pendingErr == nil && !p.oversizePending {
-		h, err := readBlockHead(d.r)
+		h, err := readBlockHead(d.r, &d.headBuf)
 		if err != nil {
 			p.pendingErr = err
 			return
@@ -347,10 +348,19 @@ func (p *blockPipeline) start() {
 // stop ends the goroutines. A worker mid-block finishes that block first
 // (bounded: one block), then sees quit. Safe from any goroutine; the
 // traversal goroutine blocked in wait is released by the same close. It
-// touches neither the ring nor the window.
+// touches neither the ring nor the window. A stop that finds nothing running
+// still fires quit (installing one if there is none), so a Close that lands
+// before engage cannot be followed by workers nobody will stop; start refuses
+// a fired quit and restart renews it.
 func (p *blockPipeline) stop() {
 	p.mu.Lock()
 	if !p.running {
+		if p.quit == nil {
+			p.quit = make(chan struct{})
+		}
+		if !chanClosed(p.quit) {
+			close(p.quit)
+		}
 		p.mu.Unlock()
 		return
 	}

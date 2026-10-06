@@ -1,10 +1,12 @@
 package rarengine
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"io"
+	"os"
 	"path/filepath"
 	"runtime"
 	"sync"
@@ -209,8 +211,8 @@ func TestResetRevivesWorkersAfterClose(t *testing.T) {
 // A Close that lands between member setup steps leaves a quit that has
 // fired. engage must not start workers on it, restart must renew it even
 // though nothing is running, and a second stop must not close it again.
-// Mutation check: let start run workers on a closed quit and the final stop
-// panics with "close of closed channel".
+// Mutation check: let start run workers on a closed quit and the assertion
+// "start ran workers on a quit that had fired" fails.
 func TestStopEngageRestartStopDoesNotPanic(t *testing.T) {
 	base := runtime.NumGoroutine()
 	p := newBlockPipeline(2)
@@ -254,6 +256,139 @@ func TestCloseResetDecodeCloseTwice(t *testing.T) {
 	if err := r.Close(); err != nil {
 		t.Fatal(err)
 	}
+	goroutinesSettle(t, base)
+}
+
+// Entry.Read allocates nothing in steady state through the pipeline: the
+// slots, items, payload buffers and table sets are allocated when the
+// pipeline starts, and the first member grows the payload buffers once.
+// Mutation check: allocate a fresh item slice per block in decodeBlockItems
+// and the count is non-zero.
+func TestParallelReadDoesNotAllocate(t *testing.T) {
+	file := filepath.Join("testdata", "rar5_solid_bench.rar")
+	r := NewReader(fileVolumesOf(t, file))
+	defer r.Close() //nolint:errcheck
+	r.SetWorkers(4)
+	// Warm: first member grows every buffer to this archive's block size.
+	e, err := r.NextEntry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(io.Discard, e); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 64<<10)
+	allocs := testing.AllocsPerRun(3, func() {
+		r.Reset(fileVolumesOf(t, file))
+		e, err := r.NextEntry()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for {
+			_, err := e.Read(buf)
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+	// Reset and NextEntry allocate for the new volume and header; measure
+	// Read alone by subtracting a run that reads nothing.
+	base := testing.AllocsPerRun(3, func() {
+		r.Reset(fileVolumesOf(t, file))
+		if _, err := r.NextEntry(); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if allocs-base > 0 {
+		t.Fatalf("Read allocated %.0f times per member through the pipeline", allocs-base)
+	}
+}
+
+// A Close that lands before the pipeline has started (the first compressed
+// member, or the first one after Reset) must still stop the workers that
+// engage starts afterwards: nothing else would, until a later Close or Reset.
+// Mutation check: make stop return early when !running, as it did, and both
+// assertions fail.
+func TestStopBeforeStartPreventsWorkers(t *testing.T) {
+	base := runtime.NumGoroutine()
+	p := newBlockPipeline(2)
+	p.stop() // Close lands before the pipeline ever ran
+	p.start()
+	if p.running {
+		t.Fatal("start ran workers after a stop that preceded it")
+	}
+	if g := runtime.NumGoroutine(); g > base {
+		t.Fatalf("%d goroutines, baseline %d", g, base)
+	}
+	p.stop() // a second stop must not close quit again
+	p.restart()
+	p.start()
+	if !p.running {
+		t.Fatal("start after restart did not run workers")
+	}
+	p.stop()
+	goroutinesSettle(t, base)
+}
+
+// closeAfter is a volume that closes the Reader from inside the Read that
+// crosses byte offset at, so the Close lands at a fixed point of NextEntry.
+type closeAfter struct {
+	io.Reader
+	r    *Reader
+	at   int
+	read int
+}
+
+func (c *closeAfter) Read(p []byte) (int, error) {
+	n, err := c.Reader.Read(p)
+	before := c.read
+	c.read += n
+	if before < c.at && c.read >= c.at {
+		_ = c.r.Close()
+	}
+	return n, err
+}
+
+func (c *closeAfter) Close() error { return nil }
+
+// The same through the Reader: after a Close and a Reset the pipeline exists
+// but is not running, and a Close landing anywhere inside the next NextEntry,
+// including between the pipeline being chosen and engage starting it, must
+// leave no workers behind. Sweeping the byte offset at which the Close fires
+// covers the whole header and the start of the payload deterministically.
+// Mutation check: as above; the offsets that land before engage leave workers
+// running on a closed Reader.
+func TestCloseDuringNextEntryLeavesNoWorkers(t *testing.T) {
+	file := filepath.Join("testdata", "rar5_solid_bench.rar")
+	data, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := runtime.NumGoroutine()
+	r := NewReader(fileVolumesOf(t, file))
+	r.SetWorkers(4)
+	e, err := r.NextEntry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(io.Discard, e); err != nil {
+		t.Fatal(err)
+	}
+	for at := range 400 {
+		_ = r.Close() // pipeline exists, stopped
+		vols := make(chan io.ReadCloser, 1)
+		vols <- &closeAfter{Reader: bytes.NewReader(data), r: r, at: at}
+		close(vols)
+		r.Reset(vols) // restart: pipeline exists, not running, quit open
+		_, _ = r.NextEntry()
+		if chanClosed(r.done) && r.dec50.pipe.running {
+			t.Fatalf("Close at offset %d left decode workers running", at)
+		}
+	}
+	_ = r.Close()
 	goroutinesSettle(t, base)
 }
 
