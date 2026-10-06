@@ -191,7 +191,7 @@ type Reader struct {
 // dictionary it declared, and the default cap is the format's 4 GiB maximum.
 // Elsewhere the window is a heap slice and the default cap is 32 MiB, because
 // a heap allocation is committed at once and cannot fail gracefully. A stored
-// member in a non-solid archive never touches the window at all.
+// member never touches the window at all.
 //
 // Reading an Entry concurrently with NextEntry or Reset on the same Reader
 // was always a data race; because growth replaces the window's storage, it
@@ -649,10 +649,9 @@ func (r *Reader) dispatch(h *blockHeader) (*Entry, error) {
 	// archive header and on every member of a solid run. A member claiming
 	// to continue a solid stream in an archive that never declared one
 	// contradicts it, and the two flags drive different mechanisms -- this
-	// one picks BeginFile's reset-or-keep, the archive's picks whether a
-	// stored member records history at all (buildChain) and whether an
+	// one picks BeginFile's reset-or-keep, the archive's picks whether an
 	// abandoned member is decoded out (finishActive). Disagreeing, they
-	// leave a solid successor reading history a stored member never wrote.
+	// leave a solid successor reading history its predecessors never wrote.
 	// Refused as corrupt rather than reconciled: no honest writer produces
 	// it, so there is no reading of it to prefer.
 	//
@@ -769,8 +768,8 @@ func (r *Reader) handleNonFileBlock(h *blockHeader) error {
 		}
 		// The first archive header seen sets the flag; a later one (each
 		// volume repeats its own) must agree. A sticky OR let a second
-		// volume turn solidity on mid-member, after the member's chain
-		// had already been built without history recording.
+		// volume turn solidity on mid-member, so that finishActive would
+		// treat as solid a member admitted under a non-solid archive.
 		if r.solidSeen && r.solid != ah.Solid {
 			return fmt.Errorf("%w: archive header solid flag is %v, "+
 				"an earlier volume declared %v",
@@ -913,11 +912,11 @@ const bombRatio = 65536
 // sizeWindow makes the window at least as large as the member's declared
 // dictionary allows, within the SetMaxWindow cap.
 //
-// Only a member that will touch the window is considered. A stored member in
-// a non-solid archive is served straight from its source (buildChain hands it
-// no window), so sizing for it would reserve address space nothing writes to;
-// this is the case that lets a Reader verify a stored video with the window at
-// its 256 KiB starting size. A header that declares no dictionary (DictSize 0,
+// Only a member that will touch the window is considered. A stored member is
+// served straight from its source whatever the archive's solidity (buildChain
+// hands it no window), so sizing for it would reserve address space nothing
+// writes to; this is the case that lets a Reader verify a stored video with
+// the window at its 256 KiB starting size. A header that declares no dictionary (DictSize 0,
 // which parseFileHeader reports for a version it did not decode the field for)
 // leaves the window as it is.
 //
@@ -936,7 +935,9 @@ const bombRatio = 65536
 // system error: the member needs a window this Reader could not provide,
 // which is the classification its consumers already route to a fallback.
 func (r *Reader) sizeWindow(fh *FileHeader) error {
-	if fh.DictSize <= 0 || (fh.Method == 0 && !r.solid) {
+	// A stored member never touches the window, so its declaration (always
+	// 128 KiB from rar) sizes nothing, in a solid archive or otherwise.
+	if fh.DictSize <= 0 || fh.Method == 0 {
 		return nil
 	}
 	if !r.capLatched {
@@ -963,7 +964,7 @@ func (r *Reader) sizeWindow(fh *FileHeader) error {
 
 // buildChain assembles the decode chain for a member:
 //
-//	decoder50 / storeReader
+//	decoder50 (a stored member reads the layer below directly)
 //	  └─ cbcDecryptReader (if encrypted)
 //	       └─ multiVolumePayloadReader
 //
@@ -993,14 +994,13 @@ func (r *Reader) buildChain(fh *FileHeader, src io.Reader) (io.Reader, error) {
 		src = decSrc
 	}
 	if fh.Method == 0 {
-		// In a non-solid archive, a stored member cannot be referenced by a
-		// successor, so recordHistory would touch the window with no benefit.
-		// Pass nil to skip it entirely.
-		var win *window
-		if r.solid {
-			win = r.win
-		}
-		return &storeReader{r: src, win: win}, nil
+		// A stored member's bytes go straight to the caller and never enter
+		// the window, in a solid archive as much as in any other: rar's
+		// UnstoreFile copies without touching the unpack window, so the
+		// solid stream's history is exactly what the compressed members
+		// produced. Recording the stored bytes shifted every back-reference
+		// the next solid member made and failed its CRC (#94).
+		return src, nil
 	}
 	r.dec50.init(src, fh.FirstBlock)
 	r.dec50.dictSize = fh.DictSize
@@ -1014,29 +1014,6 @@ type lz50Reader struct {
 
 func (l *lz50Reader) Read(p []byte) (int, error) {
 	return l.dec.Read(l.win, p)
-}
-
-type storeReader struct {
-	r   io.Reader
-	win *window
-}
-
-// Read delivers the stored member's bytes from the source and records them as
-// window history when the member can be referenced by a successor (in a solid
-// archive). In a non-solid archive the window is nil and recordHistory is skipped,
-// so the window is never dirtied by stored members.
-//
-// recordHistory rather than writeBytes: these bytes are not staged for anyone
-// to read back -- they went to the caller from s.r -- and writeBytes would
-// leave them counted as unread with no drain step to clear them. A stored
-// member larger than the window then lapped the read pointer and left full
-// and Available describing a buffer that no longer existed.
-func (s *storeReader) Read(p []byte) (int, error) {
-	n, err := s.r.Read(p)
-	if n > 0 && s.win != nil {
-		s.win.recordHistory(p[:n])
-	}
-	return n, err
 }
 
 // chanClosed reports whether ch has been closed, without receiving from it.

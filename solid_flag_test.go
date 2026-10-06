@@ -11,10 +11,10 @@ import (
 // that does not is refused as ErrSolidFlagMismatch, before the window is
 // touched.
 //
-// The second case is the shape the PR review found: a stored member, then a
-// solid successor. Without the refusal the stored member recorded nothing
-// (the archive is not solid) while BeginFile(true) kept the history, so the
-// successor read a window nothing had written.
+// The second case is the shape the PR review found: a member, then a solid
+// successor in an archive that is not solid. Without the refusal
+// BeginFile(true) kept whatever history the window held, so the successor
+// read a window its own archive never meant it to see.
 func TestSolidFileHeaderInANonSolidArchiveIsRefused(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -72,8 +72,8 @@ func TestSolidFileHeaderInANonSolidArchiveIsRefused(t *testing.T) {
 
 // TestArchiveHeaderSolidFlagFlipAcrossVolumes pins that every volume repeats
 // the archive header and they must agree: the flag is no longer a sticky OR,
-// which let volume 2 switch solidity on after a member's chain had been built
-// without history recording. Both directions, because a sticky OR hid only one.
+// which let volume 2 switch solidity on after a member had been admitted under
+// a non-solid archive. Both directions, because a sticky OR hid only one.
 func TestArchiveHeaderSolidFlagFlipAcrossVolumes(t *testing.T) {
 	for _, firstSolid := range []bool{false, true} {
 		const content = "hello world"

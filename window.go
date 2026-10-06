@@ -241,29 +241,6 @@ func (w *window) writeBytes(p []byte) {
 	}
 }
 
-// recordHistory adds p to the LZ77 history without staging it for Read.
-//
-// It exists for the stored path. A stored member's bytes reach the caller
-// straight from the source and never pass through this buffer, but a solid
-// successor may back-reference them, so they still have to enter the history.
-// writeBytes is the wrong primitive for that: it stages bytes as unread and
-// documents that the caller must "drain via Read before w overruns r", which a
-// caller with no drain step cannot do. Once w lapped r, full and Available
-// stopped describing the buffer.
-//
-// Syncing r to w says what is actually true -- these bytes are history, and
-// nothing is pending -- so the ring's invariant holds by construction rather
-// than by a caller remembering to drain. It is deliberately not Reset(true):
-// that is a member-boundary transition, and this is not one.
-//
-// The history itself is unaffected: historyLen and CopyBytes are derived from
-// w and wrapped, neither of which r participates in.
-func (w *window) recordHistory(p []byte) {
-	w.writeBytes(p)
-	w.r = w.w
-	w.full = false
-}
-
 // CopyBytes copies 'length' bytes from 'distance' bytes back in history to the
 // current write pointer. Supports overlapping copies (e.g. repeating patterns
 // where length > distance).
@@ -363,8 +340,8 @@ func (w *window) Read(p []byte) (int, error) {
 			// promised is something a caller acts on whether or not it
 			// looks at the error.
 			//
-			// This is a backstop, not the fix. The state is prevented at
-			// its source by recordHistory; see storeReader.
+			// This is a backstop. The state cannot arise today: only
+			// decoder50 writes the window, and it drains through Read.
 			break
 		}
 		w.r += chunk

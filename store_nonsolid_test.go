@@ -7,16 +7,9 @@ import (
 	"testing"
 )
 
-// TestNonSolidArchiveStoredMemberLeavesWindowUntouched exercises the buildChain
-// logic end-to-end: opening a real non-solid fixture with a stored member through
-// NewReader and verifying the window is not touched during decompression.
-//
-// This exercises the actual buildChain branch: Reader.solid is false, so a nil
-// window is passed to storeReader instead of r.win. The test validates that the
-// window pointers remain at their initial state after reading the stored member.
-//
-// Mutation check: remove the r.solid check in buildChain (make it always pass
-// r.win), and this test fails because the window will be dirtied by recordHistory.
+// A stored member in a non-solid archive leaves the window untouched: the
+// window pointers are what they were before the member was read. (The solid
+// case is TestSolidSuccessorDoesNotSeeStoredBytes.)
 func TestNonSolidArchiveStoredMemberLeavesWindowUntouched(t *testing.T) {
 	// rar5_store.rar is a non-solid archive with a single stored member
 	volChan := fileVolumesOf(t, filepath.Join("testdata", "rar5_store.rar"))
@@ -24,34 +17,27 @@ func TestNonSolidArchiveStoredMemberLeavesWindowUntouched(t *testing.T) {
 	r := NewReader(volChan)
 	defer r.Close() //nolint:errcheck
 
-	// Capture initial window state
 	initialHistLen := r.win.historyLen()
 	initialW := r.win.w
 	initialR := r.win.r
 	initialWrapped := r.win.wrapped
 
-	// Read the stored member
 	e, err := r.NextEntry()
 	if err != nil {
 		t.Fatalf("NextEntry: %v", err)
 	}
 	defer e.Close() //nolint:errcheck
 
-	// Verify the archive is non-solid (r.solid is populated after NextEntry reads the archive header)
 	if r.solid {
 		t.Fatal("fixture is solid; test needs a non-solid archive")
 	}
-
 	if e.Header.Method != 0 {
 		t.Fatalf("fixture member has Method=%d, want 0 (stored)", e.Header.Method)
 	}
-
-	// Read all content
 	if _, err := io.Copy(io.Discard, e); err != nil {
 		t.Fatalf("Read member: %v", err)
 	}
 
-	// Window must remain completely untouched by the stored member
 	if got := r.win.historyLen(); got != initialHistLen {
 		t.Errorf("historyLen changed from %d to %d: window was dirtied by "+
 			"non-solid stored member", initialHistLen, got)
@@ -70,56 +56,22 @@ func TestNonSolidArchiveStoredMemberLeavesWindowUntouched(t *testing.T) {
 	}
 }
 
-// TestBuildChainGivesStoreReaderTheWindowOnlyWhenSolid directly tests the
-// buildChain decision logic: when the archive is solid, storeReader gets r.win;
-// when non-solid, it gets nil.
-//
-// This test constructs a Reader and directly manipulates r.solid to test both
-// branches, exercising the conditional that neither existing test reaches.
-//
-// Mutation checks:
-// (a) Make buildChain always pass r.win: solid=false case fails because s.win != nil
-// (b) Make buildChain always pass nil: solid=true case fails because s.win != r.win
-func TestBuildChainGivesStoreReaderTheWindowOnlyWhenSolid(t *testing.T) {
-	// Construct a Reader with a dummy volume channel, the way other tests do
+// buildChain hands a stored member its source directly, whatever the
+// archive's solidity: there is no window-recording wrapper left to give it.
+// Mutation check: wrap the source in anything and the identity fails.
+func TestBuildChainReturnsTheSourceForAStoredMember(t *testing.T) {
 	r := NewReader(make(chan io.ReadCloser))
 	defer r.Close() //nolint:errcheck
-
-	// Minimal FileHeader for a stored member
-	fh := &FileHeader{
-		Name:   "test.bin",
-		Method: 0, // stored
-	}
+	fh := &FileHeader{Name: "test.bin", Method: 0}
 	payload := bytes.NewReader([]byte("test data"))
-
-	// Test case 1: non-solid archive (r.solid = false)
-	r.solid = false
-	src, err := r.buildChain(fh, payload)
-	if err != nil {
-		t.Fatalf("buildChain non-solid: %v", err)
-	}
-
-	sr, ok := src.(*storeReader)
-	if !ok {
-		t.Fatalf("buildChain non-solid returned %T, want *storeReader", src)
-	}
-	if sr.win != nil {
-		t.Error("non-solid: storeReader.win should be nil, got non-nil")
-	}
-
-	// Test case 2: solid archive (r.solid = true)
-	r.solid = true
-	payload.Reset([]byte("test data"))
-	src, err = r.buildChain(fh, payload)
-	if err != nil {
-		t.Fatalf("buildChain solid: %v", err)
-	}
-
-	sr, ok = src.(*storeReader)
-	if !ok {
-		t.Fatalf("buildChain solid returned %T, want *storeReader", src)
-	}
-	if sr.win != r.win {
-		t.Errorf("solid: storeReader.win should be r.win (%p), got %p", r.win, sr.win)
+	for _, solid := range []bool{false, true} {
+		r.solid = solid
+		src, err := r.buildChain(fh, payload)
+		if err != nil {
+			t.Fatalf("buildChain solid=%v: %v", solid, err)
+		}
+		if src != io.Reader(payload) {
+			t.Fatalf("buildChain solid=%v returned %T, want the source itself", solid, src)
+		}
 	}
 }
