@@ -3,6 +3,7 @@ package rarengine
 import (
 	"io"
 	"sync"
+	"sync/atomic"
 )
 
 const (
@@ -89,10 +90,13 @@ type blockPipeline struct {
 	codeLength [tableSize5]byte
 	bitlen     huffmanDecoder
 
-	jobs    chan *blockJob
-	quit    chan struct{}
+	jobs chan *blockJob
+	// quit is written only under mu (ensureQuit, restart) and read without it
+	// by the traversal goroutine in submit and wait. A pointer to the channel,
+	// so a renewal is one atomic store.
+	quit    atomic.Pointer[chan struct{}]
 	wg      *sync.WaitGroup // the current generation of goroutines
-	mu      sync.Mutex      // guards quit, jobs, wg, running, and the start/stop transitions
+	mu      sync.Mutex      // guards quit writes, jobs, wg, running, and the start/stop transitions
 	running bool
 }
 
@@ -137,8 +141,6 @@ func (d *decoder50) setPipeline(workers int) {
 			} else {
 				d.pipe.drain()
 			}
-		}
-		if d.pipe != nil {
 			d.pipe.stop()
 		}
 		p := newBlockPipeline(workers)
@@ -210,7 +212,8 @@ func (p *blockPipeline) disengage(d *decoder50) {
 // generation to exit, which settles every token they will ever send, and
 // clears the slot's done channel without blocking before releasing the
 // slot. The channel itself is never replaced: a worker reads it when it
-// sends.
+// sends. restart calls it after a stop, so quit has already fired and every
+// job no worker completed takes the quit branch.
 func (p *blockPipeline) drain() {
 	for p.count > 0 {
 		j := p.slots[p.head]
@@ -333,14 +336,13 @@ func (p *blockPipeline) start() {
 	if p.running {
 		return
 	}
-	if p.quit == nil {
-		p.quit = make(chan struct{})
-	} else if chanClosed(p.quit) {
+	quit := p.ensureQuit()
+	if chanClosed(quit) {
 		return
 	}
 	p.jobs = make(chan *blockJob, len(p.slots))
 	p.running = true
-	quit, jobs := p.quit, p.jobs
+	jobs := p.jobs
 	wg := new(sync.WaitGroup)
 	p.wg = wg
 	for range p.workers {
@@ -378,21 +380,34 @@ func (p *blockPipeline) start() {
 // a fired quit and restart renews it.
 func (p *blockPipeline) stop() {
 	p.mu.Lock()
-	if !p.running {
-		if p.quit == nil {
-			p.quit = make(chan struct{})
-		}
-		if !chanClosed(p.quit) {
-			close(p.quit)
-		}
-		p.mu.Unlock()
-		return
-	}
-	close(p.quit)
+	p.ensureQuit()
+	p.fireQuit()
+	wasRunning := p.running
 	p.running = false
 	wg := p.wg
 	p.mu.Unlock()
-	wg.Wait()
+	if wasRunning {
+		wg.Wait()
+	}
+}
+
+// ensureQuit returns the quit channel, creating it if there is none. Called
+// with mu held.
+func (p *blockPipeline) ensureQuit() chan struct{} {
+	if q := p.quitChan(); q != nil {
+		return q
+	}
+	q := make(chan struct{})
+	p.quit.Store(&q)
+	return q
+}
+
+// fireQuit closes the quit channel unless there is none or it is already
+// closed. Called with mu held.
+func (p *blockPipeline) fireQuit() {
+	if q := p.quitChan(); q != nil && !chanClosed(q) {
+		close(q)
+	}
 }
 
 // restart arms the pipeline for the next engage after a stop. It runs on the
@@ -403,32 +418,27 @@ func (p *blockPipeline) stop() {
 // as it is.
 func (p *blockPipeline) restart() {
 	p.mu.Lock()
-	if p.running {
-		p.mu.Unlock()
+	running := p.running
+	p.mu.Unlock()
+	if running {
 		return
 	}
-	wg := p.wg
-	p.mu.Unlock()
-	if wg != nil {
-		wg.Wait()
-	}
-	for p.count > 0 {
-		select {
-		case <-p.slots[p.head].done:
-		default:
-		}
-		p.pop()
-	}
+	p.waitWorkers()
+	p.drain()
 	p.mu.Lock()
 	p.jobs = nil
-	p.quit = make(chan struct{})
+	q := make(chan struct{})
+	p.quit.Store(&q)
 	p.mu.Unlock()
 }
 
+// quitChan returns the current quit channel, nil before the first start or
+// stop. It does not take mu: quit is published atomically.
 func (p *blockPipeline) quitChan() chan struct{} {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.quit
+	if q := p.quit.Load(); q != nil {
+		return *q
+	}
+	return nil
 }
 
 // submit hands the job to a worker.
