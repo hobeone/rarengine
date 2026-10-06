@@ -310,8 +310,8 @@ func TestParallelReadDoesNotAllocate(t *testing.T) {
 // A Close that lands before the pipeline has started (the first compressed
 // member, or the first one after Reset) must still stop the workers that
 // engage starts afterwards: nothing else would, until a later Close or Reset.
-// Mutation check: make stop return early when !running, as it did, and both
-// assertions fail.
+// Mutation check: make stop return early when !running, as it did, and the
+// first assertion ("start ran workers after a stop that preceded it") fails.
 func TestStopBeforeStartPreventsWorkers(t *testing.T) {
 	base := runtime.NumGoroutine()
 	p := newBlockPipeline(2)
@@ -394,8 +394,9 @@ func TestCloseDuringNextEntryLeavesNoWorkers(t *testing.T) {
 
 // The same sweep on a Reader whose decoder has never had a pipeline: the
 // Close lands during the first NextEntry of the Reader's life. Mutation
-// check: make stopWorkers a no-op while d.pipe is nil and offsets that land
-// before setPipeline leave running workers.
+// check: ignore pipeStopped in setPipeline (the publish no longer stops the
+// new pipeline) and offsets that land before setPipeline leave running
+// workers.
 func TestCloseDuringFirstNextEntryLeavesNoWorkers(t *testing.T) {
 	file := filepath.Join("testdata", "rar5_solid_bench.rar")
 	data, err := os.ReadFile(file)
@@ -413,6 +414,61 @@ func TestCloseDuringFirstNextEntryLeavesNoWorkers(t *testing.T) {
 		_, _ = r.NextEntry()
 		if p := r.dec50.pipe; p != nil && chanClosed(r.done) && p.running {
 			t.Fatalf("Close at offset %d left decode workers running", at)
+		}
+		_ = r.Close()
+	}
+	goroutinesSettle(t, base)
+}
+
+// signalFirstRead is a volume that tells the test goroutine when NextEntry
+// first reads it, and holds that read until the Close has had a chance to run.
+type signalFirstRead struct {
+	io.Reader
+	once    sync.Once
+	started chan<- struct{}
+}
+
+func (s *signalFirstRead) Read(p []byte) (int, error) {
+	s.once.Do(func() {
+		s.started <- struct{}{}
+		time.Sleep(time.Duration(len(p)%7) * 100 * time.Microsecond)
+	})
+	return s.Reader.Read(p)
+}
+
+func (s *signalFirstRead) Close() error { return nil }
+
+// Close from a separate goroutine while NextEntry builds the first pipeline:
+// the race detector is the oracle for d.pipe's access (stopWorkers on one
+// goroutine, setPipeline on the other), and no worker may survive the Close.
+// Mutation check: read and write d.pipe in stopWorkers/setPipeline without
+// pipeMu and -race reports a data race.
+func TestConcurrentCloseDuringFirstNextEntry(t *testing.T) {
+	file := filepath.Join("testdata", "rar5_solid_bench.rar")
+	data, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := runtime.NumGoroutine()
+	for i := range 40 {
+		r := NewReader(fileVolumesOf(t, file))
+		r.SetWorkers(4)
+		started := make(chan struct{}, 1)
+		vols := make(chan io.ReadCloser, 1)
+		vols <- &signalFirstRead{Reader: bytes.NewReader(data), started: started}
+		close(vols)
+		r.Reset(vols)
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			<-started
+			time.Sleep(time.Duration(i) * 50 * time.Microsecond)
+			_ = r.Close()
+		}()
+		_, _ = r.NextEntry()
+		<-done
+		if p := r.dec50.pipe; p != nil && p.running {
+			t.Fatalf("iteration %d: workers running after Close", i)
 		}
 		_ = r.Close()
 	}

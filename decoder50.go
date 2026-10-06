@@ -198,10 +198,9 @@ func readFilter5Data(br *bitReader) (int64, error) {
 }
 
 func (d *decoder50) readFilter(win *window) error {
-	if len(d.fl) >= maxQueuedFilters {
-		return ErrTooManyFilters
-	}
-
+	// The record is read before the queue is checked, as a worker reads it
+	// before replay does: truncated bits then report out-of-data on both paths
+	// even when the queue is full. queueFilter owns the only queue check.
 	offset, length, ftype, param, err := readFilterBits(d.br)
 	if err != nil {
 		return err

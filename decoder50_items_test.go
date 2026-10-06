@@ -190,6 +190,55 @@ func TestReplayMatchesSerialBlockForBlock(t *testing.T) {
 	}
 }
 
+// A full filter queue met together with truncated filter bits reports the
+// same error on both paths: the bits are read first, so out-of-data wins, and
+// the queue check runs only once a complete record exists.
+// Mutation check: restore the len(d.fl) check ahead of readFilterBits in
+// readFilter and the serial side returns ErrTooManyFilters.
+func TestFullFilterQueueWithTruncatedBitsAgrees(t *testing.T) {
+	// Main table: symbol 0 is code "0", symbol 256 is code "1".
+	var cl [tableSize5]byte
+	cl[0], cl[256] = 1, 1
+	ts := &tableSet{}
+	ts.prewarm()
+	if err := ts.load(cl[:]); err != nil {
+		t.Fatal(err)
+	}
+	// Symbol 256, then "11": a 4-byte offset record with no bytes behind it.
+	payload := []byte{0xE0}
+	const bits = 3
+	full := func() *decoder50 {
+		d := newDecoder50()
+		d.init(nil, true)
+		d.fl = make([]filterBlock, maxQueuedFilters)
+		return d
+	}
+	win := newWindow(minWindowSize)
+	if err := win.BeginFile(false); err != nil {
+		t.Fatal(err)
+	}
+
+	sd := full()
+	sd.tables.copyFrom(ts)
+	sd.br = newBitReader(payload, bits)
+	if sym, err := sd.tables.main.ReadSym(sd.br); err != nil || sym != 256 {
+		t.Fatalf("symbol = %d, %v, want 256", sym, err)
+	}
+	serial := mapInnerErr(sd.readFilter(win))
+
+	j := &blockJob{payload: payload, bits: bits, tables: ts, items: make([]item, itemCap)}
+	decodeBlockItems(j)
+	pd := full()
+	idx := 0
+	_, parallel := pd.replayItems(win, j, &idx, 1<<30)
+	if parallel == nil {
+		parallel = j.err
+	}
+	if !errors.Is(serial, ErrDecoderOutOfData) || !errors.Is(parallel, ErrDecoderOutOfData) {
+		t.Fatalf("serial = %v, parallel = %v, want ErrDecoderOutOfData from both", serial, parallel)
+	}
+}
+
 // replayItems on hand-built items: the filter pair, the queue-full check
 // that precedes pairing, and the two malformed shapes.
 // Mutation check: see each subtest.

@@ -66,9 +66,10 @@ func TestDecoder50_ReadFilter(t *testing.T) {
 		t.Errorf("expected length 0x08, got %#x", fb.length)
 	}
 
-	// Test ErrTooManyFilters limit
+	// Test ErrTooManyFilters limit: a complete record on a full queue is
+	// refused by queueFilter, after the record was read.
 	d.fl = make([]filterBlock, maxQueuedFilters)
-	err = d.readFilter(win)
+	err = queueOne(d, win, 0x10, 0x08, 0, 5)
 	if !errors.Is(err, ErrTooManyFilters) {
 		t.Errorf("expected ErrTooManyFilters, got %v", err)
 	}
