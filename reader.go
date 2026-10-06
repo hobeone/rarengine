@@ -79,11 +79,21 @@ type Reader struct {
 	dec50 *decoder50
 
 	// maxWindow caps how large a dictionary the window grows to meet. It
-	// defaults to the format's 4 GiB maximum, so by default every valid
-	// archive decodes; a consumer that would rather bound memory sets it lower
-	// with SetMaxWindow and accepts ErrDictionaryTooLarge for the members that
+	// defaults to the format's 4 GiB maximum where the window is a mapping,
+	// so by default every valid archive decodes, and to 32 MiB where it is
+	// heap; a consumer that would rather bound memory sets it lower with
+	// SetMaxWindow and accepts ErrDictionaryTooLarge for the members that
 	// genuinely need more.
-	maxWindow int64
+	//
+	// archiveMax is the value in force for the archive being read, latched by
+	// the first member that sizes the window and cleared by Reset. A cap
+	// raised mid-archive would otherwise let a solid member grow the window
+	// and lose the history its predecessors wrote; latching makes
+	// SetMaxWindow take effect at the next archive, which is what "from now
+	// on" has to mean for a value the current archive already relied on.
+	maxWindow  int64
+	archiveMax int64
+	capLatched bool
 
 	passwords []string
 	// resolved is the candidate that verified against the archive's check
@@ -174,12 +184,18 @@ type Reader struct {
 // NewReader constructs a Reader over volumes.
 //
 // The window starts at the format's 256 KiB minimum and grows to the
-// dictionary each member's header declares, capped by SetMaxWindow (default:
-// the format's 4 GiB maximum). Growth is a reservation, not a commit: on Linux the
-// window is an anonymous mapping whose pages the kernel provides as the
-// stream writes them, so resident memory follows the history a member actually
-// produced rather than the dictionary it declared. A stored member in a
-// non-solid archive never touches the window at all.
+// dictionary each member's header declares, capped by SetMaxWindow. On Linux
+// growth is a reservation, not a commit: the window is an anonymous mapping
+// whose pages the kernel provides as the stream writes them, so resident
+// memory follows the history a member actually produced rather than the
+// dictionary it declared, and the default cap is the format's 4 GiB maximum.
+// Elsewhere the window is a heap slice and the default cap is 32 MiB, because
+// a heap allocation is committed at once and cannot fail gracefully. A stored
+// member in a non-solid archive never touches the window at all.
+//
+// Reading an Entry concurrently with NextEntry or Reset on the same Reader
+// was always a data race; because growth replaces the window's storage, it
+// can now fault rather than merely read garbage.
 //
 // A member can therefore end short with ErrDictionaryTooLarge only when its
 // stream references history beyond a window that SetMaxWindow kept smaller
@@ -192,17 +208,20 @@ func NewReader(volumes <-chan io.ReadCloser) *Reader {
 		volumes:   volumes,
 		win:       newWindow(minWindowSize),
 		dec50:     newDecoder50(),
-		maxWindow: maxDictSize,
+		maxWindow: defaultMaxWindow,
 	}
 }
 
-// SetMaxWindow caps the dictionary window at n bytes for every archive this
-// Reader reads from now on. The default is the format's maximum, 4 GiB, which
-// means every valid archive decodes; a smaller cap bounds the Reader's peak
-// memory and makes a member whose stream genuinely references history beyond
-// it end short with ErrDictionaryTooLarge. A cap below the 256 KiB format
-// minimum has no further effect, because the window never shrinks below that
-// minimum; a window already grown past n is likewise kept and not shrunk.
+// SetMaxWindow caps the dictionary window at n bytes for the archives this
+// Reader reads from its next archive on -- the one about to be read, if no
+// member has been admitted yet, otherwise the one after the next Reset. The
+// default is the format's maximum, 4 GiB, on Linux, where the window is a
+// mapping; 32 MiB elsewhere, where it is heap. A smaller cap bounds the
+// Reader's peak memory and makes a member whose stream genuinely references
+// history beyond it end short with ErrDictionaryTooLarge. A cap below the
+// 256 KiB format minimum has no further effect, because the window never
+// shrinks below that minimum; a window already grown past n is likewise kept
+// and not shrunk.
 func (r *Reader) SetMaxWindow(n int64) {
 	r.maxWindow = n
 }
@@ -241,6 +260,7 @@ func (r *Reader) Reset(volumes <-chan io.ReadCloser) {
 	r.damaged = nil
 	r.resolved, r.hasResolved = "", false
 	r.solid, r.solidSeen = false, false
+	r.capLatched = false
 	r.fatal = nil
 	// BeginFile(false) is the window's one entrance for discarding history: it
 	// resets the pointers and clears incomplete together. Poking r.win.incomplete
@@ -450,6 +470,16 @@ func (r *Reader) nextEntry() (*Entry, error) {
 					// failure: reached mid-member, through the splice, it is
 					// that member's verdict and says a part is missing.
 					if errors.Is(err, ErrNoNextVolume) {
+						// The archive is over and finishActive has run, so
+						// no Entry can reach the window: the pages a large
+						// dictionary committed go back now rather than at
+						// the next Reset, which a caller that builds a
+						// Reader per archive never issues. The cleanup
+						// remains the backstop for a Reader dropped
+						// mid-archive, but it runs only when the collector
+						// does, and a heap of a few hundred kilobytes seldom
+						// makes it run.
+						r.win.decommit()
 						if r.damaged != nil {
 							return nil, r.damaged
 						}
@@ -895,7 +925,12 @@ const bombRatio = 65536
 // back-references assume, and rar gives every member of a solid archive the
 // archive's dictionary, so a solid member declaring more than the window the
 // archive established is a corrupt header, refused like the other identity
-// contradictions dispatch and nextVolumePayload check.
+// contradictions dispatch and nextVolumePayload check. Unless the window is
+// already damaged: then the window is small BECAUSE a predecessor was refused
+// before it could size it, and the member's true verdict is the one BeginFile
+// is about to give, ErrSolidStreamBroken. Reporting a corrupt header there
+// would be the false accusation CLAUDE.md treats as the worst failure, so the
+// damage check wins and this function stands aside.
 //
 // A reservation failure is reported as ErrDictionaryTooLarge wrapping the
 // system error: the member needs a window this Reader could not provide,
@@ -904,11 +939,17 @@ func (r *Reader) sizeWindow(fh *FileHeader) error {
 	if fh.DictSize <= 0 || (fh.Method == 0 && !r.solid) {
 		return nil
 	}
-	want := int(min(fh.DictSize, r.maxWindow))
+	if !r.capLatched {
+		r.archiveMax, r.capLatched = r.maxWindow, true
+	}
+	want := int(min(fh.DictSize, r.archiveMax))
 	if want <= r.win.size {
 		return nil
 	}
 	if fh.Solid {
+		if r.win.incomplete {
+			return nil
+		}
 		return fmt.Errorf("%w: file %q: solid member declares a %d-byte "+
 			"dictionary, the archive's window is %d bytes",
 			ErrCorruptFileHeader, fh.Name, fh.DictSize, r.win.size)

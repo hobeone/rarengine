@@ -73,6 +73,134 @@ func TestSetMaxWindowCapsTheWindow(t *testing.T) {
 	}
 }
 
+// A solid member after a refused predecessor reports ErrSolidStreamBroken,
+// as it always did -- not a corrupt header, although the window is indeed
+// smaller than it declares, because the window is small BECAUSE the
+// predecessor was refused before it could size it. The bomb guard refuses the
+// first member here; the same applies to the version check, a header parse
+// failure and a failed reservation.
+func TestSolidMemberAfterRefusedPredecessorIsBrokenNotCorrupt(t *testing.T) {
+	bomb := rar5Member(t, memberSpec{name: "bomb.bin",
+		unpackedSz: new(int64(2 << 20)), packedSz: new(int64(0)),
+		extraCompFlags: 8 << fileCompDictShift})
+	next := rar5Member(t, memberSpec{name: "b.bin", content: "second", withCRC: true,
+		solid: true, extraCompFlags: 8 << fileCompDictShift})
+	r := NewReader(volumesOf(rar5Archive(t, true, bomb, next)))
+	defer r.Close() //nolint:errcheck
+
+	e, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("first NextEntry: %v", err)
+	}
+	if _, err := io.Copy(io.Discard, e); !errors.Is(err, ErrRarBombDetected) {
+		t.Fatalf("bomb verdict = %v", err)
+	}
+	// Refused before sizeWindow: the bomb's 32 MiB declaration cost nothing.
+	if r.win.size != minWindowSize {
+		t.Fatalf("refused bomb grew the window to %d", r.win.size)
+	}
+	e, err = r.NextEntry()
+	if err != nil {
+		t.Fatalf("second NextEntry: %v", err)
+	}
+	_, err = io.Copy(io.Discard, e)
+	if !errors.Is(err, ErrSolidStreamBroken) {
+		t.Fatalf("solid successor = %v, want ErrSolidStreamBroken", err)
+	}
+	if errors.Is(err, ErrCorruptFileHeader) {
+		t.Fatalf("solid successor falsely accused of a corrupt header: %v", err)
+	}
+}
+
+// A solid member refused for declaring a larger dictionary damages the window
+// like any other refusal, so the solid member after it is refused as broken
+// rather than decoded against history nobody wrote.
+func TestSizeWindowRefusalDamagesTheWindow(t *testing.T) {
+	first := rar5Member(t, memberSpec{name: "a.bin", content: "first", withCRC: true})
+	grown := rar5Member(t, memberSpec{name: "b.bin", content: "second", withCRC: true,
+		solid: true, extraCompFlags: 8 << fileCompDictShift})
+	third := rar5Member(t, memberSpec{name: "c.bin", content: "third", withCRC: true, solid: true})
+	r := NewReader(volumesOf(rar5Archive(t, true, first, grown, third)))
+	defer r.Close() //nolint:errcheck
+	for i, want := range []error{nil, ErrCorruptFileHeader, ErrSolidStreamBroken} {
+		e, err := r.NextEntry()
+		if err != nil {
+			t.Fatalf("NextEntry %d: %v", i, err)
+		}
+		_, err = io.Copy(io.Discard, e)
+		if !errors.Is(err, want) {
+			t.Fatalf("member %d verdict = %v, want %v", i, err, want)
+		}
+	}
+}
+
+// The cap is latched by the first member that sizes the window, so raising it
+// mid-archive cannot let a solid member grow the window and lose the history
+// its predecessors wrote; the new cap applies from the next Reset.
+func TestSetMaxWindowIsLatchedPerArchive(t *testing.T) {
+	r := NewReader(make(chan io.ReadCloser))
+	defer r.Close() //nolint:errcheck
+	r.SetMaxWindow(1 << 20)
+	if err := r.sizeWindow(&FileHeader{Method: 3, DictSize: 64 << 20}); err != nil {
+		t.Fatal(err)
+	}
+	if r.win.size != 1<<20 {
+		t.Fatalf("window = %d, want the 1 MiB cap", r.win.size)
+	}
+	r.SetMaxWindow(64 << 20)
+	if err := r.sizeWindow(&FileHeader{Method: 3, DictSize: 64 << 20}); err != nil {
+		t.Fatal(err)
+	}
+	if r.win.size != 1<<20 {
+		t.Fatalf("a cap raised mid-archive took effect: window = %d", r.win.size)
+	}
+	r.Reset(make(chan io.ReadCloser))
+	if err := r.sizeWindow(&FileHeader{Method: 3, DictSize: 64 << 20}); err != nil {
+		t.Fatal(err)
+	}
+	if r.win.size != 64<<20 {
+		t.Fatalf("the raised cap did not apply after Reset: window = %d", r.win.size)
+	}
+}
+
+// A reservation the platform refuses makes the member a capacity refusal,
+// ErrDictionaryTooLarge wrapping the system error, before any byte is read;
+// the window is unchanged and still serves the next member that fits it.
+func TestFailedReservationRefusesTheMemberAsCapacity(t *testing.T) {
+	saved := reserveWindow
+	t.Cleanup(func() { reserveWindow = saved })
+	boom := errors.New("ENOMEM for the test")
+	reserveWindow = func(int) ([]byte, func(), error) { return nil, nil, boom }
+
+	r := NewReader(make(chan io.ReadCloser))
+	defer r.Close() //nolint:errcheck
+	err := r.sizeWindow(&FileHeader{Name: "big", Method: 3, DictSize: 1 << 20})
+	if !errors.Is(err, ErrDictionaryTooLarge) || !errors.Is(err, boom) {
+		t.Fatalf("sizeWindow = %v, want ErrDictionaryTooLarge wrapping the reservation error", err)
+	}
+	if r.win.size != minWindowSize || r.win.backing != nil {
+		t.Fatal("a failed reservation changed the window")
+	}
+	// Still usable at its current size.
+	if err := r.sizeWindow(&FileHeader{Method: 3, DictSize: 128 << 10}); err != nil {
+		t.Fatalf("member within the window after a failed reservation: %v", err)
+	}
+}
+
+// grow releases the reservation it replaces at once rather than leaving it to
+// the cleanup, which runs only when the collector does.
+func TestGrowReleasesTheReplacedReservation(t *testing.T) {
+	w := newWindow(minWindowSize)
+	released := 0
+	w.backing = &windowBacking{release: func() { released++ }}
+	if err := w.grow(1 << 20); err != nil {
+		t.Fatal(err)
+	}
+	if released != 1 {
+		t.Fatalf("replaced reservation released %d times, want 1", released)
+	}
+}
+
 // windowBacking.free runs the release exactly once however many callers
 // reach it: grow frees the reservation it replaces, and the cleanup registered
 // for that same reservation fires later for a window nobody holds any more.

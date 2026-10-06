@@ -25,7 +25,21 @@ const (
 	// that window it still is; a 4 GiB window must not stage 2 GiB before the
 	// first byte is served, so the target no longer scales with the window.
 	maxFillTarget = 16 << 20
+
+	// decommitThreshold is the window size above which decommit hands pages
+	// back. Below it the pages stay resident between archives, exactly as the
+	// fixed 32 MiB window's did, because refaulting them is a memclr of the
+	// touched window -- paid per archive rather than per member, but measured
+	// at ~3% of a solid decode under transparent huge pages. Above it, the
+	// pages are the point: a Reader that just read a 4 GiB-dictionary archive
+	// must not keep gigabytes resident while it verifies the next video.
+	decommitThreshold = 32 << 20
 )
+
+// reserveWindow obtains the window's backing. A variable so a test can make
+// the reservation fail and pin what the Reader does when it cannot have the
+// window a member declares.
+var reserveWindow = reserveWindowOS
 
 // windowBacking owns one reservation's release. It is a separate object so a
 // runtime cleanup can release a reservation whose window became unreachable
@@ -161,12 +175,18 @@ func (w *window) grow(size int) error {
 
 // decommit hands the window's pages back to the kernel while keeping the
 // reservation, so the buffer is still the right size for the next archive and
-// nothing was allocated to get there. The history is already discarded by the
+// nothing was allocated to get there. Only a window above decommitThreshold
+// does so; see that constant. The history is already discarded by the
 // caller; see Reader.Reset for why this runs per archive and never per member.
+//
+// KeepAlive: w is dead after w.buf is loaded, and if this is the caller's last
+// use of the Reader the cleanup could unmap the region before madvise enters
+// the kernel -- against an address range something else may by then own.
 func (w *window) decommit() {
-	if w.backing != nil {
+	if w.backing != nil && w.size > decommitThreshold {
 		decommitWindow(w.buf)
 	}
+	runtime.KeepAlive(w)
 }
 
 // Reset resets the sliding window indexes. If keepHistory is true (for solid archives),

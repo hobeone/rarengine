@@ -8,7 +8,12 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// reserveWindow returns a zero-filled buffer of exactly size bytes backed by
+// defaultMaxWindow is the cap a Reader starts with. A mapping costs address
+// space, not memory, until the stream writes into it, so the format's full
+// 4 GiB is affordable here; the heap-backed platforms start lower.
+const defaultMaxWindow = maxDictSize
+
+// reserveWindowOS returns a zero-filled buffer of exactly size bytes backed by
 // an anonymous private mapping, together with a function that returns it to
 // the kernel.
 //
@@ -27,7 +32,7 @@ import (
 // accounted as they are touched, like any anonymous memory. A failure here is
 // reported rather than papered over: the caller refuses the member as a
 // capacity limit, which is the classification its consumers already handle.
-func reserveWindow(size int) ([]byte, func(), error) {
+func reserveWindowOS(size int) ([]byte, func(), error) {
 	buf, err := unix.Mmap(-1, 0, size,
 		unix.PROT_READ|unix.PROT_WRITE,
 		unix.MAP_PRIVATE|unix.MAP_ANONYMOUS|unix.MAP_NORESERVE)
