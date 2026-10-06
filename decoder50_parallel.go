@@ -421,6 +421,8 @@ func (p *blockPipeline) fireQuit() {
 // queue, and only then installs a fresh quit. A running pipeline is left
 // as it is.
 func (p *blockPipeline) restart() {
+	// Relies on: running is false with jobs in the ring only after quit has
+	// fired, so drain's quit branch cannot block.
 	p.mu.Lock()
 	running := p.running
 	p.mu.Unlock()

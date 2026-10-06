@@ -70,7 +70,8 @@ type decoder50 struct {
 	pipeStopped bool
 	// payloadLimit and beforeDecode are copied into a pipeline when setPipeline
 	// creates it. Tests set them before the first member; production leaves
-	// them at their defaults.
+	// them at their defaults. A zero-value decoder50{} has payloadLimit 0 and
+	// so sends every block inline; newDecoder50 sets the default.
 	payloadLimit  int
 	beforeDecode  func()
 	bitlenDecoder huffmanDecoder // scratch for ReadCodeLengthTable

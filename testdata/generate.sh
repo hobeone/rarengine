@@ -1,7 +1,8 @@
 #!/bin/bash
 # generate.sh — Regenerates all RAR test fixtures from scratch.
 #
-# Requirements: rar (v5+), ln -s, python3, gcc (for the x86 filter fixture)
+# Requirements: rar (v5+), ln -s, python3, gcc (for the x86 filter fixture),
+# go and objcopy from binutils (for the sweep fixture, section 26)
 #
 # The .rar files are the canonical test fixtures (checked into git).
 # This script documents how they were created and can regenerate them
