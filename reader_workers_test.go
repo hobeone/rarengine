@@ -142,6 +142,9 @@ func TestAbandonedMemberDrainsInFlightJobs(t *testing.T) {
 // the hook.
 func holdWorkers(t *testing.T, r *Reader, n int) (entered <-chan struct{}, unblock func()) {
 	t.Helper()
+	if r.dec50.pipe != nil {
+		t.Fatal("holdWorkers must run before the first NextEntry: the pipeline already exists and has captured its hooks")
+	}
 	release := make(chan struct{})
 	ch := make(chan struct{}, n)
 	var once sync.Once

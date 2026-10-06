@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -82,45 +83,81 @@ func randomVariants(data []byte) []damagedVariant {
 	return out
 }
 
-// targetedVariants damages every block of the fixture's first compressed
-// member at the seams the parallel path introduces. Per block it flips the
-// flags byte and the checksum byte (a header refused while read ahead, whose
-// error must wait for the blocks before it), the first payload byte (the
-// start of the code-length table when the block carries one: a table that
-// fails to load while earlier blocks are still decoding against the previous
-// one) and the last payload byte (a symbol cut short at the end of a job).
+// targetedVariants damages every block of every compressed member of the
+// fixture at the seams the parallel path introduces. Per block it makes:
+//
+//   - badflags and badsum: the flags byte, and the checksum byte, inverted.
+//     Either way the header checksum no longer matches, so both are the same
+//     refusal of a header while it is read ahead, whose error must wait for
+//     the blocks before it.
+//   - newtables and lastblock: the flags byte with the new-tables bit, or the
+//     last-block bit, toggled and the checksum byte corrected to match, so the
+//     header parses and the block is decoded with the opposite
+//     newTables/lastBlock semantics (tables loaded from bytes that are not a
+//     table, or not loaded; the member ended early, or not at all).
+//   - firstbyte: the first payload byte inverted, the start of the
+//     code-length table when the block carries one: a table that fails to
+//     load while earlier blocks are still decoding against the previous one.
+//   - lastbyte: the last payload byte inverted, which corrupts the block's
+//     final bits (usually its last symbol) at the end of a job. It does not
+//     shorten the payload; the cuts below do that.
+//
 // It truncates at each block boundary, one byte before and one byte after
 // (a job whose payload or header is incomplete, and the deferred end-of-data
 // error that follows the last complete block). The boundaries are the places
 // where one job ends and the next begins, so they are where a disagreement
 // between a worker's view and the serial decoder's can hide.
+//
+// Each offset is checked by parsing the header there with readBlockHead and
+// requiring the payload length to match the one the variants are built from.
 func targetedVariants(t *testing.T, data []byte) []damagedVariant {
 	t.Helper()
 	offsets := blockHeaderOffsets(t, data)
 	var out []damagedVariant
 	var boundaries []int
-	end := 0
+	var buf [5]byte
 	for _, off := range offsets {
+		h, err := readBlockHead(bytes.NewReader(data[off:]), &buf)
+		if err != nil {
+			t.Fatalf("setup: no block header at %d: %v", off, err)
+		}
 		bc := int(data[off]>>3)&3 + 1
 		payloadLen := 0
 		for i := range bc {
 			payloadLen |= int(data[off+2+i]) << (8 * i)
+		}
+		if h.blockBytes != payloadLen {
+			t.Fatalf("setup: block at %d: parsed payload length %d, offsets say %d", off, h.blockBytes, payloadLen)
 		}
 		first := off + 2 + bc
 		last := first + payloadLen - 1
 		if last >= len(data) {
 			t.Fatalf("setup: block at %d ends past the archive (%d)", off, len(data))
 		}
-		boundaries = append(boundaries, off)
-		end = last + 1
+		boundaries = append(boundaries, off, last+1)
 		for _, p := range []struct {
 			what string
 			pos  int
-		}{{"flags", off}, {"sum", off + 1}, {"first", first}, {"last", last}} {
+		}{{"badflags", off}, {"badsum", off + 1}, {"firstbyte", first}, {"lastbyte", last}} {
 			out = append(out, damagedVariant{fmt.Sprintf("block@%d/%s", off, p.what), withFlip(data, p.pos)})
 		}
+		// A flags bit toggled with the checksum byte (0x5a ^ flags ^ the
+		// length bytes) moved by the same bit, so the header still parses.
+		for _, p := range []struct {
+			what string
+			bit  byte
+		}{{"newtables", 0x80}, {"lastblock", 0x40}} {
+			v := bytes.Clone(data)
+			v[off] ^= p.bit
+			v[off+1] ^= p.bit
+			if _, err := readBlockHead(bytes.NewReader(v[off:]), &buf); err != nil {
+				t.Fatalf("setup: block@%d/%s does not parse: %v", off, p.what, err)
+			}
+			out = append(out, damagedVariant{fmt.Sprintf("block@%d/%s", off, p.what), v})
+		}
 	}
-	boundaries = append(boundaries, end) // where the last block ends
+	slices.Sort(boundaries)
+	boundaries = slices.Compact(boundaries) // a block's end is often the next block's header
 	for _, b := range boundaries {
 		for _, d := range []int{-1, 0, 1} {
 			if cut := b + d; cut > 0 && cut < len(data) {
@@ -256,52 +293,82 @@ func blockHeaderLen(payloadLen int) int {
 	return 2 + bc
 }
 
-// blockHeaderOffsets returns the archive offsets of each block header in the
-// first compressed member, by reading the member's packed bytes through a
-// counting reader while the serial decoder parses block heads.
+// blockHeaderOffsets returns the archive offsets of each block header of
+// every compressed member, in archive order. Stored members have no blocks
+// and are skipped. Each member's packed bytes are read through the serial
+// decoder, which parses the block heads; every block's symbols are decoded
+// (including the last block's) so the next header, and the next member's
+// decoder state, are reached from the right position. Each payload is then
+// located by scanning forward in the archive.
 func blockHeaderOffsets(t *testing.T, archive []byte) []int {
+	t.Helper()
+	var all []int
+	for _, m := range blockHeaderOffsetsByMember(t, archive) {
+		all = append(all, m...)
+	}
+	return all
+}
+
+// blockHeaderOffsetsByMember is blockHeaderOffsets grouped by compressed
+// member.
+func blockHeaderOffsetsByMember(t *testing.T, archive []byte) [][]int {
 	t.Helper()
 	r := readerFor(archive)
 	defer r.Close() //nolint:errcheck
-	e := firstCompressedMember(t, r)
-	// The member's packed data begins where the volume's cursor is now;
-	// e.src bottoms out on the volume body. Rather than reach into the
-	// volume, locate headers by scanning: decode serially, and after each
-	// readBlockHeader, search the archive for the payload bytes just read.
-	_ = e
 	d, win := r.dec50, r.win
 	drain := make([]byte, win.size)
-	var offsets []int
+	var members [][]int
 	from := 0
 	for {
-		if err := d.readBlockHeader(); err != nil {
-			t.Fatalf("readBlockHeader: %v", err)
+		e, err := r.NextEntry()
+		if err == io.EOF {
+			return members
 		}
-		at := bytes.Index(archive[from:], d.payloadBuf)
-		if at < 0 {
-			t.Fatal("payload not found in archive")
+		if err != nil {
+			t.Fatalf("NextEntry: %v", err)
 		}
-		offsets = append(offsets, from+at-blockHeaderLen(len(d.payloadBuf)))
-		from += at + len(d.payloadBuf)
-		if d.lastBlock {
-			return offsets
+		if e.Header.Method == 0 {
+			if _, err := io.Copy(io.Discard, e); err != nil {
+				t.Fatal(err)
+			}
+			continue
 		}
-		// Decode the block's symbols so the next header is read from the
-		// right position, draining the window after each so it never fills.
+		var offsets []int
 		for {
-			sym, err := d.tables.main.ReadSym(d.br)
-			if errors.Is(err, io.EOF) {
+			if err := d.readBlockHeader(); err != nil {
+				t.Fatalf("readBlockHeader: %v", err)
+			}
+			at := bytes.Index(archive[from:], d.payloadBuf)
+			if at < 0 {
+				t.Fatal("payload not found in archive")
+			}
+			offsets = append(offsets, from+at-blockHeaderLen(len(d.payloadBuf)))
+			from += at + len(d.payloadBuf)
+			// Decode the block's symbols so the next header is read from the
+			// right position, draining the window after each so it never fills.
+			for {
+				sym, err := d.tables.main.ReadSym(d.br)
+				if errors.Is(err, io.EOF) {
+					break
+				}
+				if err != nil {
+					t.Fatalf("ReadSym: %v", err)
+				}
+				if err := d.decodeSymbol(win, sym); err != nil {
+					t.Fatalf("decodeSymbol: %v", err)
+				}
+				_, _ = win.Read(drain)
+			}
+			d.br = nil
+			if d.lastBlock {
 				break
 			}
-			if err != nil {
-				t.Fatalf("ReadSym: %v", err)
-			}
-			if err := d.decodeSymbol(win, sym); err != nil {
-				t.Fatalf("decodeSymbol: %v", err)
-			}
-			_, _ = win.Read(drain)
 		}
-		d.br = nil
+		members = append(members, offsets)
+		// The member was decoded by hand, not through its Entry, so the
+		// Reader would see it as short and refuse a solid successor.
+		// Every block was in fact decoded and drained.
+		e.remaining, e.done = 0, io.EOF
 	}
 }
 

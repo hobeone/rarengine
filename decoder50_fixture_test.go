@@ -22,7 +22,11 @@ import (
 func TestSweepFixtureShape(t *testing.T) {
 	data := fixtureBytes(t, "rar5_sweep.rar")
 
-	offsets := blockHeaderOffsets(t, data)
+	byMember := blockHeaderOffsetsByMember(t, data)
+	if len(byMember) < 2 {
+		t.Fatalf("%d compressed members have block headers; the sweep targets at least two (text and executable)", len(byMember))
+	}
+	offsets := byMember[0]
 	newTables := 0
 	for _, off := range offsets {
 		if data[off]&0x80 != 0 {
