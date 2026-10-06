@@ -372,6 +372,37 @@ dd if=/dev/zero of="$TMPDIR/zeros_64m.bin" bs=1M count=64 2>/dev/null
 rar a -m3 -ma5 -ep rar5_zeros_bomb_ratio.rar "$TMPDIR/zeros_64m.bin"
 echo "  rar5_zeros_bomb_ratio.rar"
 
+# 26. RAR5, small multi-block solid archive for the damaged-input sweep.
+#
+# Three members in this order (-ds keeps it; rar would otherwise sort the .jpg
+# last): about 860 KB of this package's own Go source (6 blocks, each carrying
+# new tables), 4096 random bytes stored via -msjpg, and 200000 bytes of an
+# x86-64 Go binary's .text (rar emits an E8 filter for it). Only code from this
+# repository's toolchain goes in. The text changes as the package does, so a
+# regeneration is a different archive; TestSweepFixtureShape pins the shape,
+# and testdata/decode_golden.tsv must be regenerated with it.
+mkdir -p "$TMPDIR/sweepmain"
+cat > "$TMPDIR/sweepmain/main.go" <<'GO'
+package main
+
+import (
+	"fmt"
+	"net/http"
+)
+
+func main() { fmt.Println(http.StatusText(200)) }
+GO
+printf 'module sweepx\ngo 1.22\n' > "$TMPDIR/sweepmain/go.mod"
+(cd "$TMPDIR/sweepmain" && go build -o ../sweepx .)
+objcopy -O binary --only-section=.text "$TMPDIR/sweepx" "$TMPDIR/sweep_text.bin"
+cat ../*.go > "$TMPDIR/a_text.txt"
+head -c 4096 /dev/urandom > "$TMPDIR/b_stored.jpg"
+tail -c +400001 "$TMPDIR/sweep_text.bin" | head -c 200000 > "$TMPDIR/c_code.exe"
+rm -f rar5_sweep.rar
+rar a -ma5 -ep -s -ds -m3 -md32m -msjpg rar5_sweep.rar \
+    "$TMPDIR/a_text.txt" "$TMPDIR/b_stored.jpg" "$TMPDIR/c_code.exe"
+echo "  rar5_sweep.rar"
+
 echo ""
 echo "=== Done. $(ls -1 *.rar | wc -l) archives generated. ==="
 ls -lhS *.rar
