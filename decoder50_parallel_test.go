@@ -3,10 +3,11 @@ package rarengine
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -52,25 +53,82 @@ func TestParallelMatchesSerialOnEveryFixture(t *testing.T) {
 	}
 }
 
-// corruptVariants yields deterministic single-byte corruptions and
-// truncations of a fixture. Most land in headers and are refused before
-// decoding by both paths; the ones that land in block payloads are what
-// this is for.
-func corruptVariants(t *testing.T, file string) [][]byte {
+// damagedVariant is one damaged copy of a fixture and where it was damaged.
+type damagedVariant struct {
+	name string
+	data []byte
+}
+
+// withFlip is data with the byte at pos inverted in some bits.
+func withFlip(data []byte, pos int) []byte {
+	v := bytes.Clone(data)
+	v[pos] ^= 0x5A
+	return v
+}
+
+// randomVariants is a sparse, evenly spread grid over a fixture: 20
+// single-byte flips and 6 truncations, at fixed positions so a failure
+// reproduces. It skips the signature and archive header so variants reach
+// members. Most land in headers and are refused before decoding by both
+// paths; it is a net for the places targetedVariants does not name.
+func randomVariants(data []byte) []damagedVariant {
+	var out []damagedVariant
+	for k := range 20 {
+		pos := 64 + k*(len(data)-64)/20
+		out = append(out, damagedVariant{fmt.Sprintf("flip@%d", pos), withFlip(data, pos)})
+	}
+	for k := range 6 {
+		cut := 128 + k*(len(data)-128)/6
+		out = append(out, damagedVariant{fmt.Sprintf("cut@%d", cut), bytes.Clone(data[:cut])})
+	}
+	return out
+}
+
+// targetedVariants damages every block of the fixture's first compressed
+// member at the seams the parallel path introduces. Per block it flips the
+// flags byte and the checksum byte (a header refused while read ahead, whose
+// error must wait for the blocks before it), the first payload byte (the
+// start of the code-length table when the block carries one: a table that
+// fails to load while earlier blocks are still decoding against the previous
+// one) and the last payload byte (a symbol cut short at the end of a job).
+// It truncates at each block boundary, one byte before and one byte after
+// (a job whose payload or header is incomplete, and the deferred end-of-data
+// error that follows the last complete block). The boundaries are the places
+// where one job ends and the next begins, so they are where a disagreement
+// between a worker's view and the serial decoder's can hide.
+func targetedVariants(t *testing.T, data []byte) []damagedVariant {
 	t.Helper()
-	data, err := os.ReadFile(file)
-	if err != nil {
-		t.Fatal(err)
+	offsets := blockHeaderOffsets(t, data)
+	var out []damagedVariant
+	var boundaries []int
+	end := 0
+	for _, off := range offsets {
+		bc := int(data[off]>>3)&3 + 1
+		payloadLen := 0
+		for i := range bc {
+			payloadLen |= int(data[off+2+i]) << (8 * i)
+		}
+		first := off + 2 + bc
+		last := first + payloadLen - 1
+		if last >= len(data) {
+			t.Fatalf("setup: block at %d ends past the archive (%d)", off, len(data))
+		}
+		boundaries = append(boundaries, off)
+		end = last + 1
+		for _, p := range []struct {
+			what string
+			pos  int
+		}{{"flags", off}, {"sum", off + 1}, {"first", first}, {"last", last}} {
+			out = append(out, damagedVariant{fmt.Sprintf("block@%d/%s", off, p.what), withFlip(data, p.pos)})
+		}
 	}
-	var out [][]byte
-	// Skip the signature and archive header so variants reach members.
-	for i := 64; i < len(data); i += max(1, len(data)/120) {
-		v := bytes.Clone(data)
-		v[i] ^= 0x5A
-		out = append(out, v)
-	}
-	for i := 128; i < len(data); i += max(1, len(data)/20) {
-		out = append(out, bytes.Clone(data[:i]))
+	boundaries = append(boundaries, end) // where the last block ends
+	for _, b := range boundaries {
+		for _, d := range []int{-1, 0, 1} {
+			if cut := b + d; cut > 0 && cut < len(data) {
+				out = append(out, damagedVariant{fmt.Sprintf("cut@%d", cut), bytes.Clone(data[:cut])})
+			}
+		}
 	}
 	return out
 }
@@ -103,28 +161,60 @@ func pipelineBlocks(r *Reader) int {
 // Damaged input decodes identically too: the same bytes before the error
 // and the same error, for byte flips and truncations across the fixture.
 // This is the bit-for-bit agreement rule on the inputs that matter.
+//
+// Each variant is its own parallel subtest with its own Readers. Under -short
+// only the targeted variants of rar5_sweep.rar run.
 func TestParallelMatchesSerialOnDamagedInput(t *testing.T) {
-	for _, file := range []string{"rar5_solid_bench.rar", "rar5_compress.rar", "rar5_solid_stored_mid.rar", "rar5_exe_filter.rar"} {
-		variants := corruptVariants(t, filepath.Join("testdata", file))
-		blocks := 0
-		for vi, v := range variants {
-			serial := outcomesOf(t, v, 1)
-			par, n := outcomesCounted(t, v, 4)
-			blocks += n
-			if len(serial) != len(par) {
-				t.Fatalf("%s variant %d: %d vs %d outcomes", file, vi, len(serial), len(par))
+	short := testing.Short()
+	if short {
+		t.Log("-short: targeted variants of rar5_sweep.rar only")
+	}
+	for _, f := range []struct {
+		file       string
+		compressed bool // holds a compressed member, so blocks can be targeted and must engage the pipeline
+	}{
+		{"rar5_sweep.rar", true},
+		{"rar5_exe_filter.rar", true},
+		{"rar5_solid_stored_mid.rar", true},
+		{"rar5_compress.rar", false}, // stored members only: legitimately submits nothing
+	} {
+		if short && f.file != "rar5_sweep.rar" {
+			continue
+		}
+		t.Run(f.file, func(t *testing.T) {
+			t.Parallel()
+			data := fixtureBytes(t, f.file)
+			var variants []damagedVariant
+			if f.compressed {
+				variants = targetedVariants(t, data)
 			}
-			for i := range serial {
-				if serial[i].line() != par[i].line() {
-					t.Errorf("%s variant %d outcome %d\nserial: %s\n   par: %s", file, vi, i, serial[i].line(), par[i].line())
+			if !short {
+				variants = append(variants, randomVariants(data)...)
+			}
+			var blocks atomic.Int64
+			t.Run("variants", func(t *testing.T) {
+				for _, v := range variants {
+					t.Run(v.name, func(t *testing.T) {
+						t.Parallel()
+						serial := outcomesOf(t, v.data, 1)
+						par, n := outcomesCounted(t, v.data, 4)
+						blocks.Add(int64(n))
+						if len(serial) != len(par) {
+							t.Fatalf("%d vs %d outcomes", len(serial), len(par))
+						}
+						for i := range serial {
+							if serial[i].line() != par[i].line() {
+								t.Errorf("outcome %d\nserial: %s\n   par: %s", i, serial[i].line(), par[i].line())
+							}
+						}
+					})
 				}
+			})
+			// The group above has returned: every variant has finished.
+			if f.compressed && blocks.Load() == 0 {
+				t.Error("no variant sent a block through the pipeline")
 			}
-		}
-		// rar5_compress.rar holds only stored members and legitimately
-		// submits nothing; the others hold compressed ones.
-		if file != "rar5_compress.rar" && blocks == 0 {
-			t.Errorf("%s: no variant sent a block through the pipeline", file)
-		}
+		})
 	}
 }
 
