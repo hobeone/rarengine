@@ -1,6 +1,9 @@
 package rarengine
 
-import "io"
+import (
+	"io"
+	"sync"
+)
 
 const (
 	maxWorkers         = 8
@@ -10,6 +13,10 @@ const (
 // parallelPayloadLimit is the size above which readAhead hands a block to
 // the caller goroutine instead of a slot. A variable so a test can lower it.
 var parallelPayloadLimit = maxParallelPayload
+
+// decodeHook, when set, runs in a worker before it decodes a block. It
+// exists so a test can hold a worker; it costs one nil check per block.
+var decodeHook func()
 
 // blockHead is a parsed block header, before its payload is read.
 type blockHead struct {
@@ -80,6 +87,12 @@ type blockPipeline struct {
 
 	codeLength [tableSize5]byte
 	bitlen     huffmanDecoder
+
+	jobs    chan *blockJob
+	quit    chan struct{}
+	wg      sync.WaitGroup
+	mu      sync.Mutex // guards quit, running, and the start/stop transitions
+	running bool
 }
 
 func newBlockPipeline(workers int) *blockPipeline {
@@ -124,6 +137,9 @@ func (d *decoder50) setPipeline(workers int) {
 				d.pipe.drain()
 			}
 		}
+		if d.pipe != nil {
+			d.pipe.stop()
+		}
 		d.pipe = newBlockPipeline(workers)
 	}
 	d.pipe.engage(d)
@@ -141,6 +157,22 @@ func (p *blockPipeline) engage(d *decoder50) {
 		p.tables[p.cur].copyFrom(&d.tables)
 	}
 	p.engaged = true
+	p.start()
+}
+
+// stopWorkers ends the pipeline's goroutines. It is the one call Reader.Close
+// makes into the decoder, and touches neither the window nor the ring.
+func (d *decoder50) stopWorkers() {
+	if d.pipe != nil {
+		d.pipe.stop()
+	}
+}
+
+// restartWorkers arms the pipeline to start goroutines again after a stop.
+func (d *decoder50) restartWorkers() {
+	if d.pipe != nil {
+		d.pipe.restart()
+	}
 }
 
 func (p *blockPipeline) disengage(d *decoder50) {
@@ -149,9 +181,21 @@ func (p *blockPipeline) disengage(d *decoder50) {
 	p.engaged = false
 }
 
-// drain waits for every job in flight and empties the ring.
+// drain waits for every job in flight and empties the ring. After a stop, a
+// job no worker picked up has nobody to complete it, so the wait also
+// watches quit; that job's done channel is then replaced. A worker that
+// received the job before quit may still send on the old channel, which is
+// buffered and unreferenced from then on.
 func (p *blockPipeline) drain() {
 	for p.count > 0 {
+		j := p.slots[p.head]
+		if !j.waited {
+			select {
+			case <-j.done:
+			case <-p.quitChan():
+				j.done = make(chan struct{}, 1)
+			}
+		}
 		p.pop()
 	}
 }
@@ -246,21 +290,103 @@ func (p *blockPipeline) readAhead(d *decoder50) {
 	}
 }
 
-// submit decodes the job on the calling goroutine.
+// start launches the decode goroutines if they are not running.
+func (p *blockPipeline) start() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.running {
+		return
+	}
+	if p.quit == nil {
+		p.quit = make(chan struct{})
+	}
+	p.jobs = make(chan *blockJob, len(p.slots))
+	p.running = true
+	quit, jobs := p.quit, p.jobs
+	for range p.workers {
+		p.wg.Go(func() {
+			for {
+				select {
+				case <-quit:
+					return
+				case j := <-jobs:
+					if decodeHook != nil {
+						decodeHook()
+					}
+					decodeBlockItems(j)
+					j.done <- struct{}{}
+				}
+			}
+		})
+	}
+}
+
+// stop ends the goroutines. A worker mid-block finishes that block first
+// (bounded: one block), then sees quit. Safe from any goroutine; the
+// traversal goroutine blocked in wait is released by the same close. It
+// touches neither the ring nor the window.
+func (p *blockPipeline) stop() {
+	p.mu.Lock()
+	if !p.running {
+		p.mu.Unlock()
+		return
+	}
+	close(p.quit)
+	p.running = false
+	p.mu.Unlock()
+	p.wg.Wait()
+}
+
+// restart arms a fresh quit channel so the next engage can start workers.
+func (p *blockPipeline) restart() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.running {
+		return
+	}
+	p.quit = make(chan struct{})
+}
+
+func (p *blockPipeline) quitChan() chan struct{} {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.quit
+}
+
+// submit hands the job to a worker.
 func (p *blockPipeline) submit(j *blockJob) {
 	if j.oversize {
 		// Finished inline when it reaches the head, from the bit position
-		// after the tables.
+		// after the tables. Nothing to decode, so it is ready at once.
 		j.partial = true
 		j.n = 0
 		j.err = nil
+		j.done <- struct{}{}
 		return
 	}
-	decodeBlockItems(j)
+	select {
+	case p.jobs <- j:
+	case <-p.quitChan():
+		// Closed under us: complete the job with the closed error so wait
+		// reports it without blocking.
+		j.err = ErrReaderClosed
+		j.done <- struct{}{}
+	}
 }
 
-// wait blocks until j is decoded. Synchronous: it already is.
-func (p *blockPipeline) wait(j *blockJob) error { return nil }
+// wait blocks until j is decoded or the pipeline is stopped.
+func (p *blockPipeline) wait(j *blockJob) error {
+	if j.waited {
+		return nil
+	}
+	select {
+	case <-j.done:
+		j.waited = true
+		return nil
+	case <-p.quitChan():
+		return ErrReaderClosed
+	}
+}
 
 // pop releases slots[head].
 func (p *blockPipeline) pop() {
@@ -272,6 +398,7 @@ func (p *blockPipeline) pop() {
 		}
 	}
 	j.tables = nil
+	j.waited = false
 	if j.oversize {
 		// The payload is the serial buffer; the slot must not keep it, or
 		// a later block would be read into it.

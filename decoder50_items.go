@@ -277,6 +277,7 @@ type blockJob struct {
 	err     error     // the error that ended decoding, nil at a clean block end
 
 	oversize bool // payload is the serial buffer; the block is finished inline
+	waited   bool // done has been received for this use of the slot
 
 	done chan struct{} // buffered 1; the worker sends when the job is complete
 }
