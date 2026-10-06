@@ -1,5 +1,7 @@
 package rarengine
 
+import "io"
+
 // tableSet is the four Huffman tables a block is decoded with. Tables are
 // sequential state: a block without the new-tables flag uses the tables of
 // the block before it, so whoever reads block headers in order owns the
@@ -225,4 +227,201 @@ func (d *decoder50) queueFilter(win *window, offset, length int64, ftype, param 
 		param:  param,
 	})
 	return nil
+}
+
+// itemKind says which apply function an item is replayed with.
+type itemKind uint8
+
+const (
+	itemLiteral   itemKind = iota // value: the byte
+	itemMatch                     // length, value: distance
+	itemRepDist                   // aux: slot 0..3, length
+	itemRepLast                   //
+	itemFilter                    // aux: ftype, length: param, value: offset (raw, <= 0xFFFFFFFF)
+	itemFilterLen                 // value: length (raw); always follows itemFilter
+)
+
+// item is one decoded symbol with everything the block's bits determined on
+// their own. What depends on earlier output -- the distance history, the
+// decode position a filter is relative to, the window's history bound -- is
+// resolved when the item is replayed. 8 bytes: a distance fits uint32
+// exactly (slot 63 with every extra bit set is 4294967295) and a length
+// fits uint16 (slot 43 is 3586 before the at most +3 adjustment).
+type item struct {
+	kind   itemKind
+	aux    uint8
+	length uint16
+	value  uint32
+}
+
+const (
+	// itemCap is a job's item array size: twice rar's 16384 symbols per
+	// block, so a filter's two items and any encoder that packs more never
+	// overflow in practice; the overflow path exists for the format's
+	// 16 MiB blocks and for hostile input.
+	itemCap = 32768
+)
+
+// blockJob is one block in flight: its bytes, the tables it decodes with,
+// and what the worker produced.
+type blockJob struct {
+	payload   []byte
+	bits      int
+	lastBlock bool
+	tables    *tableSet
+
+	items   []item // len itemCap, filled to n
+	n       int
+	partial bool      // items filled before the block ended; resume holds the position
+	resume  bitReader // the reader state at the first undecoded symbol
+	err     error     // the error that ended decoding, nil at a clean block end
+
+	done chan struct{} // buffered 1; the worker sends when the job is complete
+}
+
+// decodeBlockItems turns j's bits into items. It is the worker's whole job
+// and touches nothing but j and j.tables (read-only). It starts at j.resume
+// when that reader has a buffer (the dispatcher leaves it positioned after
+// the block's tables) and at the payload's first bit otherwise. A clean
+// block end is j.err == nil; an error that ended the block is recorded as
+// the serial path would have reported it from fill. If the items fill up
+// first, j.partial is set and j.resume is left at the first undecoded
+// symbol.
+func decodeBlockItems(j *blockJob) {
+	br := &j.resume
+	if br.buf == nil {
+		br.Reset(j.payload, j.bits)
+	}
+	ts := j.tables
+	j.n = 0
+	j.partial = false
+	j.err = nil
+	for {
+		if j.n >= len(j.items)-1 { // a filter needs two slots
+			j.partial = true
+			return
+		}
+		sym, err := ts.main.ReadSym(br)
+		if err != nil {
+			if err == io.EOF {
+				return
+			}
+			j.err = err
+			return
+		}
+		it := &j.items[j.n]
+		switch {
+		case sym < 256:
+			*it = item{kind: itemLiteral, value: uint32(sym)}
+			j.n++
+		case sym >= 262:
+			length, distance, err := decodeOffsetBits(br, ts, sym-262)
+			if err != nil {
+				j.err = mapInnerErr(err)
+				return
+			}
+			*it = item{kind: itemMatch, length: uint16(length), value: uint32(distance)}
+			j.n++
+		case sym >= 258:
+			length, err := decodeLengthBits(br, ts)
+			if err != nil {
+				j.err = mapInnerErr(err)
+				return
+			}
+			*it = item{kind: itemRepDist, aux: uint8(sym - 258), length: uint16(length)}
+			j.n++
+		case sym == 257:
+			*it = item{kind: itemRepLast}
+			j.n++
+		default: // 256
+			offset, length, ftype, param, err := readFilterBits(br)
+			if err != nil {
+				j.err = mapInnerErr(err)
+				return
+			}
+			*it = item{kind: itemFilter, aux: ftype, length: uint16(param), value: uint32(offset)}
+			j.items[j.n+1] = item{kind: itemFilterLen, value: uint32(length)}
+			j.n += 2
+		}
+	}
+}
+
+// mapInnerErr is fill's mapping for an error from inside a symbol: running
+// out of bits mid-symbol is ErrDecoderOutOfData, not a clean end.
+func mapInnerErr(err error) error {
+	if err == io.EOF {
+		return ErrDecoderOutOfData
+	}
+	return err
+}
+
+// replayItems applies j.items[*idx:] to the window until the window stages
+// target bytes or the items run out, advancing *idx. It is the serial
+// loop's apply half, driven from the item array instead of from the bit
+// reader. It returns true when the job's items are exhausted.
+func (d *decoder50) replayItems(win *window, j *blockJob, idx *int, target int) (bool, error) {
+	for *idx < j.n {
+		if win.Available() >= target {
+			return false, nil
+		}
+		it := j.items[*idx]
+		*idx++
+		var err error
+		switch it.kind {
+		case itemLiteral:
+			win.writeByte(byte(it.value))
+			d.decoded++
+		case itemMatch:
+			err = d.applyMatch(win, int(it.length), int(it.value))
+		case itemRepDist:
+			err = d.applyRepDist(win, int(it.aux), int(it.length))
+		case itemRepLast:
+			err = d.applyRepLast(win)
+		case itemFilter:
+			if len(d.fl) >= maxQueuedFilters {
+				return false, ErrTooManyFilters
+			}
+			if *idx >= j.n || j.items[*idx].kind != itemFilterLen {
+				return false, ErrCorruptDecodeHeader
+			}
+			ln := j.items[*idx]
+			*idx++
+			err = d.queueFilter(win, int64(it.value), int64(ln.value), it.aux, uint8(it.length))
+		default:
+			return false, ErrCorruptDecodeHeader
+		}
+		if err != nil {
+			return false, err
+		}
+	}
+	return true, nil
+}
+
+// finishBlockInline continues a block the worker left partial. The serial
+// code takes over from the saved reader position with the job's tables,
+// and runs until the block ends or the window stages target bytes. While
+// it runs, d.br is the live reader, so a caller that sees blockDone false
+// must call again before touching any other block. It returns true when
+// the block has ended.
+func (d *decoder50) finishBlockInline(win *window, j *blockJob, target int) (blockDone bool, err error) {
+	if d.br == nil {
+		d.tables.copyFrom(j.tables)
+		d.bitReader = j.resume
+		d.br = &d.bitReader
+		d.lastBlock = j.lastBlock
+	}
+	for win.Available() < target {
+		sym, err := d.tables.main.ReadSym(d.br)
+		if err != nil {
+			if err == io.EOF {
+				d.br = nil
+				return true, nil
+			}
+			return true, err
+		}
+		if err := d.decodeSymbol(win, sym); err != nil {
+			return true, mapInnerErr(err)
+		}
+	}
+	return false, nil
 }
