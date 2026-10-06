@@ -510,7 +510,9 @@ func TestFarReferenceReportsDictionaryTooLarge(t *testing.T) {
 	close(ch)
 	r := NewReader(ch)
 	t.Cleanup(func() { _ = r.Close() })
-	r.win = newWindow(0x40000)
+	// The window would grow to the declared 1 MiB and decode this; the cap is
+	// what keeps it at the minimum so the capacity path is exercised.
+	r.SetMaxWindow(0x40000)
 
 	e, err := r.NextEntry()
 	if err != nil {
@@ -571,7 +573,7 @@ func TestFarReferenceWithSmallDeclaredDictionaryIsCorruption(t *testing.T) {
 	close(ch)
 	r := NewReader(ch)
 	t.Cleanup(func() { _ = r.Close() })
-	r.win = newWindow(0x40000)
+	r.SetMaxWindow(0x40000)
 	e, err := r.NextEntry()
 	if err != nil {
 		t.Fatal(err)
@@ -584,9 +586,73 @@ func TestFarReferenceWithSmallDeclaredDictionaryIsCorruption(t *testing.T) {
 	}
 }
 
+// With a window above 32 MiB, one fill stages the 16 MiB target rather than
+// half the window. 40 MiB of compressible text under -md64m: a single fill on
+// the 64 MiB window the member grows must stop near 16 MiB, where the old
+// size/2 rule would have staged twice that. Needs rar; skips under -short.
+func TestFillStopsAtTheCapOnALargeWindow(t *testing.T) {
+	if testing.Short() {
+		t.Skip("writes ~40 MB of scratch data")
+	}
+	rar := rarOrSkip(t)
+	dir := t.TempDir()
+	// Deterministic pseudo-text: compressible, yet with enough variety that a
+	// fill produces real output rather than one long match.
+	words := []string{"alpha ", "bravo ", "charlie ", "delta ", "echo ", "foxtrot ", "golf ", "hotel ", "india ", "juliet "}
+	var sb strings.Builder
+	x := uint64(2463534242)
+	for sb.Len() < 40<<20 {
+		x ^= x << 13
+		x ^= x >> 7
+		x ^= x << 17
+		sb.WriteString(words[x%uint64(len(words))])
+	}
+	if err := os.WriteFile(filepath.Join(dir, "text.txt"), []byte(sb.String()), 0o644); err != nil {
+		t.Skipf("cannot write scratch file: %v", err)
+	}
+	runRar(t, rar, dir, "-m3", "-md64m", "text.rar", "text.txt")
+
+	f, err := os.Open(filepath.Join(dir, "text.rar"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch := make(chan io.ReadCloser, 1)
+	ch <- f
+	close(ch)
+	r := NewReader(ch)
+	t.Cleanup(func() { _ = r.Close() })
+	r.SetMaxWindow(64 << 20) // above the non-Linux default cap
+	e, err := r.NextEntry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.Header.Method == 0 {
+		t.Fatal("rar stored the text; the fixture needs a compressed member")
+	}
+	if r.win.size != 64<<20 {
+		t.Fatalf("window = %d, want 64 MiB", r.win.size)
+	}
+	if err := r.dec50.fill(r.win); err != nil && !errors.Is(err, io.EOF) {
+		t.Fatalf("fill: %v", err)
+	}
+	staged := r.win.Available()
+	target := r.win.fillTarget()
+	if target != maxFillTarget {
+		t.Fatalf("fillTarget = %d, want the %d cap", target, maxFillTarget)
+	}
+	// One more symbol at most past the target; far below the 32 MiB that
+	// size/2 would have staged.
+	if staged < target || staged > target+4097 {
+		t.Fatalf("one fill staged %d bytes, want between %d and %d", staged, target, target+4097)
+	}
+}
+
 // The issue's archives at full size: 80 MB of data whose second half repeats
-// the first, packed with -md32m (both halves literal, decodes) and -md64m
-// (second half a 40 MB match, beyond the 32 MiB window).
+// the first, packed with -md32m (both halves literal) and -md64m (second half
+// a 40 MB match). Both decode now that the window follows the declaration;
+// the -md64m archive is then read again under a 32 MiB cap, which is the
+// configuration this library shipped with and the one that still reports the
+// capacity limit.
 func TestIssue79FarArchivesAtFullSize(t *testing.T) {
 	if testing.Short() {
 		t.Skip("writes ~170 MB of scratch data")
@@ -612,33 +678,53 @@ func TestIssue79FarArchivesAtFullSize(t *testing.T) {
 		close(ch)
 		r := NewReader(ch)
 		t.Cleanup(func() { _ = r.Close() })
+		r.SetMaxWindow(64 << 20) // above the non-Linux default cap
 		return r
 	}
+	decodes := func(name string, dict int64) {
+		r := open(name)
+		e, err := r.NextEntry()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if e.Header.DictSize != dict {
+			t.Fatalf("%s DictSize = %d, want %d", name, e.Header.DictSize, dict)
+		}
+		var got bytes.Buffer
+		got.Grow(len(want))
+		if _, err := io.Copy(&got, e); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if !bytes.Equal(got.Bytes(), want) {
+			t.Fatalf("%s content differs", name)
+		}
+		if err := e.Close(); err != nil {
+			t.Fatalf("%s Close: %v", name, err)
+		}
+		// rar stores the -md32m member (nothing within 32 MiB matches, and
+		// the halves are incompressible), and a stored member of a non-solid
+		// archive leaves the window alone. The -md64m member is compressed.
+		switch {
+		case e.Header.Method == 0 && r.win.size != minWindowSize:
+			t.Fatalf("%s is stored but grew the window to %d", name, r.win.size)
+		case e.Header.Method != 0 && r.win.size != int(dict):
+			t.Fatalf("%s left the window at %d, want %d", name, r.win.size, dict)
+		}
+	}
 
-	r := open("far_32m.rar")
+	decodes("far_32m.rar", 32<<20)
+	decodes("far_64m.rar", 64<<20)
+
+	// Capped at the old fixed size, the -md64m archive ends short exactly as
+	// it did before the window could grow.
+	r := open("far_64m.rar")
+	r.SetMaxWindow(32 << 20)
 	e, err := r.NextEntry()
 	if err != nil {
 		t.Fatal(err)
 	}
-	var got bytes.Buffer
-	got.Grow(len(want))
-	if _, err := io.Copy(&got, e); err != nil {
-		t.Fatalf("far_32m: %v", err)
-	}
-	if !bytes.Equal(got.Bytes(), want) {
-		t.Fatal("far_32m content differs")
-	}
-	if err := e.Close(); err != nil {
-		t.Fatalf("far_32m Close: %v", err)
-	}
-
-	r = open("far_64m.rar")
-	e, err = r.NextEntry()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if e.Header.DictSize != 64<<20 {
-		t.Fatalf("far_64m DictSize = %d", e.Header.DictSize)
+	if r.win.size != 32<<20 {
+		t.Fatalf("capped window = %d, want 32 MiB", r.win.size)
 	}
 	n, err := io.Copy(io.Discard, e)
 	if !errors.Is(err, ErrDictionaryTooLarge) || !errors.Is(err, ErrWindowOffsetBounds) || errors.Is(err, io.EOF) {

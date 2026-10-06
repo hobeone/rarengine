@@ -170,7 +170,7 @@ func volumesOf(data []byte) <-chan io.ReadCloser {
 }
 
 // BenchmarkReaderResetReusesWindow pins the zero-allocation invariant CLAUDE.md
-// requires: Reset must reuse the 32 MB window rather than allocating a new
+// requires: Reset must reuse the window rather than allocating a new
 // one. Allocations per op in the low thousands of bytes confirm reuse; tens
 // of megabytes would mean Reset allocated a fresh window.
 func BenchmarkReaderResetReusesWindow(b *testing.B) {

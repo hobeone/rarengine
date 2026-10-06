@@ -172,7 +172,7 @@ func TestCloseIsIdempotentAndLatches(t *testing.T) {
 	}
 }
 
-// Reset revives a closed Reader. Close ends an archive, not the 32 MB window:
+// Reset revives a closed Reader. Close ends an archive, not the window:
 // refusing to revive would mean allocating a new one to recover from a
 // cancelled download, which is what Reset exists to avoid.
 func TestResetRevivesAClosedReader(t *testing.T) {

@@ -71,7 +71,8 @@ type Entry struct {
 	// Checked at THIS layer rather than lower because the chain buffers.
 	// decoder50.Read serves from its outbuf and then from the window, touching
 	// its source only when Available() hits zero, so a compressed member can
-	// hold up to half the window in decoded plaintext below Entry.Read and
+	// hold up to the window's fill target (half the window, capped at 16 MiB)
+	// in decoded plaintext below Entry.Read and
 	// above everything else. A check under that buffer keeps delivering real
 	// content with nil errors until it drains.
 	cancelled <-chan struct{}

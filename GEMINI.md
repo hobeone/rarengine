@@ -118,7 +118,7 @@ rarengine is a zero-allocation streaming library. The hot path processes compres
 
 - **Profile before optimizing.** Use `go test -bench -cpuprofile / -memprofile` and `go tool pprof`. Never guess.
 - **Preserve zero-allocation invariants.** The `Reader` and sliding `window` are designed for reuse via `Reset()`. Do not introduce heap allocations inside `NextEntry()` or `Entry.Read()` without a benchmark justifying it.
-- **Do not zero large buffers unnecessarily.** The window's `Reset(false)` path exists precisely to avoid `memclrNoHeapPointers` on the 32 MB buffer. Never reintroduce a zeroing loop on the history buffer.
+- **Do not zero large buffers unnecessarily.** The window's `Reset(false)` path exists precisely to avoid `memclrNoHeapPointers` on the window buffer, which is sized from the declared dictionary and may be gigabytes. Never reintroduce a zeroing loop on the history buffer.
 - **Huffman decode uses a 10-bit direct-lookup table.** Do not replace it with a generic tree walk — the LUT was profiled to be significantly faster and must remain.
 - **Bit reader fetches up to 56 bits per call.** The MSB-first invariant is load-bearing; do not change the bit-order contract without updating all callers.
 
