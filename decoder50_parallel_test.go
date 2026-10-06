@@ -11,44 +11,42 @@ import (
 	"testing"
 )
 
-// decodeWith returns the outcomes for every fixture with workers decode
-// goroutines (1 is the serial path).
-// It also returns how many blocks went through the pipeline.
-func decodeWith(t *testing.T, workers int) ([]decodeOutcome, int) {
-	t.Helper()
-	var readers []*Reader
-	out := decodeAll(t, goldenFixtures(t), func(r *Reader) {
-		readers = append(readers, r)
-		r.SetWorkers(workers)
-	})
-	blocks := 0
-	for _, r := range readers {
-		blocks += pipelineBlocks(r)
-	}
-	return out, blocks
-}
-
 // Every fixture decodes identically through the pipeline and the serial
 // path: same bytes, same byte counts, same errors, member for member.
 // Mutation check: drop the deferred-error rule (surface pendingErr as soon
 // as readAhead sees it) and the truncated fixtures differ in byte count.
 func TestParallelMatchesSerialOnEveryFixture(t *testing.T) {
-	serial, serialBlocks := decodeWith(t, 1)
-	if serialBlocks != 0 {
-		t.Fatalf("the serial path sent %d blocks through the pipeline", serialBlocks)
+	workerCounts := []int{2, 4}
+	var serialBlocks atomic.Int64
+	blocks := make([]atomic.Int64, len(workerCounts)) // pipeline blocks per worker count
+	t.Run("fixtures", func(t *testing.T) {
+		for _, file := range goldenFixtures(t) {
+			t.Run(filepath.Base(file), func(t *testing.T) {
+				t.Parallel()
+				serial, sr := decodeFile(t, file, func(r *Reader) { r.SetWorkers(1) })
+				serialBlocks.Add(int64(pipelineBlocks(sr)))
+				for k, workers := range workerCounts {
+					par, pr := decodeFile(t, file, func(r *Reader) { r.SetWorkers(workers) })
+					blocks[k].Add(int64(pipelineBlocks(pr)))
+					if len(par) != len(serial) {
+						t.Errorf("workers=%d: %d outcomes, serial %d", workers, len(par), len(serial))
+						continue
+					}
+					for i := range serial {
+						if par[i].line() != serial[i].line() {
+							t.Errorf("workers=%d outcome %d\n par: %s\nserial: %s", workers, i, par[i].line(), serial[i].line())
+						}
+					}
+				}
+			})
+		}
+	})
+	if n := serialBlocks.Load(); n != 0 {
+		t.Errorf("the serial path sent %d blocks through the pipeline", n)
 	}
-	for _, workers := range []int{2, 4} {
-		par, blocks := decodeWith(t, workers)
-		if blocks == 0 {
-			t.Fatalf("workers=%d: no block went through the pipeline; the comparison was serial against serial", workers)
-		}
-		if len(par) != len(serial) {
-			t.Fatalf("workers=%d: %d outcomes, serial %d", workers, len(par), len(serial))
-		}
-		for i := range serial {
-			if par[i].line() != serial[i].line() {
-				t.Errorf("workers=%d outcome %d\n par: %s\nserial: %s", workers, i, par[i].line(), serial[i].line())
-			}
+	for k, workers := range workerCounts {
+		if blocks[k].Load() == 0 {
+			t.Errorf("workers=%d: no block went through the pipeline; the comparison was serial against serial", workers)
 		}
 	}
 }

@@ -35,18 +35,27 @@ func decodeAll(t *testing.T, files []string, configure func(*Reader)) []decodeOu
 	t.Helper()
 	var out []decodeOutcome
 	for _, file := range files {
-		r := NewReader(fileVolumesOf(t, file))
-		if configure != nil {
-			configure(r)
-		}
-		base := filepath.Base(file)
-		for _, o := range readOutcomes(r) {
-			o.file = base
-			out = append(out, o)
-		}
-		_ = r.Close()
+		o, _ := decodeFile(t, file, configure)
+		out = append(out, o...)
 	}
 	return out
+}
+
+// decodeFile is decodeAll for one fixture. It also returns the closed Reader,
+// so a caller can read its pipeline counters.
+func decodeFile(t *testing.T, file string, configure func(*Reader)) ([]decodeOutcome, *Reader) {
+	t.Helper()
+	r := NewReader(fileVolumesOf(t, file))
+	if configure != nil {
+		configure(r)
+	}
+	base := filepath.Base(file)
+	out := readOutcomes(r)
+	for i := range out {
+		out[i].file = base
+	}
+	_ = r.Close()
+	return out, r
 }
 
 // readOutcomes reads every member of r's archive: NextEntry until io.EOF,
@@ -102,16 +111,59 @@ func goldenFixtures(t *testing.T) []string {
 // change is MEANT to alter a verdict, with RARENGINE_WRITE_GOLDEN=1, and
 // say so in the commit.
 func TestSerialDecodeMatchesGolden(t *testing.T) {
-	got := decodeAll(t, goldenFixtures(t), nil)
+	files := goldenFixtures(t)
 	path := filepath.Join("testdata", "decode_golden.tsv")
-	if os.Getenv("RARENGINE_WRITE_GOLDEN") == "1" {
+	write := os.Getenv("RARENGINE_WRITE_GOLDEN") == "1"
+	var want map[string][]string // golden rows by fixture
+	if !write {
+		f, err := os.Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close() //nolint:errcheck
+		want = map[string][]string{}
+		sc := bufio.NewScanner(f)
+		for sc.Scan() {
+			name, _, _ := strings.Cut(sc.Text(), "\t")
+			want[name] = append(want[name], sc.Text())
+		}
+		if err := sc.Err(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// got[i] is files[i]'s outcomes; each child writes only its own slot.
+	got := make([][]decodeOutcome, len(files))
+	t.Run("fixtures", func(t *testing.T) {
+		for i, file := range files {
+			base := filepath.Base(file)
+			t.Run(base, func(t *testing.T) {
+				t.Parallel()
+				got[i], _ = decodeFile(t, file, nil)
+				if write {
+					return
+				}
+				rows := want[base]
+				if len(rows) != len(got[i]) {
+					t.Fatalf("golden has %d outcomes, decoder produced %d", len(rows), len(got[i]))
+				}
+				for j, o := range got[i] {
+					if o.line() != rows[j] {
+						t.Errorf("outcome %d differs\n got: %s\nwant: %s", j, o.line(), rows[j])
+					}
+				}
+			})
+		}
+	})
+	if write {
 		f, err := os.Create(path)
 		if err != nil {
 			t.Fatal(err)
 		}
 		w := bufio.NewWriter(f)
-		for _, o := range got {
-			_, _ = fmt.Fprintln(w, o.line()) // a write error surfaces at Flush
+		for _, outs := range got { // fixture order, as goldenFixtures sorts it
+			for _, o := range outs {
+				_, _ = fmt.Fprintln(w, o.line()) // a write error surfaces at Flush
+			}
 		}
 		if err := w.Flush(); err != nil {
 			t.Fatal(err)
@@ -120,23 +172,10 @@ func TestSerialDecodeMatchesGolden(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Skip("golden rewritten")
+		return
 	}
-	f, err := os.Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer f.Close() //nolint:errcheck
-	var want []string
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		want = append(want, sc.Text())
-	}
-	if len(want) != len(got) {
-		t.Fatalf("golden has %d outcomes, decoder produced %d", len(want), len(got))
-	}
-	for i := range got {
-		if got[i].line() != want[i] {
-			t.Errorf("outcome %d differs\n got: %s\nwant: %s", i, got[i].line(), want[i])
-		}
+	// A fixture dropped from disk would otherwise leave its golden rows unchecked.
+	if len(want) != len(files) {
+		t.Errorf("golden covers %d fixtures, testdata has %d", len(want), len(files))
 	}
 }
