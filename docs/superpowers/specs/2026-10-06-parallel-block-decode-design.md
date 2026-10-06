@@ -62,8 +62,11 @@ to replay:
 | `256` filter | two items: `itemFilter{aux: ftype, length: param, value: offsetRaw}`, `itemFilterLen{value: lengthRaw}` | the body of today's `readFilter` from "bound both stream-supplied values" on: the `win.size` bound, `start = d.decoded + offset`, queue-order check, append |
 
 An item is 8 bytes: `kind uint8, aux uint8, length uint16, value uint32`.
-Distances fit `uint32` exactly (slot 63 with every extra bit set is
-4294967295). Lengths fit `uint16` (slot 43 gives 3584+2, plus at most 3).
+A match stores distance-1 in `value`: the largest distance, slot 63 with
+all 26 extra bits set and low offset 15, is
+1 + (3<<30) + ((1<<26 - 1) << 4) + 15 = 4294967296, one past `uint32`, and
+the smallest is 1, so distance-1 fits exactly. Lengths fit `uint16` (slot 43
+has 9 extra bits and reaches 4097, 4100 after the at most +3 adjustment).
 
 ## Invariants this must keep
 

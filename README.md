@@ -125,7 +125,7 @@ r.Reset(newVolumesChan)
 // ErrDictionaryTooLarge.
 r.SetMaxWindow(512 << 20)
 
-r.SetWorkers(4) // decode compressed members on four goroutines (default: one)
+r.SetWorkers(4) // decode compressed members on four decode goroutines (default: one)
 ```
 
 `SetWorkers` helps on large compressed members, where block decoding dominates;

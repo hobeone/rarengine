@@ -200,7 +200,8 @@ func readFilter5Data(br *bitReader) (int64, error) {
 func (d *decoder50) readFilter(win *window) error {
 	// The record is read before the queue is checked, as a worker reads it
 	// before replay does: truncated bits then report out-of-data on both paths
-	// even when the queue is full. queueFilter owns the only queue check.
+	// even when the queue is full. The queue is checked only after, in
+	// queueFilter (replay also checks it before pairing a filter's items).
 	offset, length, ftype, param, err := readFilterBits(d.br)
 	if err != nil {
 		return err

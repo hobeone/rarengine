@@ -1430,5 +1430,7 @@ func (r *Reader) unstage() bool {
 // window: about 1.4x to 2x faster on compressed members at roughly 1.5x the
 // CPU, nothing on stored members. Takes effect at the next member. The
 // goroutines live until Close, idle while a later member is decoded
-// serially; Reset revives them.
+// serially; Reset revives them. Their block buffers grow to the largest
+// block seen and are kept for the Reader's life: up to 2n x 4 MiB, 64 MiB
+// at 8 workers.
 func (r *Reader) SetWorkers(n int) { r.workers = n }
