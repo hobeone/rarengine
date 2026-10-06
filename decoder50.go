@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 )
 
 var (
@@ -55,11 +56,20 @@ type decoder50 struct {
 	// directly) declares nothing, which classifies as corruption.
 	dictSize int64
 
-	mainDecoder      huffmanDecoder
-	offsetDecoder    huffmanDecoder
-	lowoffsetDecoder huffmanDecoder
-	lengthDecoder    huffmanDecoder
-	bitlenDecoder    huffmanDecoder // scratch for ReadCodeLengthTable
+	tables tableSet
+	// pipe is the block read-ahead, nil until a Reader asks for workers.
+	// pipeMu and pipeStopped are the only decoder state Close touches from
+	// another goroutine. pipe is written only under pipeMu (setPipeline) and
+	// read under it by stopWorkers and restartWorkers; the traversal
+	// goroutine, which is its only writer, may read it without the lock, as
+	// fillParallel and the rest of the decode path do. pipeStopped latches a
+	// Close until Reset, so one that lands before the first pipeline exists is
+	// honoured when setPipeline publishes it.
+	pipe          *blockPipeline
+	pipeMu        sync.Mutex
+	pipeStopped   bool
+	bitlenDecoder huffmanDecoder // scratch for ReadCodeLengthTable
+	headBuf       [5]byte        // scratch for readBlockHead; a local would escape through io.Reader
 
 	offset [4]int
 	length int
@@ -78,9 +88,11 @@ type decoder50 struct {
 }
 
 func newDecoder50() *decoder50 {
-	return &decoder50{
+	d := &decoder50{
 		fl: make([]filterBlock, 0, maxQueuedFilters),
 	}
+	d.tables.prewarm()
+	return d
 }
 
 // init prepares the decoder state.
@@ -96,6 +108,9 @@ func (d *decoder50) init(r io.Reader, reset bool) {
 	// reset: a new source always means the buffered bits belong to a stream
 	// this decoder is no longer reading.
 	d.br = nil
+	if d.pipe != nil {
+		d.pipe.drain()
+	}
 	if reset {
 		for i := range d.offset {
 			d.offset[i] = 0
@@ -115,78 +130,29 @@ func (d *decoder50) init(r io.Reader, reset bool) {
 
 // readBlockHeader parses block bit limits and dynamic Huffman tables from the stream.
 func (d *decoder50) readBlockHeader() error {
-	var temp [2]byte
-	_, err := io.ReadFull(d.r, temp[:])
+	h, err := readBlockHead(d.r, &d.headBuf)
 	if err != nil {
 		return err
 	}
-	flags := temp[0]
-	hsum := temp[1]
-
-	bytecount := (flags>>3)&3 + 1
-	if bytecount == 4 {
-		return ErrCorruptDecodeHeader
-	}
-
-	blockBits := int(flags)&0x07 + 1
-	blockBytes := 0
-	sum := 0x5a ^ flags
-
-	var blockBytesBuf [3]byte
-	_, err = io.ReadFull(d.r, blockBytesBuf[:bytecount])
-	if err != nil {
-		return err
-	}
-
-	for i := range bytecount {
-		n := blockBytesBuf[i]
-		sum ^= n
-		blockBytes |= int(n) << (i * 8)
-	}
-
-	if sum != hsum {
-		return ErrCorruptDecodeHeader
-	}
-
-	blockBits += (blockBytes - 1) * 8
-
-	if cap(d.payloadBuf) < blockBytes {
-		d.payloadBuf = make([]byte, blockBytes)
+	if cap(d.payloadBuf) < h.blockBytes {
+		d.payloadBuf = make([]byte, h.blockBytes)
 	} else {
-		d.payloadBuf = d.payloadBuf[:blockBytes]
+		d.payloadBuf = d.payloadBuf[:h.blockBytes]
 	}
-	_, err = io.ReadFull(d.r, d.payloadBuf)
-	if err != nil {
+	if _, err = io.ReadFull(d.r, d.payloadBuf); err != nil {
 		return err
 	}
-
-	d.bitReader.Reset(d.payloadBuf, blockBits)
+	d.bitReader.Reset(d.payloadBuf, h.blockBits)
 	d.br = &d.bitReader
-	d.lastBlock = flags&0x40 > 0
-
-	if flags&0x80 > 0 {
-		err = readCodeLengthTable(d.br, d.codeLength[:], &d.bitlenDecoder)
-		if err != nil {
+	d.lastBlock = h.lastBlock
+	if h.newTables {
+		if err = readCodeLengthTable(d.br, d.codeLength[:], &d.bitlenDecoder); err != nil {
 			return err
 		}
-		cl := d.codeLength[:]
-		if err = d.mainDecoder.Init(cl[:mainSize5]); err != nil {
-			return err
-		}
-		cl = cl[mainSize5:]
-		if err = d.offsetDecoder.Init(cl[:offsetSize5]); err != nil {
-			return err
-		}
-		cl = cl[offsetSize5:]
-		if err = d.lowoffsetDecoder.Init(cl[:lowoffsetSize5]); err != nil {
-			return err
-		}
-		cl = cl[lowoffsetSize5:]
-		if err = d.lengthDecoder.Init(cl); err != nil {
+		if err = d.tables.load(d.codeLength[:]); err != nil {
 			return err
 		}
 	}
-
 	return nil
 }
 
@@ -232,151 +198,31 @@ func readFilter5Data(br *bitReader) (int64, error) {
 }
 
 func (d *decoder50) readFilter(win *window) error {
-	if len(d.fl) >= maxQueuedFilters {
-		return ErrTooManyFilters
-	}
-
-	var err error
-	offset, err := readFilter5Data(d.br)
+	// The record is read before the queue is checked, as a worker reads it
+	// before replay does: truncated bits then report out-of-data on both paths
+	// even when the queue is full. The queue is checked only after, in
+	// queueFilter (replay also checks it before pairing a filter's items).
+	offset, length, ftype, param, err := readFilterBits(d.br)
 	if err != nil {
 		return err
 	}
-	length, err := readFilter5Data(d.br)
-	if err != nil {
-		return err
-	}
-	ftype, err := d.br.ReadBits(3)
-	if err != nil {
-		return err
-	}
-
-	// Bound both stream-supplied values, which reach 0xFFFFFFFF. A filter is
-	// announced while the decoder is near its position, so an offset beyond one
-	// window is malformed rather than merely distant. Both are non-negative by
-	// construction, so an upper bound is the whole check.
-	if length > maxFilterBlockSize || offset > int64(win.size) {
-		return ErrInvalidFilter
-	}
-
-	// The filter starts offset bytes past the decode head, which is where the
-	// stream is as this record is parsed.
-	start := d.decoded + offset
-
-	// Filters are applied in queue order, so a block starting before the last
-	// one queued is malformed. Comparing absolute starts needs only the tail
-	// entry; the relative encoding this replaced had to walk the whole queue.
-	if n := len(d.fl); n > 0 && start < d.fl[n-1].start {
-		return ErrInvalidFilter
-	}
-
-	fb := filterBlock{
-		start: start,
-		// Safe on every platform: the bound above caps length at 4 MB.
-		length: int(length),
-		ftype:  uint8(ftype),
-	}
-
-	switch ftype {
-	case 0:
-		n, err := d.br.ReadBits(5)
-		if err != nil {
-			return err
-		}
-		fb.param = uint8(n + 1)
-	case 1, 2, 3:
-		// No extra parameters needed
-	default:
-		return ErrUnknownFilter
-	}
-
-	// A zero-length block transforms nothing. Dropping it here rather than at
-	// dequeue keeps Read from returning (0, nil) against a non-empty buffer,
-	// which would violate io.Reader.
-	if fb.length == 0 {
-		return nil
-	}
-
-	d.fl = append(d.fl, fb)
-	return nil
+	return d.queueFilter(win, offset, length, ftype, param)
 }
 
-func (d *decoder50) decodeLength(win *window, i int) error {
-	offset := d.offset[i]
-	copy(d.offset[1:i+1], d.offset[:i])
-	d.offset[0] = offset
-
-	sl, err := d.lengthDecoder.ReadSym(d.br)
+func (d *decoder50) decodeLength(win *window, slot int) error {
+	length, err := decodeLengthBits(d.br, &d.tables)
 	if err != nil {
 		return err
 	}
-	d.length, err = slotToLength(d.br, sl)
-	if err == nil {
-		err = d.copyMatch(win)
-	}
-	if err == nil {
-		d.decoded += int64(d.length)
-	}
-	return err
+	return d.applyRepDist(win, slot, length)
 }
 
-func (d *decoder50) decodeOffset(win *window, i int) error {
-	length, err := slotToLength(d.br, i)
+func (d *decoder50) decodeOffset(win *window, slot int) error {
+	length, distance, err := decodeOffsetBits(d.br, &d.tables, slot)
 	if err != nil {
 		return err
 	}
-
-	offset := 1
-	slot, err := d.offsetDecoder.ReadSym(d.br)
-	if err != nil {
-		return err
-	}
-	if slot < 4 {
-		offset += slot
-	} else {
-		bitCount := uint8(slot/2 - 1)
-		offset += (2 | (slot & 1)) << bitCount
-
-		if bitCount >= 4 {
-			bitCount -= 4
-			if bitCount > 0 {
-				n, err := d.br.ReadBits(bitCount)
-				if err != nil {
-					return err
-				}
-				offset += n << 4
-			}
-			n, err := d.lowoffsetDecoder.ReadSym(d.br)
-			if err != nil {
-				return err
-			}
-			offset += n
-		} else {
-			n, err := d.br.ReadBits(bitCount)
-			if err != nil {
-				return err
-			}
-			offset += n
-		}
-	}
-	if offset > 0x100 {
-		length++
-		if offset > 0x2000 {
-			length++
-			if offset > 0x40000 {
-				length++
-			}
-		}
-	}
-	d.offset[3] = d.offset[2]
-	d.offset[2] = d.offset[1]
-	d.offset[1] = d.offset[0]
-	d.offset[0] = offset
-	d.length = length
-	if err := d.copyMatch(win); err != nil {
-		return err
-	}
-	d.decoded += int64(d.length)
-	return nil
+	return d.applyMatch(win, length, distance)
 }
 
 // copyMatch performs the match the decoder's current length and offset[0]
@@ -429,11 +275,7 @@ func (d *decoder50) decodeSymbol(win *window, sym int) error {
 	case sym >= 258:
 		return d.decodeLength(win, sym-258)
 	case sym == 257:
-		if err := d.copyMatch(win); err != nil {
-			return err
-		}
-		d.decoded += int64(d.length)
-		return nil
+		return d.applyRepLast(win)
 	default: // sym == 256:
 		return d.readFilter(win)
 	}
@@ -443,6 +285,9 @@ func (d *decoder50) decodeSymbol(win *window, sym int) error {
 // stopping once the window stages fillTarget bytes of unread output; see
 // window.fillTarget for why that is not simply half the window.
 func (d *decoder50) fill(win *window) error {
+	if d.pipe != nil && d.pipe.engaged {
+		return d.fillParallel(win)
+	}
 	target := win.fillTarget()
 	for win.Available() < target {
 		if d.br == nil {
@@ -450,7 +295,7 @@ func (d *decoder50) fill(win *window) error {
 				return err
 			}
 		}
-		sym, err := d.mainDecoder.ReadSym(d.br)
+		sym, err := d.tables.main.ReadSym(d.br)
 		if err != nil {
 			if err == io.EOF {
 				if d.lastBlock {
@@ -463,10 +308,7 @@ func (d *decoder50) fill(win *window) error {
 		}
 
 		if err = d.decodeSymbol(win, sym); err != nil {
-			if err == io.EOF {
-				return ErrDecoderOutOfData
-			}
-			return err
+			return mapInnerErr(err)
 		}
 	}
 	return nil

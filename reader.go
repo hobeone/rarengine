@@ -78,6 +78,10 @@ type Reader struct {
 	entry *Entry
 	dec50 *decoder50
 
+	// workers is the decode goroutine count SetWorkers asked for; at most 1
+	// is the serial decoder.
+	workers int
+
 	// maxWindow caps how large a dictionary the window grows to meet. It
 	// defaults to the format's 4 GiB maximum where the window is a mapping,
 	// so by default every valid archive decodes, and to 32 MiB where it is
@@ -256,6 +260,7 @@ func (r *Reader) Reset(volumes <-chan io.ReadCloser) {
 	r.volumes = volumes
 	r.volMu.Unlock()
 	// --- no lock held below this line ---
+	r.dec50.restartWorkers()
 	r.staged = nil
 	r.damaged = nil
 	r.resolved, r.hasResolved = "", false
@@ -1004,6 +1009,7 @@ func (r *Reader) buildChain(fh *FileHeader, src io.Reader) (io.Reader, error) {
 	}
 	r.dec50.init(src, fh.FirstBlock)
 	r.dec50.dictSize = fh.DictSize
+	r.dec50.setPipeline(r.workers)
 	return &lz50Reader{dec: r.dec50, win: r.win}, nil
 }
 
@@ -1225,6 +1231,10 @@ func (r *Reader) Close() error {
 	volumes := r.volumes
 	r.volMu.Unlock()
 	// --- no lock held below this line ---
+	// Releases a traversal goroutine parked on a decode worker and ends the
+	// workers. It takes only the pipeline's own mutex and touches neither the
+	// window nor the block ring.
+	r.dec50.stopWorkers()
 	var err error
 	if v != nil {
 		err = v.Close()
@@ -1413,3 +1423,14 @@ func (r *Reader) unstage() bool {
 	// --- no lock held below this line ---
 	return owned
 }
+
+// SetWorkers sets how many goroutines decode a compressed member's blocks.
+// n <= 1 is the serial decoder, the default. n > 1 decodes blocks on
+// min(n, 8) goroutines while the calling goroutine replays them into the
+// window: about 1.4x to 2x faster on compressed members at roughly 1.5x the
+// CPU, nothing on stored members. Takes effect at the next member. The
+// goroutines live until Close, idle while a later member is decoded
+// serially; Reset revives them. Their block buffers grow to the largest
+// block seen and are kept for the Reader's life: up to 2n x 4 MiB, 64 MiB
+// at 8 workers.
+func (r *Reader) SetWorkers(n int) { r.workers = n }
