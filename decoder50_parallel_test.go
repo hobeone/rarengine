@@ -87,7 +87,7 @@ func outcomesOf(t *testing.T, archive []byte, workers int) []decodeOutcome {
 // through the pipeline, so a test can tell that it ran at all.
 func outcomesCounted(t *testing.T, archive []byte, workers int) ([]decodeOutcome, int) {
 	t.Helper()
-	r := NewReader(volumesOf(archive))
+	r := readerFor(archive)
 	defer r.Close() //nolint:errcheck
 	r.SetWorkers(workers)
 	out := readOutcomes(r)
@@ -164,10 +164,7 @@ func TestParallelMatchesSerialOnDamagedInput(t *testing.T) {
 // discards what a failing fill staged, so an error inside the first fill
 // delivers nothing on either path and deferral cannot be seen.
 func TestParallelDefersReadAheadErrors(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("testdata", "rar5_solid_bench.rar"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	data := fixtureBytes(t, "rar5_solid_bench.rar")
 	offsets := blockHeaderOffsets(t, data)
 	if len(offsets) < 12 {
 		t.Fatalf("need at least 12 blocks, found %d", len(offsets))
@@ -192,7 +189,7 @@ func TestParallelDefersReadAheadErrors(t *testing.T) {
 // counting reader while the serial decoder parses block heads.
 func blockHeaderOffsets(t *testing.T, archive []byte) []int {
 	t.Helper()
-	r := NewReader(volumesOf(archive))
+	r := readerFor(archive)
 	defer r.Close() //nolint:errcheck
 	e := firstCompressedMember(t, r)
 	// The member's packed data begins where the volume's cursor is now;
@@ -248,10 +245,7 @@ func blockHeaderOffsets(t *testing.T, archive []byte) []int {
 // start of the payload after the header, so corrupting the first payload
 // byte of a block that carries tables hits it.
 func TestNewTablesFailingDoesNotDisturbInFlightBlocks(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("testdata", "rar5_solid_bench.rar"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	data := fixtureBytes(t, "rar5_solid_bench.rar")
 	offsets := blockHeaderOffsets(t, data)
 	// Find a late block that carries new tables (flag 0x80). It must lie past
 	// the first fill target, or the failure discards what was staged and
@@ -318,10 +312,7 @@ func TestOversizeReadFailureDoesNotLeaveSlotAliased(t *testing.T) {
 	t.Cleanup(func() { parallelPayloadLimit = saved })
 	parallelPayloadLimit = 16 << 10
 
-	data, err := os.ReadFile(filepath.Join("testdata", "rar5_solid_bench.rar"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	data := fixtureBytes(t, "rar5_solid_bench.rar")
 	offsets := blockHeaderOffsets(t, data)
 	if len(offsets) < 4 {
 		t.Fatalf("need at least 4 blocks, found %d", len(offsets))
@@ -332,7 +323,7 @@ func TestOversizeReadFailureDoesNotLeaveSlotAliased(t *testing.T) {
 		t.Fatalf("setup: cut %d is not inside block 3 (next block at %d)", cut, offsets[4])
 	}
 
-	r := NewReader(volumesOf(data[:cut]))
+	r := readerFor(data[:cut])
 	defer r.Close() //nolint:errcheck
 	r.SetWorkers(4)
 	failed := readOutcomes(r)

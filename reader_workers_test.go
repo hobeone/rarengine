@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
-	"os"
 	"path/filepath"
 	"runtime"
 	"sync"
@@ -401,10 +400,7 @@ func (c *closeAfter) Close() error { return nil }
 // running on a closed Reader.
 func TestCloseDuringNextEntryLeavesNoWorkers(t *testing.T) {
 	file := filepath.Join("testdata", "rar5_solid_bench.rar")
-	data, err := os.ReadFile(file)
-	if err != nil {
-		t.Fatal(err)
-	}
+	data := fixtureBytes(t, "rar5_solid_bench.rar")
 	base := runtime.NumGoroutine()
 	r := NewReader(fileVolumesOf(t, file))
 	r.SetWorkers(4)
@@ -437,10 +433,7 @@ func TestCloseDuringNextEntryLeavesNoWorkers(t *testing.T) {
 // workers.
 func TestCloseDuringFirstNextEntryLeavesNoWorkers(t *testing.T) {
 	file := filepath.Join("testdata", "rar5_solid_bench.rar")
-	data, err := os.ReadFile(file)
-	if err != nil {
-		t.Fatal(err)
-	}
+	data := fixtureBytes(t, "rar5_solid_bench.rar")
 	base := runtime.NumGoroutine()
 	for at := range 400 {
 		r := NewReader(fileVolumesOf(t, file))
@@ -483,10 +476,7 @@ func (s *signalFirstRead) Close() error { return nil }
 // pipeMu and -race reports a data race.
 func TestConcurrentCloseDuringFirstNextEntry(t *testing.T) {
 	file := filepath.Join("testdata", "rar5_solid_bench.rar")
-	data, err := os.ReadFile(file)
-	if err != nil {
-		t.Fatal(err)
-	}
+	data := fixtureBytes(t, "rar5_solid_bench.rar")
 	base := runtime.NumGoroutine()
 	for i := range 40 {
 		r := NewReader(fileVolumesOf(t, file))
