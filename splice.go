@@ -240,6 +240,15 @@ func (r *Reader) nextVolumePayload(e *Entry) (io.Reader, error) {
 				"Solid=%v, first block declared %v",
 				ErrCorruptFileHeader, e.Header.Name, fh.Solid, e.Header.Solid)
 		}
+		// And the dictionary: dispatch sized the window from the first block's
+		// declaration, and the decoder classifies a refused distance against
+		// it. A continuation declaring a different size would have the window
+		// sized for one header and the classification reading another.
+		if fh.DictSize != e.Header.DictSize {
+			return nil, fmt.Errorf("%w: file %q: continuation declares a "+
+				"%d-byte dictionary, first block declared %d",
+				ErrCorruptFileHeader, e.Header.Name, fh.DictSize, e.Header.DictSize)
+		}
 		// Captures the whole-file CRC32, LastBlock and UseMac, all of which
 		// RAR records on the LAST part rather than the first.
 		e.advanceVolume(fh)

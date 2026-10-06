@@ -150,14 +150,17 @@ var (
 	ErrUnsupportedEncryptionVersion = errors.New("rarengine: archive declares an unsupported encryption version")
 
 	// ErrDictionaryTooLarge is returned when a member's compressed stream
-	// references history further back than this library's fixed 32 MiB window
-	// and the member's header declares a dictionary larger than that window.
-	// It most likely means a capacity limit of the library rather than
-	// damage: a valid archive (unrar extracts it) would decode with a larger
-	// window. It cannot be proven, though. A corrupt stream in an archive
-	// that declares a large dictionary, once 32 MiB of history exists,
-	// produces the same error, because a header cannot say what distances
-	// the stream legitimately used.
+	// references history further back than the Reader's window and the
+	// member's header declares a dictionary larger than that window. The
+	// window grows to the declared dictionary, so this happens only when
+	// Reader.SetMaxWindow kept it smaller or the reservation failed (in which
+	// case the member is refused before any byte is read, with the system
+	// error wrapped). It most likely means a capacity limit of this Reader
+	// rather than damage: a valid archive (unrar extracts it) would decode
+	// with a larger window. It cannot be proven, though. A corrupt stream in
+	// an archive that declares a large dictionary, once the window's worth of
+	// history exists, produces the same error, because a header cannot say
+	// what distances the stream legitimately used.
 	//
 	// It is deliberately narrow. A refusal is reported this way only when the
 	// member's history already spans the whole window, the requested distance
@@ -178,7 +181,7 @@ var (
 	// caller had already read stay delivered; output decoded in the same
 	// decode step that hit the failure is not, because Read reports a decode
 	// failure before it serves what that step had already produced.
-	ErrDictionaryTooLarge = errors.New("rarengine: stream needs a larger dictionary window than this library provides")
+	ErrDictionaryTooLarge = errors.New("rarengine: stream needs a larger dictionary window than this reader provides")
 
 	// ErrLinkEntry is returned by Entry.Read for a link member
 	// (Header.LinkType != LinkNone): a symlink, hard link or file copy has no

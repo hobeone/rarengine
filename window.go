@@ -2,10 +2,47 @@ package rarengine
 
 import (
 	"errors"
+	"runtime"
+	"sync"
 )
 
 // ErrWindowOffsetBounds is returned when copying bytes from an invalid history distance.
 var ErrWindowOffsetBounds = errors.New("rarengine: window offset out of bounds")
+
+const (
+	// minWindowSize is the smallest dictionary RAR5 can declare (128 KiB << 1)
+	// and the size a Reader's window starts at, before any member has said
+	// what it needs.
+	minWindowSize = 0x40000
+
+	// maxDictSize is the largest dictionary the format can express: the size
+	// field is a 4-bit exponent over 128 KiB, so 128 KiB << 15. It is the
+	// default MaxWindow.
+	maxDictSize = 4 << 30
+
+	// maxFillTarget caps how much decoded output decoder50.fill stages ahead
+	// of the caller. It was size/2 when the window was a fixed 32 MiB, and for
+	// that window it still is; a 4 GiB window must not stage 2 GiB before the
+	// first byte is served, so the target no longer scales with the window.
+	maxFillTarget = 16 << 20
+)
+
+// windowBacking owns one reservation's release. It is a separate object so a
+// runtime cleanup can release a reservation whose window became unreachable
+// without the cleanup holding the window itself, and so an explicit release
+// (grow replacing it) and the cleanup cannot both run the munmap: free is
+// idempotent.
+type windowBacking struct {
+	release func()
+	once    sync.Once
+}
+
+func (b *windowBacking) free() {
+	if b == nil || b.release == nil {
+		return
+	}
+	b.once.Do(b.release)
+}
 
 // window implements a zero-allocation, circular sliding window ring buffer for LZ77 decompression.
 type window struct {
@@ -14,6 +51,10 @@ type window struct {
 	r    int    // Read index (beginning of unread data)
 	w    int    // Write index (end of unread data)
 	full bool   // True if the buffer is completely full
+
+	// backing is the reservation behind buf when grow obtained one; nil for a
+	// heap buffer from newWindow. It is what decommit and the next grow act on.
+	backing *windowBacking
 
 	// wrapped reports whether the ring has completed a full lap since the last
 	// Reset that did not preserve history. Together with w it gives the true
@@ -53,15 +94,78 @@ func (w *window) historyLen() int {
 	return w.w
 }
 
-// newWindow creates a new sliding window of the specified size.
+// newWindow creates a new sliding window of the specified size on the heap.
+//
+// This is the window a Reader starts with, at minWindowSize, and the one
+// tests build directly. A member that declares a larger dictionary grows it
+// through grow, which swaps the heap buffer for a reservation.
 func newWindow(size int) *window {
 	// Minimum window size is 256KB (0x40000) per RAR spec.
-	if size < 0x40000 {
-		size = 0x40000
+	if size < minWindowSize {
+		size = minWindowSize
 	}
 	return &window{
 		buf:  make([]byte, size),
 		size: size,
+	}
+}
+
+// fillTarget is how much decoded output decoder50.fill stages before it
+// returns to let the caller drain: half the window, capped at maxFillTarget.
+//
+// Half the window is the bound that keeps a decode step from overrunning the
+// read pointer, because fill stops at least that far short of full and no
+// single symbol produces more than a match length. The cap keeps a large
+// window from turning that bound into gigabytes of latency and committed
+// pages; for the 32 MiB window this library shipped with for years the two
+// agree exactly, so that path is unchanged.
+func (w *window) fillTarget() int {
+	return min(w.size/2, maxFillTarget)
+}
+
+// grow replaces the buffer with a reservation of at least size bytes and
+// discards the history, exactly as BeginFile(false) would. A size the window
+// already meets is a no-op that keeps the history.
+//
+// It is called by Reader.dispatch for a non-solid member whose header declares
+// a dictionary larger than the window holds, before that member's BeginFile.
+// A solid member never reaches it: the caller refuses a solid member that
+// declares more than the archive's window, because the history its
+// back-references assume would be gone.
+//
+// Never called while an Entry can reach buf. The traversal has severed or
+// finished the previous member before dispatch admits the next one, and that
+// is the only goroutine that touches the window at all -- Close, the one
+// method another goroutine may call, does not. That ordering is what makes
+// releasing the old reservation here safe: nothing can read through a
+// dangling slice because nothing holds one.
+func (w *window) grow(size int) error {
+	if size <= w.size {
+		return nil
+	}
+	buf, release, err := reserveWindow(size)
+	if err != nil {
+		return err
+	}
+	old := w.backing
+	w.buf, w.size = buf, size
+	w.backing = &windowBacking{release: release}
+	// The cleanup holds the backing, not the window, so a window that is no
+	// longer reachable still has its reservation returned; an explicit free
+	// from the next grow is absorbed by the Once.
+	runtime.AddCleanup(w, (*windowBacking).free, w.backing)
+	w.Reset(false)
+	old.free()
+	return nil
+}
+
+// decommit hands the window's pages back to the kernel while keeping the
+// reservation, so the buffer is still the right size for the next archive and
+// nothing was allocated to get there. The history is already discarded by the
+// caller; see Reader.Reset for why this runs per archive and never per member.
+func (w *window) decommit() {
+	if w.backing != nil {
+		decommitWindow(w.buf)
 	}
 }
 

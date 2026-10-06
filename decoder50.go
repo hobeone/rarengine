@@ -439,9 +439,12 @@ func (d *decoder50) decodeSymbol(win *window, sym int) error {
 	}
 }
 
-// fill decodes LZ literals and back-references into the circular window.
+// fill decodes LZ literals and back-references into the circular window,
+// stopping once the window stages fillTarget bytes of unread output; see
+// window.fillTarget for why that is not simply half the window.
 func (d *decoder50) fill(win *window) error {
-	for win.Available() < win.size/2 {
+	target := win.fillTarget()
+	for win.Available() < target {
 		if d.br == nil {
 			if err := d.readBlockHeader(); err != nil {
 				return err
@@ -472,9 +475,9 @@ func (d *decoder50) fill(win *window) error {
 // stageFilterInput fills buf with a filter block's input, decoding more data
 // when the window holds less than the block needs.
 //
-// Draining must precede decoding: fill returns as soon as the window is half
-// full, so waiting for the whole block to become available before draining
-// would never make progress for a block larger than half the window. Each
+// Draining must precede decoding: fill returns as soon as the window stages
+// its fill target, so waiting for the whole block to become available before
+// draining would never make progress for a block larger than that. Each
 // iteration either copies at least one byte or leaves the decoder having
 // produced at least one, so the loop is bounded without a retry counter.
 //

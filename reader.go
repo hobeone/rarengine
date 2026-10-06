@@ -78,6 +78,13 @@ type Reader struct {
 	entry *Entry
 	dec50 *decoder50
 
+	// maxWindow caps how large a dictionary the window grows to meet. It
+	// defaults to the format's 4 GiB maximum, so by default every valid
+	// archive decodes; a consumer that would rather bound memory sets it lower
+	// with SetMaxWindow and accepts ErrDictionaryTooLarge for the members that
+	// genuinely need more.
+	maxWindow int64
+
 	passwords []string
 	// resolved is the candidate that verified against the archive's check
 	// value, latched so the cost is one derivation per candidate per archive
@@ -164,24 +171,43 @@ type Reader struct {
 	fatal error
 }
 
-// NewReader constructs a Reader over volumes, allocating the 32 MB window.
+// NewReader constructs a Reader over volumes.
 //
-// The window is fixed, so a member whose compressed stream references history
-// further back than 32 MiB cannot be decoded: the member ends short with
-// ErrDictionaryTooLarge, having delivered some prefix of its content (not
-// necessarily all the bytes decoded before the failure). Only an archive made
-// with a dictionary above 32 MiB (rar -md64m and up) can do that. The declared dictionary size alone never refuses a member, because
-// it is the encoder's maximum rather than what the stream used.
+// The window starts at the format's 256 KiB minimum and grows to the
+// dictionary each member's header declares, capped by MaxWindow (default: the
+// format's 4 GiB maximum). Growth is a reservation, not a commit: on Linux the
+// window is an anonymous mapping whose pages the kernel provides as the
+// stream writes them, so resident memory follows the history a member actually
+// produced rather than the dictionary it declared. A stored member in a
+// non-solid archive never touches the window at all.
+//
+// A member can therefore end short with ErrDictionaryTooLarge only when its
+// stream references history beyond a window that MaxWindow kept smaller than
+// the header declared, or that could not be reserved. The declared dictionary
+// size alone never refuses a member, because it is the encoder's maximum
+// rather than what the stream used.
 func NewReader(volumes <-chan io.ReadCloser) *Reader {
 	return &Reader{
-		done:    make(chan struct{}),
-		volumes: volumes,
-		win:     newWindow(32 * 1024 * 1024),
-		dec50:   newDecoder50(),
+		done:      make(chan struct{}),
+		volumes:   volumes,
+		win:       newWindow(minWindowSize),
+		dec50:     newDecoder50(),
+		maxWindow: maxDictSize,
 	}
 }
 
-// Reset reconfigures the reader for a new archive, reusing the 32 MB window.
+// SetMaxWindow caps the dictionary window at n bytes for every archive this
+// Reader reads from now on. The default is the format's maximum, 4 GiB, which
+// means every valid archive decodes; a smaller cap bounds the Reader's peak
+// memory and makes a member whose stream genuinely references history beyond
+// it end short with ErrDictionaryTooLarge. Values below the 256 KiB format
+// minimum are raised to it. A window already grown past n is kept for the
+// archive in progress and is not shrunk.
+func (r *Reader) SetMaxWindow(n int64) {
+	r.maxWindow = max(n, minWindowSize)
+}
+
+// Reset reconfigures the reader for a new archive, reusing the window.
 // Nothing else survives: a verdict, a resolved password and a damaged window
 // all belong to the archive that produced them.
 func (r *Reader) Reset(volumes <-chan io.ReadCloser) {
@@ -204,8 +230,8 @@ func (r *Reader) Reset(volumes <-chan io.ReadCloser) {
 	drainVolumes(old)
 	// A fresh done, so Reset revives a Reader that had been closed. Close is
 	// terminal for an ARCHIVE, not for the Reader: reuse across archives is
-	// what Reset exists for, and refusing to revive would mean allocating a
-	// new 32 MB window to recover from a cancelled download.
+	// what Reset exists for, and refusing to revive would mean reserving a
+	// new window to recover from a cancelled download.
 	r.volMu.Lock()
 	r.done = make(chan struct{})
 	r.volumes = volumes
@@ -221,6 +247,13 @@ func (r *Reader) Reset(volumes <-chan io.ReadCloser) {
 	// directly here would reintroduce a second writer of that flag, which is
 	// exactly what window.BeginFile/MarkIncomplete exist to prevent.
 	_ = r.win.BeginFile(false)
+	// The history is gone; now the pages go too. One syscall per archive, so
+	// a Reader that just finished a 4 GiB-dictionary archive is not still
+	// holding those pages resident while it verifies the next stored video.
+	// This is not the per-member memclr CLAUDE.md forbids: nothing is written,
+	// and the next archive faults in only the pages it touches, which is the
+	// cost its first archive paid for the same pages.
+	r.win.decommit()
 }
 
 // SetPasswords supplies candidate passwords, tried in order against the
@@ -634,6 +667,15 @@ func (r *Reader) dispatch(h *blockHeader) (*Entry, error) {
 		r.win.MarkIncomplete()
 		return terminalEntry(fh, ErrRarBombDetected, done), nil
 	}
+	// After the bomb ratio, because a refused member must not cost a
+	// reservation; before BeginFile, because growing discards the history
+	// and BeginFile(false) is about to do the same for this member anyway,
+	// while a solid member that would need growing is refused here instead
+	// of having BeginFile(true) keep history the new buffer does not hold.
+	if err := r.sizeWindow(fh); err != nil {
+		r.win.MarkIncomplete()
+		return terminalEntry(fh, err, done), nil
+	}
 	if err := r.win.BeginFile(fh.Solid); err != nil {
 		r.win.MarkIncomplete()
 		return terminalEntry(fh, err, done), nil
@@ -837,6 +879,46 @@ const unpackVersionRAR5 = 0
 // infinitely expanding (for links and large empty files above the 1 MiB floor),
 // the 1 MiB floor, and guarded multiplication are unchanged.
 const bombRatio = 65536
+
+// sizeWindow makes the window at least as large as the member's declared
+// dictionary allows, within MaxWindow.
+//
+// Only a member that will touch the window is considered. A stored member in
+// a non-solid archive is served straight from its source (buildChain hands it
+// no window), so sizing for it would reserve address space nothing writes to;
+// this is the case that lets a Reader verify a stored video with the window at
+// its 256 KiB starting size. A header that declares no dictionary (DictSize 0,
+// which parseFileHeader reports for a version it did not decode the field for)
+// leaves the window as it is.
+//
+// A solid member cannot grow the window: growing discards the history its
+// back-references assume, and rar gives every member of a solid archive the
+// archive's dictionary, so a solid member declaring more than the window the
+// archive established is a corrupt header, refused like the other identity
+// contradictions dispatch and nextVolumePayload check.
+//
+// A reservation failure is reported as ErrDictionaryTooLarge wrapping the
+// system error: the member needs a window this Reader could not provide,
+// which is the classification its consumers already route to a fallback.
+func (r *Reader) sizeWindow(fh *FileHeader) error {
+	if fh.DictSize <= 0 || (fh.Method == 0 && !r.solid) {
+		return nil
+	}
+	want := int(min(fh.DictSize, r.maxWindow))
+	if want <= r.win.size {
+		return nil
+	}
+	if fh.Solid {
+		return fmt.Errorf("%w: file %q: solid member declares a %d-byte "+
+			"dictionary, the archive's window is %d bytes",
+			ErrCorruptFileHeader, fh.Name, fh.DictSize, r.win.size)
+	}
+	if err := r.win.grow(want); err != nil {
+		return fmt.Errorf("%w: file %q declares a %d-byte dictionary: %w",
+			ErrDictionaryTooLarge, fh.Name, fh.DictSize, err)
+	}
+	return nil
+}
 
 // buildChain assembles the decode chain for a member:
 //
@@ -1084,7 +1166,10 @@ func (r *Reader) closeCurrentVolume() {
 // never reached it to try.
 //
 // After Close, Reset revives the Reader for a different archive. Close ends
-// an archive, not the 32 MB window.
+// an archive, not the window: it neither releases nor decommits the window's
+// reservation, because Close runs on another goroutine and an Entry's Read
+// may be inside the buffer at that moment. Only the traversal goroutine
+// touches the window's storage, in Reset and in dispatch.
 func (r *Reader) Close() error {
 	r.volMu.Lock()
 	// Idempotent without a sync.Once, deliberately. io.Pipe uses one; a pipe
