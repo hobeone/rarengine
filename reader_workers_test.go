@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"path/filepath"
 	"runtime"
@@ -547,5 +548,70 @@ func TestSetWorkersTakesEffectAtTheNextMember(t *testing.T) {
 	}
 	if r.dec50.pipe == nil || r.dec50.pipe.workers != maxWorkers {
 		t.Fatalf("next member: pipe=%v, want %d workers", r.dec50.pipe, maxWorkers)
+	}
+}
+
+// Changing the worker count between members of a solid archive reconfigures
+// the pipeline (parallel to a different parallel, parallel to serial) and
+// every member must still decode as it does serially. The serial member after
+// a parallel one depends on the tables the pipeline hands back to the
+// decoder, and the member after a reconfiguration on the tables the old
+// pipeline handed to the new one.
+// Mutation checks: delete the tables copy in disengage, or the disengage call
+// in setPipeline's serial branch, and a later member decodes wrongly.
+func TestSetWorkersChangesBetweenMembersOfASolidArchive(t *testing.T) {
+	var parts []string
+	for i := 1; i <= 8; i++ {
+		parts = append(parts, filepath.Join("testdata", fmt.Sprintf("rar5_solid_multi_qo.part%d.rar", i)))
+	}
+	serial := NewReader(fileVolumesOf(t, parts...))
+	want := readOutcomes(serial)
+	_ = serial.Close()
+	if len(want) < 4 {
+		t.Fatalf("setup: %d members, need at least 4", len(want))
+	}
+	for _, o := range want {
+		if o.err != "" {
+			t.Fatalf("setup: serial decode failed: %s", o.line())
+		}
+	}
+
+	steps := []int{2, 4, 1, 4}
+	r := NewReader(fileVolumesOf(t, parts...))
+	defer r.Close() //nolint:errcheck
+	for i, workers := range steps {
+		r.SetWorkers(workers)
+		before := pipelineBlocks(r)
+		beforePipe := r.dec50.pipe
+		e, err := r.NextEntry()
+		if err != nil {
+			t.Fatalf("member %d: %v", i, err)
+		}
+		h := sha256.New()
+		n, err := io.Copy(h, e)
+		if err != nil {
+			t.Fatalf("member %d (workers=%d): %v", i, workers, err)
+		}
+		if n != want[i].n || hex.EncodeToString(h.Sum(nil)) != want[i].sum {
+			t.Fatalf("member %d (workers=%d): %d bytes sum %x, serial %d bytes sum %s",
+				i, workers, n, h.Sum(nil), want[i].n, want[i].sum)
+		}
+		if r.dec50.pipe != beforePipe {
+			before = 0 // a new pipeline counts from zero
+		}
+		advanced := pipelineBlocks(r) - before
+		switch {
+		case workers == 1 && r.dec50.pipe != nil && r.dec50.pipe.engaged:
+			t.Fatalf("member %d: serial member left the pipeline engaged", i)
+		case workers == 1 && advanced != 0:
+			t.Fatalf("member %d: serial member sent %d blocks through the pipeline", i, advanced)
+		case workers > 1 && advanced == 0:
+			t.Fatalf("member %d (workers=%d): no block went through the pipeline", i, workers)
+		case workers > 1 && r.dec50.pipe.workers != workers:
+			t.Fatalf("member %d: pipeline has %d workers, want %d", i, r.dec50.pipe.workers, workers)
+		}
+		if i == 1 && r.dec50.pipe == beforePipe {
+			t.Fatal("changing the worker count kept the old pipeline")
+		}
 	}
 }
