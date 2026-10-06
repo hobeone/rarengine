@@ -317,41 +317,81 @@ func TestOversizeReadFailureDoesNotLeaveSlotAliased(t *testing.T) {
 	if len(offsets) < 4 {
 		t.Fatalf("need at least 4 blocks, found %d", len(offsets))
 	}
-	bc := int(data[offsets[3]]>>3)&3 + 1
-	cut := offsets[3] + 2 + bc + 100 // inside the fourth block's payload
-	if cut >= offsets[4] {
-		t.Fatalf("setup: cut %d is not inside block 3 (next block at %d)", cut, offsets[4])
-	}
-
-	r := readerFor(data[:cut])
-	defer r.Close() //nolint:errcheck
-	r.SetWorkers(4)
-	failed := readOutcomes(r)
-	if len(failed) == 0 || failed[0].err == "" {
-		t.Fatalf("setup: the truncated archive did not fail: %v", failed)
-	}
-	p := r.dec50.pipe
-	if p.oversizeBlocks == 0 {
-		t.Fatal("setup: no block took the oversize path")
-	}
-	if p.count != 0 {
-		t.Fatalf("setup: %d jobs still in the ring after the member failed", p.count)
-	}
-	for i, j := range p.slots {
-		if len(j.payload) > 0 && len(r.dec50.payloadBuf) > 0 && &j.payload[0] == &r.dec50.payloadBuf[0] {
-			t.Fatalf("slot %d still aliases the serial payload buffer", i)
+	noAlias := func(t *testing.T, r *Reader) {
+		t.Helper()
+		p := r.dec50.pipe
+		if p.oversizeBlocks == 0 {
+			t.Fatal("setup: no block took the oversize path")
+		}
+		if p.count != 0 {
+			t.Fatalf("setup: %d jobs still in the ring after the member failed", p.count)
+		}
+		for i, j := range p.slots {
+			if len(j.payload) > 0 && len(r.dec50.payloadBuf) > 0 && &j.payload[0] == &r.dec50.payloadBuf[0] {
+				t.Fatalf("slot %d still aliases the serial payload buffer", i)
+			}
 		}
 	}
 
-	r.Reset(volumesOf(data))
-	got := readOutcomes(r)
-	want := outcomesOf(t, data, 1)
-	if len(got) != len(want) {
-		t.Fatalf("%d outcomes, serial %d", len(got), len(want))
-	}
-	for i := range want {
-		if got[i].line() != want[i].line() {
-			t.Errorf("outcome %d\n par: %s\nserial: %s", i, got[i].line(), want[i].line())
+	t.Run("truncated payload", func(t *testing.T) {
+		bc := int(data[offsets[3]]>>3)&3 + 1
+		cut := offsets[3] + 2 + bc + 100 // inside the fourth block's payload
+		if cut >= offsets[4] {
+			t.Fatalf("setup: cut %d is not inside block 3 (next block at %d)", cut, offsets[4])
 		}
-	}
+
+		r := readerFor(data[:cut])
+		defer r.Close() //nolint:errcheck
+		r.SetWorkers(4)
+		failed := readOutcomes(r)
+		if len(failed) == 0 || failed[0].err == "" {
+			t.Fatalf("setup: the truncated archive did not fail: %v", failed)
+		}
+		noAlias(t, r)
+
+		r.Reset(volumesOf(data))
+		got := readOutcomes(r)
+		want := outcomesOf(t, data, 1)
+		if len(got) != len(want) {
+			t.Fatalf("%d outcomes, serial %d", len(got), len(want))
+		}
+		for i := range want {
+			if got[i].line() != want[i].line() {
+				t.Errorf("outcome %d\n par: %s\nserial: %s", i, got[i].line(), want[i].line())
+			}
+		}
+	})
+
+	// The payload is read in full and the block's tables then fail to load.
+	// The error is deferred as any read-ahead error is, and the slot that
+	// was lent the serial buffer must not keep it.
+	t.Run("corrupt tables", func(t *testing.T) {
+		target := -1
+		for i := 1; i+1 < len(offsets); i++ {
+			size := offsets[i+1] - offsets[i]
+			if data[offsets[i]]&0x80 != 0 && size > parallelPayloadLimit {
+				target = offsets[i]
+				break
+			}
+		}
+		if target < 0 {
+			t.Fatal("setup: no oversize block after the first carries new tables")
+		}
+		bc := int(data[target]>>3)&3 + 1
+		v := bytes.Clone(data)
+		v[target+2+bc] = 0xFF // first payload byte: the start of the code-length table
+		serial := outcomesOf(t, v, 1)
+		if serial[0].err == "" {
+			t.Fatal("setup: the serial path decoded the corrupted tables without error")
+		}
+
+		r := readerFor(v)
+		defer r.Close() //nolint:errcheck
+		r.SetWorkers(4)
+		got := readOutcomes(r)
+		if len(got) == 0 || got[0].line() != serial[0].line() {
+			t.Fatalf("\nserial: %s\n   par: %v", serial[0].line(), got)
+		}
+		noAlias(t, r)
+	})
 }

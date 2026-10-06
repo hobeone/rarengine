@@ -264,16 +264,6 @@ func (p *blockPipeline) readAhead(d *decoder50) {
 		}
 		j := p.slots[(p.head+p.count)%len(p.slots)]
 		oversize := h.blockBytes > parallelPayloadLimit
-		// fail records a read-ahead error. A slot that was lent the serial
-		// buffer must not keep it: nothing pops a job that never entered
-		// the ring, and a later block read into the slot would overwrite the
-		// serial buffer under a live job.
-		fail := func(err error) {
-			if oversize {
-				j.payload = nil
-			}
-			p.pendingErr = err
-		}
 		var payload []byte
 		if oversize {
 			// Too big to hold in a slot: read it into the serial buffer, as
@@ -293,13 +283,12 @@ func (p *blockPipeline) readAhead(d *decoder50) {
 			p.pendingErr = err
 			return
 		}
-		j.payload = payload
 		j.bits = h.blockBits
 		j.lastBlock = h.lastBlock
-		j.resume.Reset(j.payload, h.blockBits)
+		j.resume.Reset(payload, h.blockBits)
 		if h.newTables {
 			if err := readCodeLengthTable(&j.resume, p.codeLength[:], &p.bitlen); err != nil {
-				fail(err)
+				p.pendingErr = err
 				return
 			}
 			next := p.cur
@@ -311,11 +300,15 @@ func (p *blockPipeline) readAhead(d *decoder50) {
 				// every earlier block was decoded. Record it like any other
 				// read-ahead error; the tables that failed to load are in a
 				// set no block references.
-				fail(err)
+				p.pendingErr = err
 				return
 			}
 			p.cur = next
 		}
+		// Assigned only once nothing can fail: a slot that was lent the
+		// serial buffer must not keep it when its job never enters the
+		// ring, since nothing pops such a job.
+		j.payload = payload
 		j.oversize = oversize
 		if oversize {
 			p.oversizePending = true
