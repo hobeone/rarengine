@@ -308,10 +308,7 @@ func (d *decoder50) fill(win *window) error {
 		}
 
 		if err = d.decodeSymbol(win, sym); err != nil {
-			if err == io.EOF {
-				return ErrDecoderOutOfData
-			}
-			return err
+			return mapInnerErr(err)
 		}
 	}
 	return nil

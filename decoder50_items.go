@@ -159,6 +159,12 @@ func (d *decoder50) applyMatch(win *window, length, distance int) error {
 	d.offset[1] = d.offset[0]
 	d.offset[0] = distance
 	d.length = length
+	return d.replayMatch(win)
+}
+
+// replayMatch copies the match described by d.offset[0] and d.length and
+// counts its bytes as decoded.
+func (d *decoder50) replayMatch(win *window) error {
 	if err := d.copyMatch(win); err != nil {
 		return err
 	}
@@ -173,20 +179,12 @@ func (d *decoder50) applyRepDist(win *window, slot, length int) error {
 	copy(d.offset[1:slot+1], d.offset[:slot])
 	d.offset[0] = distance
 	d.length = length
-	if err := d.copyMatch(win); err != nil {
-		return err
-	}
-	d.decoded += int64(d.length)
-	return nil
+	return d.replayMatch(win)
 }
 
 // applyRepLast repeats the last match exactly.
 func (d *decoder50) applyRepLast(win *window) error {
-	if err := d.copyMatch(win); err != nil {
-		return err
-	}
-	d.decoded += int64(d.length)
-	return nil
+	return d.replayMatch(win)
 }
 
 // queueFilter validates a filter record against the window and the decode
@@ -271,6 +269,7 @@ type blockJob struct {
 	bits      int
 	lastBlock bool
 	tables    *tableSet
+	tablesIdx int // index of tables in blockPipeline.tables
 
 	items   []item // len itemCap, filled to n
 	n       int

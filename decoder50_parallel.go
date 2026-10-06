@@ -323,6 +323,7 @@ func (p *blockPipeline) readAhead(d *decoder50) {
 		}
 		p.parallelBlocks++
 		j.tables = p.tables[p.cur]
+		j.tablesIdx = p.cur
 		p.inUse[p.cur]++
 		p.count++
 		p.sawLast = h.lastBlock
@@ -477,12 +478,7 @@ func (p *blockPipeline) wait(j *blockJob) error {
 // pop releases slots[head].
 func (p *blockPipeline) pop() {
 	j := p.slots[p.head]
-	for i := range p.tables {
-		if p.tables[i] == j.tables {
-			p.inUse[i]--
-			break
-		}
-	}
+	p.inUse[j.tablesIdx]--
 	j.tables = nil
 	j.waited = false
 	if j.oversize {
