@@ -65,9 +65,15 @@ type decoder50 struct {
 	// fillParallel and the rest of the decode path do. pipeStopped latches a
 	// Close until Reset, so one that lands before the first pipeline exists is
 	// honoured when setPipeline publishes it.
-	pipe          *blockPipeline
-	pipeMu        sync.Mutex
-	pipeStopped   bool
+	pipe        *blockPipeline
+	pipeMu      sync.Mutex
+	pipeStopped bool
+	// payloadLimit and beforeDecode are copied into a pipeline when setPipeline
+	// creates it. Tests set them before the first member; production leaves
+	// them at their defaults. A zero-value decoder50{} has payloadLimit 0 and
+	// so sends every block inline; newDecoder50 sets the default.
+	payloadLimit  int
+	beforeDecode  func()
 	bitlenDecoder huffmanDecoder // scratch for ReadCodeLengthTable
 	headBuf       [5]byte        // scratch for readBlockHead; a local would escape through io.Reader
 
@@ -89,7 +95,8 @@ type decoder50 struct {
 
 func newDecoder50() *decoder50 {
 	d := &decoder50{
-		fl: make([]filterBlock, 0, maxQueuedFilters),
+		fl:           make([]filterBlock, 0, maxQueuedFilters),
+		payloadLimit: maxParallelPayload,
 	}
 	d.tables.prewarm()
 	return d

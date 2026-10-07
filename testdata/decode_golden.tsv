@@ -38,6 +38,9 @@ rar5_solid_stored_mid.rar	0	in/a_first.txt	24004	e7f640783863fb8199089239415ad06
 rar5_solid_stored_mid.rar	1	in/b_stored.jpg	6000	e6aab2a8bf2ff7326dd7e839f58a4f63e091d076400bcfdb9c2bab1805b7e686	
 rar5_solid_stored_mid.rar	2	in/c_after.txt	24004	a6045f4c833f43c9e6bbdbccd68500441f5c4da8aaac53273abbcabd905067d3	
 rar5_store.rar	0	hello.txt	15	243a8cb7ba267196050e534d154f41a658b3f5c29d1d9da2a5924e5e795100e3	
+rar5_sweep.rar	0	a_text.txt	859172	932cd76c8d2cccad1adf368a67368439be67ed3aed4f55e98fcf9f6a5984f637	
+rar5_sweep.rar	1	b_stored.jpg	4096	8a2f246bf6a075c2eb786d4d4f3b8499d67a0f03ea6e6f106fae716211663264	
+rar5_sweep.rar	2	c_code.exe	200000	6104d9ac57aca87eb6d1992eb80fe8917beeb96fa1c857ef343e43ff6b7a8ff8	
 rar5_symlink.rar	0	tmp/tmp.lPdeYmNHLq/link.txt	0	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	rarengine: member is a link and has no content to read; check Header.LinkType
 rar5_times.rar	0	hello.txt	15	243a8cb7ba267196050e534d154f41a658b3f5c29d1d9da2a5924e5e795100e3	
 rar5_truncated.rar	0		0		unexpected EOF

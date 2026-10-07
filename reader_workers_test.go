@@ -62,9 +62,8 @@ func TestCloseStopsDecodeWorkers(t *testing.T) {
 // test's own timeout catches it).
 func TestCloseWhileWaitingForWorkers(t *testing.T) {
 	base := runtime.NumGoroutine()
-	entered, unblock := holdWorkers(t, 2)
-
 	r := NewReader(fileVolumesOf(t, filepath.Join("testdata", "rar5_solid_bench.rar")))
+	entered, unblock := holdWorkers(t, r, 2)
 	r.SetWorkers(2)
 	e, err := r.NextEntry()
 	if err != nil {
@@ -136,24 +135,28 @@ func TestAbandonedMemberDrainsInFlightJobs(t *testing.T) {
 	}
 }
 
-// holdWorkers makes every decode worker wait, on entering a block, until
+// holdWorkers makes every decode worker of r wait, on entering a block, until
 // unblock is called. entered receives once for each of the first n entries,
 // so a test can wait for the workers to be held rather than sleep and hope.
-func holdWorkers(t *testing.T, n int) (entered <-chan struct{}, unblock func()) {
+// It must run before r's first NextEntry, which is when the pipeline copies
+// the hook.
+func holdWorkers(t *testing.T, r *Reader, n int) (entered <-chan struct{}, unblock func()) {
 	t.Helper()
+	if r.dec50.pipe != nil {
+		t.Fatal("holdWorkers must run before the first NextEntry: the pipeline already exists and has captured its hooks")
+	}
 	release := make(chan struct{})
 	ch := make(chan struct{}, n)
 	var once sync.Once
 	unblock = func() { once.Do(func() { close(release) }) }
-	saved := decodeHook
-	decodeHook = func() {
+	r.dec50.beforeDecode = func() {
 		select {
 		case ch <- struct{}{}:
 		default: // past the first n; nobody is counting
 		}
 		<-release
 	}
-	t.Cleanup(func() { decodeHook = saved; unblock() })
+	t.Cleanup(unblock)
 	return ch, unblock
 }
 
@@ -190,8 +193,8 @@ func queuedJobs(d *decoder50) int {
 func TestResetRevivesWorkersAfterClose(t *testing.T) {
 	file := filepath.Join("testdata", "rar5_solid_bench.rar")
 	want := decodeAll(t, []string{file}, nil)
-	entered, unblock := holdWorkers(t, 2)
 	r := NewReader(fileVolumesOf(t, file))
+	entered, unblock := holdWorkers(t, r, 2)
 	defer r.Close() //nolint:errcheck
 	r.SetWorkers(2)
 	e, err := r.NextEntry()

@@ -3,20 +3,13 @@ package rarengine
 import (
 	"io"
 	"sync"
+	"sync/atomic"
 )
 
 const (
 	maxWorkers         = 8
 	maxParallelPayload = 4 << 20 // a block bigger than this is decoded inline
 )
-
-// parallelPayloadLimit is the size above which readAhead hands a block to
-// the caller goroutine instead of a slot. A variable so a test can lower it.
-var parallelPayloadLimit = maxParallelPayload
-
-// decodeHook, when set, runs in a worker before it decodes a block. It
-// exists so a test can hold a worker; it costs one nil check per block.
-var decodeHook func()
 
 // blockHead is a parsed block header, before its payload is read.
 type blockHead struct {
@@ -67,6 +60,14 @@ func readBlockHead(r io.Reader, buf *[5]byte) (blockHead, error) {
 type blockPipeline struct {
 	workers int
 
+	// payloadLimit is the size above which readAhead reads a block into the
+	// serial buffer instead of a slot.
+	payloadLimit int
+	// beforeDecode, when set, runs in a worker before it decodes a block. start
+	// captures it, so it must be set before the workers start. It exists so a
+	// test can hold a worker; it costs one nil check per block.
+	beforeDecode func()
+
 	slots       []*blockJob // ring storage, len R = 2*workers
 	head, count int         // ring: slots[head] is the oldest in flight
 	idx         int         // replay position within slots[head]
@@ -89,26 +90,27 @@ type blockPipeline struct {
 	codeLength [tableSize5]byte
 	bitlen     huffmanDecoder
 
-	jobs    chan *blockJob
-	quit    chan struct{}
+	jobs chan *blockJob
+	// quit is written only under mu (ensureQuit, restart) and read without it
+	// by the traversal goroutine in submit and wait. A pointer to the channel,
+	// so a renewal is one atomic store.
+	quit    atomic.Pointer[chan struct{}]
 	wg      *sync.WaitGroup // the current generation of goroutines
-	mu      sync.Mutex      // guards quit, jobs, wg, running, and the start/stop transitions
+	mu      sync.Mutex      // guards quit writes, jobs, wg, running, and the start/stop transitions
 	running bool
 }
 
 func newBlockPipeline(workers int) *blockPipeline {
 	r := 2 * workers
 	p := &blockPipeline{
-		workers: workers,
-		slots:   make([]*blockJob, r),
-		tables:  make([]*tableSet, r+1),
-		inUse:   make([]int, r+1),
+		workers:      workers,
+		payloadLimit: maxParallelPayload,
+		slots:        make([]*blockJob, r),
+		tables:       make([]*tableSet, r+1),
+		inUse:        make([]int, r+1),
 	}
 	for i := range p.slots {
-		p.slots[i] = &blockJob{
-			items: make([]item, itemCap),
-			done:  make(chan struct{}, 1),
-		}
+		p.slots[i] = &blockJob{done: make(chan struct{}, 1)}
 	}
 	for i := range p.tables {
 		p.tables[i] = &tableSet{}
@@ -137,11 +139,11 @@ func (d *decoder50) setPipeline(workers int) {
 			} else {
 				d.pipe.drain()
 			}
-		}
-		if d.pipe != nil {
 			d.pipe.stop()
 		}
 		p := newBlockPipeline(workers)
+		p.payloadLimit = d.payloadLimit
+		p.beforeDecode = d.beforeDecode
 		d.pipeMu.Lock()
 		d.pipe = p
 		stopped := d.pipeStopped
@@ -210,7 +212,8 @@ func (p *blockPipeline) disengage(d *decoder50) {
 // generation to exit, which settles every token they will ever send, and
 // clears the slot's done channel without blocking before releasing the
 // slot. The channel itself is never replaced: a worker reads it when it
-// sends.
+// sends. restart calls it after a stop, so quit has already fired and every
+// job no worker completed takes the quit branch.
 func (p *blockPipeline) drain() {
 	for p.count > 0 {
 		j := p.slots[p.head]
@@ -263,7 +266,10 @@ func (p *blockPipeline) readAhead(d *decoder50) {
 			return
 		}
 		j := p.slots[(p.head+p.count)%len(p.slots)]
-		oversize := h.blockBytes > parallelPayloadLimit
+		if j.items == nil {
+			j.items = make([]item, itemCap)
+		}
+		oversize := h.blockBytes > p.payloadLimit
 		var payload []byte
 		if oversize {
 			// Too big to hold in a slot: read it into the serial buffer, as
@@ -333,14 +339,14 @@ func (p *blockPipeline) start() {
 	if p.running {
 		return
 	}
-	if p.quit == nil {
-		p.quit = make(chan struct{})
-	} else if chanClosed(p.quit) {
+	quit := p.ensureQuit()
+	if chanClosed(quit) {
 		return
 	}
 	p.jobs = make(chan *blockJob, len(p.slots))
 	p.running = true
-	quit, jobs := p.quit, p.jobs
+	jobs := p.jobs
+	beforeDecode := p.beforeDecode
 	wg := new(sync.WaitGroup)
 	p.wg = wg
 	for range p.workers {
@@ -358,8 +364,8 @@ func (p *blockPipeline) start() {
 					if chanClosed(quit) {
 						return
 					}
-					if decodeHook != nil {
-						decodeHook()
+					if beforeDecode != nil {
+						beforeDecode()
 					}
 					decodeBlockItems(j)
 					j.done <- struct{}{}
@@ -378,21 +384,34 @@ func (p *blockPipeline) start() {
 // a fired quit and restart renews it.
 func (p *blockPipeline) stop() {
 	p.mu.Lock()
-	if !p.running {
-		if p.quit == nil {
-			p.quit = make(chan struct{})
-		}
-		if !chanClosed(p.quit) {
-			close(p.quit)
-		}
-		p.mu.Unlock()
-		return
-	}
-	close(p.quit)
+	p.ensureQuit()
+	p.fireQuit()
+	wasRunning := p.running
 	p.running = false
 	wg := p.wg
 	p.mu.Unlock()
-	wg.Wait()
+	if wasRunning {
+		wg.Wait()
+	}
+}
+
+// ensureQuit returns the quit channel, creating it if there is none. Called
+// with mu held.
+func (p *blockPipeline) ensureQuit() chan struct{} {
+	if q := p.quitChan(); q != nil {
+		return q
+	}
+	q := make(chan struct{})
+	p.quit.Store(&q)
+	return q
+}
+
+// fireQuit closes the quit channel unless there is none or it is already
+// closed. Called with mu held.
+func (p *blockPipeline) fireQuit() {
+	if q := p.quitChan(); q != nil && !chanClosed(q) {
+		close(q)
+	}
 }
 
 // restart arms the pipeline for the next engage after a stop. It runs on the
@@ -402,33 +421,30 @@ func (p *blockPipeline) stop() {
 // queue, and only then installs a fresh quit. A running pipeline is left
 // as it is.
 func (p *blockPipeline) restart() {
+	// Relies on: running is false with jobs in the ring only after quit has
+	// fired, so drain's quit branch cannot block.
 	p.mu.Lock()
-	if p.running {
-		p.mu.Unlock()
+	running := p.running
+	p.mu.Unlock()
+	if running {
 		return
 	}
-	wg := p.wg
-	p.mu.Unlock()
-	if wg != nil {
-		wg.Wait()
-	}
-	for p.count > 0 {
-		select {
-		case <-p.slots[p.head].done:
-		default:
-		}
-		p.pop()
-	}
+	p.waitWorkers()
+	p.drain()
 	p.mu.Lock()
 	p.jobs = nil
-	p.quit = make(chan struct{})
+	q := make(chan struct{})
+	p.quit.Store(&q)
 	p.mu.Unlock()
 }
 
+// quitChan returns the current quit channel, nil before the first start or
+// stop. It does not take mu: quit is published atomically.
 func (p *blockPipeline) quitChan() chan struct{} {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.quit
+	if q := p.quit.Load(); q != nil {
+		return *q
+	}
+	return nil
 }
 
 // submit hands the job to a worker.

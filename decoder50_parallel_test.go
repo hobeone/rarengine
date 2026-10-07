@@ -2,77 +2,168 @@ package rarengine
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
-
-// decodeWith returns the outcomes for every fixture with workers decode
-// goroutines (1 is the serial path).
-// It also returns how many blocks went through the pipeline.
-func decodeWith(t *testing.T, workers int) ([]decodeOutcome, int) {
-	t.Helper()
-	var readers []*Reader
-	out := decodeAll(t, goldenFixtures(t), func(r *Reader) {
-		readers = append(readers, r)
-		r.SetWorkers(workers)
-	})
-	blocks := 0
-	for _, r := range readers {
-		blocks += pipelineBlocks(r)
-	}
-	return out, blocks
-}
 
 // Every fixture decodes identically through the pipeline and the serial
 // path: same bytes, same byte counts, same errors, member for member.
 // Mutation check: drop the deferred-error rule (surface pendingErr as soon
 // as readAhead sees it) and the truncated fixtures differ in byte count.
 func TestParallelMatchesSerialOnEveryFixture(t *testing.T) {
-	serial, serialBlocks := decodeWith(t, 1)
-	if serialBlocks != 0 {
-		t.Fatalf("the serial path sent %d blocks through the pipeline", serialBlocks)
+	workerCounts := []int{2, 4}
+	var serialBlocks atomic.Int64
+	blocks := make([]atomic.Int64, len(workerCounts)) // pipeline blocks per worker count
+	t.Run("fixtures", func(t *testing.T) {
+		for _, file := range goldenFixtures(t) {
+			t.Run(filepath.Base(file), func(t *testing.T) {
+				t.Parallel()
+				serial, sr := decodeFile(t, file, func(r *Reader) { r.SetWorkers(1) })
+				serialBlocks.Add(int64(pipelineBlocks(sr)))
+				for k, workers := range workerCounts {
+					par, pr := decodeFile(t, file, func(r *Reader) { r.SetWorkers(workers) })
+					blocks[k].Add(int64(pipelineBlocks(pr)))
+					if len(par) != len(serial) {
+						t.Errorf("workers=%d: %d outcomes, serial %d", workers, len(par), len(serial))
+						continue
+					}
+					for i := range serial {
+						if par[i].line() != serial[i].line() {
+							t.Errorf("workers=%d outcome %d\n par: %s\nserial: %s", workers, i, par[i].line(), serial[i].line())
+						}
+					}
+				}
+			})
+		}
+	})
+	if n := serialBlocks.Load(); n != 0 {
+		t.Errorf("the serial path sent %d blocks through the pipeline", n)
 	}
-	for _, workers := range []int{2, 4} {
-		par, blocks := decodeWith(t, workers)
-		if blocks == 0 {
-			t.Fatalf("workers=%d: no block went through the pipeline; the comparison was serial against serial", workers)
-		}
-		if len(par) != len(serial) {
-			t.Fatalf("workers=%d: %d outcomes, serial %d", workers, len(par), len(serial))
-		}
-		for i := range serial {
-			if par[i].line() != serial[i].line() {
-				t.Errorf("workers=%d outcome %d\n par: %s\nserial: %s", workers, i, par[i].line(), serial[i].line())
-			}
+	for k, workers := range workerCounts {
+		if blocks[k].Load() == 0 {
+			t.Errorf("workers=%d: no block went through the pipeline; the comparison was serial against serial", workers)
 		}
 	}
 }
 
-// corruptVariants yields deterministic single-byte corruptions and
-// truncations of a fixture. Most land in headers and are refused before
-// decoding by both paths; the ones that land in block payloads are what
-// this is for.
-func corruptVariants(t *testing.T, file string) [][]byte {
+// damagedVariant is one damaged copy of a fixture and where it was damaged.
+type damagedVariant struct {
+	name string
+	data []byte
+}
+
+// withFlip is data with the byte at pos inverted in some bits.
+func withFlip(data []byte, pos int) []byte {
+	v := bytes.Clone(data)
+	v[pos] ^= 0x5A
+	return v
+}
+
+// randomVariants is a sparse, evenly spread grid over a fixture: 20
+// single-byte flips and 6 truncations, at fixed positions so a failure
+// reproduces. It skips the signature and archive header so variants reach
+// members. Most land in headers and are refused before decoding by both
+// paths; it is a net for the places targetedVariants does not name.
+func randomVariants(data []byte) []damagedVariant {
+	var out []damagedVariant
+	for k := range 20 {
+		pos := 64 + k*(len(data)-64)/20
+		out = append(out, damagedVariant{fmt.Sprintf("flip@%d", pos), withFlip(data, pos)})
+	}
+	for k := range 6 {
+		cut := 128 + k*(len(data)-128)/6
+		out = append(out, damagedVariant{fmt.Sprintf("cut@%d", cut), bytes.Clone(data[:cut])})
+	}
+	return out
+}
+
+// targetedVariants damages every block of every compressed member of the
+// fixture at the seams the parallel path introduces. Per block it makes:
+//
+//   - badflags and badsum: the flags byte, and the checksum byte, inverted.
+//     Either way the header checksum no longer matches, so both are the same
+//     refusal of a header while it is read ahead, whose error must wait for
+//     the blocks before it.
+//   - newtables and lastblock: the flags byte with the new-tables bit, or the
+//     last-block bit, toggled and the checksum byte corrected to match, so the
+//     header parses and the block is decoded with the opposite
+//     newTables/lastBlock semantics (tables loaded from bytes that are not a
+//     table, or not loaded; the member ended early, or not at all).
+//   - firstbyte: the first payload byte inverted, the start of the
+//     code-length table when the block carries one: a table that fails to
+//     load while earlier blocks are still decoding against the previous one.
+//   - lastbyte: the last payload byte inverted, which corrupts the block's
+//     final bits (usually its last symbol) at the end of a job. It does not
+//     shorten the payload; the cuts below do that.
+//
+// It truncates at each block boundary, one byte before and one byte after
+// (a job whose payload or header is incomplete, and the deferred end-of-data
+// error that follows the last complete block). The boundaries are the places
+// where one job ends and the next begins, so they are where a disagreement
+// between a worker's view and the serial decoder's can hide.
+//
+// Each offset is checked by parsing the header there with readBlockHead and
+// requiring the payload length to match the one the variants are built from.
+func targetedVariants(t *testing.T, data []byte) []damagedVariant {
 	t.Helper()
-	data, err := os.ReadFile(file)
-	if err != nil {
-		t.Fatal(err)
+	offsets := blockHeaderOffsets(t, data)
+	var out []damagedVariant
+	var boundaries []int
+	var buf [5]byte
+	for _, off := range offsets {
+		h, err := readBlockHead(bytes.NewReader(data[off:]), &buf)
+		if err != nil {
+			t.Fatalf("setup: no block header at %d: %v", off, err)
+		}
+		bc := int(data[off]>>3)&3 + 1
+		payloadLen := 0
+		for i := range bc {
+			payloadLen |= int(data[off+2+i]) << (8 * i)
+		}
+		if h.blockBytes != payloadLen {
+			t.Fatalf("setup: block at %d: parsed payload length %d, offsets say %d", off, h.blockBytes, payloadLen)
+		}
+		first := off + 2 + bc
+		last := first + payloadLen - 1
+		if last >= len(data) {
+			t.Fatalf("setup: block at %d ends past the archive (%d)", off, len(data))
+		}
+		boundaries = append(boundaries, off, last+1)
+		for _, p := range []struct {
+			what string
+			pos  int
+		}{{"badflags", off}, {"badsum", off + 1}, {"firstbyte", first}, {"lastbyte", last}} {
+			out = append(out, damagedVariant{fmt.Sprintf("block@%d/%s", off, p.what), withFlip(data, p.pos)})
+		}
+		// A flags bit toggled with the checksum byte (0x5a ^ flags ^ the
+		// length bytes) moved by the same bit, so the header still parses.
+		for _, p := range []struct {
+			what string
+			bit  byte
+		}{{"newtables", 0x80}, {"lastblock", 0x40}} {
+			v := bytes.Clone(data)
+			v[off] ^= p.bit
+			v[off+1] ^= p.bit
+			if _, err := readBlockHead(bytes.NewReader(v[off:]), &buf); err != nil {
+				t.Fatalf("setup: block@%d/%s does not parse: %v", off, p.what, err)
+			}
+			out = append(out, damagedVariant{fmt.Sprintf("block@%d/%s", off, p.what), v})
+		}
 	}
-	var out [][]byte
-	// Skip the signature and archive header so variants reach members.
-	for i := 64; i < len(data); i += max(1, len(data)/120) {
-		v := bytes.Clone(data)
-		v[i] ^= 0x5A
-		out = append(out, v)
-	}
-	for i := 128; i < len(data); i += max(1, len(data)/20) {
-		out = append(out, bytes.Clone(data[:i]))
+	slices.Sort(boundaries)
+	boundaries = slices.Compact(boundaries) // a block's end is often the next block's header
+	for _, b := range boundaries {
+		for _, d := range []int{-1, 0, 1} {
+			if cut := b + d; cut > 0 && cut < len(data) {
+				out = append(out, damagedVariant{fmt.Sprintf("cut@%d", cut), bytes.Clone(data[:cut])})
+			}
+		}
 	}
 	return out
 }
@@ -102,56 +193,63 @@ func pipelineBlocks(r *Reader) int {
 	return r.dec50.pipe.parallelBlocks
 }
 
-// readOutcomes reads every member of r's archive.
-func readOutcomes(r *Reader) []decodeOutcome {
-	var out []decodeOutcome
-	for i := 0; ; i++ {
-		e, err := r.NextEntry()
-		if errors.Is(err, io.EOF) {
-			return out
-		}
-		o := decodeOutcome{index: i}
-		if err != nil {
-			o.err = err.Error()
-			return append(out, o)
-		}
-		o.name = e.Header.Name
-		var buf bytes.Buffer
-		n, rerr := io.Copy(&buf, e)
-		o.n = n
-		o.sum = fmt.Sprintf("%x", sha256.Sum256(buf.Bytes()))
-		if rerr != nil {
-			o.err = rerr.Error()
-		}
-		out = append(out, o)
-	}
-}
-
 // Damaged input decodes identically too: the same bytes before the error
 // and the same error, for byte flips and truncations across the fixture.
 // This is the bit-for-bit agreement rule on the inputs that matter.
+//
+// Each variant is its own parallel subtest with its own Readers. Under -short
+// only the targeted variants of rar5_sweep.rar run.
 func TestParallelMatchesSerialOnDamagedInput(t *testing.T) {
-	for _, file := range []string{"rar5_solid_bench.rar", "rar5_compress.rar", "rar5_solid_stored_mid.rar", "rar5_exe_filter.rar"} {
-		variants := corruptVariants(t, filepath.Join("testdata", file))
-		blocks := 0
-		for vi, v := range variants {
-			serial := outcomesOf(t, v, 1)
-			par, n := outcomesCounted(t, v, 4)
-			blocks += n
-			if len(serial) != len(par) {
-				t.Fatalf("%s variant %d: %d vs %d outcomes", file, vi, len(serial), len(par))
+	short := testing.Short()
+	if short {
+		t.Log("-short: targeted variants of rar5_sweep.rar only")
+	}
+	for _, f := range []struct {
+		file       string
+		compressed bool // holds a compressed member, so blocks can be targeted and must engage the pipeline
+	}{
+		{"rar5_sweep.rar", true},
+		{"rar5_exe_filter.rar", true},
+		{"rar5_solid_stored_mid.rar", true},
+		{"rar5_compress.rar", false}, // stored members only: legitimately submits nothing
+	} {
+		if short && f.file != "rar5_sweep.rar" {
+			continue
+		}
+		t.Run(f.file, func(t *testing.T) {
+			t.Parallel()
+			data := fixtureBytes(t, f.file)
+			var variants []damagedVariant
+			if f.compressed {
+				variants = targetedVariants(t, data)
 			}
-			for i := range serial {
-				if serial[i].line() != par[i].line() {
-					t.Errorf("%s variant %d outcome %d\nserial: %s\n   par: %s", file, vi, i, serial[i].line(), par[i].line())
+			if !short {
+				variants = append(variants, randomVariants(data)...)
+			}
+			var blocks atomic.Int64
+			t.Run("variants", func(t *testing.T) {
+				for _, v := range variants {
+					t.Run(v.name, func(t *testing.T) {
+						t.Parallel()
+						serial := outcomesOf(t, v.data, 1)
+						par, n := outcomesCounted(t, v.data, 4)
+						blocks.Add(int64(n))
+						if len(serial) != len(par) {
+							t.Fatalf("%d vs %d outcomes", len(serial), len(par))
+						}
+						for i := range serial {
+							if serial[i].line() != par[i].line() {
+								t.Errorf("outcome %d\nserial: %s\n   par: %s", i, serial[i].line(), par[i].line())
+							}
+						}
+					})
 				}
+			})
+			// The group above has returned: every variant has finished.
+			if f.compressed && blocks.Load() == 0 {
+				t.Error("no variant sent a block through the pipeline")
 			}
-		}
-		// rar5_compress.rar holds only stored members and legitimately
-		// submits nothing; the others hold compressed ones.
-		if file != "rar5_compress.rar" && blocks == 0 {
-			t.Errorf("%s: no variant sent a block through the pipeline", file)
-		}
+		})
 	}
 }
 
@@ -184,58 +282,93 @@ func TestParallelDefersReadAheadErrors(t *testing.T) {
 	}
 }
 
-// blockHeaderOffsets returns the archive offsets of each block header in the
-// first compressed member, by reading the member's packed bytes through a
-// counting reader while the serial decoder parses block heads.
+// blockHeaderLen is the size of a block header that precedes a payload of
+// payloadLen bytes: flags and checksum, then the payload length in the
+// smallest byte width that holds it. It is the inverse of readBlockHead.
+func blockHeaderLen(payloadLen int) int {
+	bc := 1
+	for payloadLen >= 1<<(8*bc) {
+		bc++
+	}
+	return 2 + bc
+}
+
+// blockHeaderOffsets returns the archive offsets of each block header of
+// every compressed member, in archive order. Stored members have no blocks
+// and are skipped. Each member's packed bytes are read through the serial
+// decoder, which parses the block heads; every block's symbols are decoded
+// (including the last block's) so the next header, and the next member's
+// decoder state, are reached from the right position. Each payload is then
+// located by scanning forward in the archive.
 func blockHeaderOffsets(t *testing.T, archive []byte) []int {
+	t.Helper()
+	var all []int
+	for _, m := range blockHeaderOffsetsByMember(t, archive) {
+		all = append(all, m...)
+	}
+	return all
+}
+
+// blockHeaderOffsetsByMember is blockHeaderOffsets grouped by compressed
+// member.
+func blockHeaderOffsetsByMember(t *testing.T, archive []byte) [][]int {
 	t.Helper()
 	r := readerFor(archive)
 	defer r.Close() //nolint:errcheck
-	e := firstCompressedMember(t, r)
-	// The member's packed data begins where the volume's cursor is now;
-	// e.src bottoms out on the volume body. Rather than reach into the
-	// volume, locate headers by scanning: decode serially, and after each
-	// readBlockHeader, search the archive for the payload bytes just read.
-	_ = e
 	d, win := r.dec50, r.win
 	drain := make([]byte, win.size)
-	var offsets []int
+	var members [][]int
 	from := 0
 	for {
-		if err := d.readBlockHeader(); err != nil {
-			t.Fatalf("readBlockHeader: %v", err)
+		e, err := r.NextEntry()
+		if err == io.EOF {
+			return members
 		}
-		at := bytes.Index(archive[from:], d.payloadBuf)
-		if at < 0 {
-			t.Fatal("payload not found in archive")
+		if err != nil {
+			t.Fatalf("NextEntry: %v", err)
 		}
-		// The header precedes the payload by 2 + bytecount bytes; bytecount
-		// is the smallest byte width that holds the payload length.
-		bc := 1
-		for len(d.payloadBuf) >= 1<<(8*bc) {
-			bc++
+		if e.Header.Method == 0 {
+			if _, err := io.Copy(io.Discard, e); err != nil {
+				t.Fatal(err)
+			}
+			continue
 		}
-		offsets = append(offsets, from+at-2-bc)
-		from += at + len(d.payloadBuf)
-		if d.lastBlock {
-			return offsets
-		}
-		// Decode the block's symbols so the next header is read from the
-		// right position, draining the window after each so it never fills.
+		var offsets []int
 		for {
-			sym, err := d.tables.main.ReadSym(d.br)
-			if errors.Is(err, io.EOF) {
+			if err := d.readBlockHeader(); err != nil {
+				t.Fatalf("readBlockHeader: %v", err)
+			}
+			at := bytes.Index(archive[from:], d.payloadBuf)
+			if at < 0 {
+				t.Fatal("payload not found in archive")
+			}
+			offsets = append(offsets, from+at-blockHeaderLen(len(d.payloadBuf)))
+			from += at + len(d.payloadBuf)
+			// Decode the block's symbols so the next header is read from the
+			// right position, draining the window after each so it never fills.
+			for {
+				sym, err := d.tables.main.ReadSym(d.br)
+				if errors.Is(err, io.EOF) {
+					break
+				}
+				if err != nil {
+					t.Fatalf("ReadSym: %v", err)
+				}
+				if err := d.decodeSymbol(win, sym); err != nil {
+					t.Fatalf("decodeSymbol: %v", err)
+				}
+				_, _ = win.Read(drain)
+			}
+			d.br = nil
+			if d.lastBlock {
 				break
 			}
-			if err != nil {
-				t.Fatalf("ReadSym: %v", err)
-			}
-			if err := d.decodeSymbol(win, sym); err != nil {
-				t.Fatalf("decodeSymbol: %v", err)
-			}
-			_, _ = win.Read(drain)
 		}
-		d.br = nil
+		members = append(members, offsets)
+		// The member was decoded by hand, not through its Entry, so the
+		// Reader would see it as short and refuse a solid successor.
+		// Every block was in fact decoded and drained.
+		e.remaining, e.done = 0, io.EOF
 	}
 }
 
@@ -276,17 +409,22 @@ func TestNewTablesFailingDoesNotDisturbInFlightBlocks(t *testing.T) {
 	}
 }
 
+// testPayloadLimit is a payload limit the fixture's blocks exceed, so they
+// take the oversize path.
+const testPayloadLimit = 16 << 10
+
 // A block larger than maxParallelPayload is decoded inline with the serial
 // buffer, not held in a slot. Forced by lowering the limit through a test
 // hook, since no fixture has a 4 MiB block.
 func TestOversizeBlockIsDecodedInline(t *testing.T) {
-	saved := parallelPayloadLimit
-	t.Cleanup(func() { parallelPayloadLimit = saved })
-	parallelPayloadLimit = 16 << 10 // blocks in the fixture exceed it
 	file := []string{filepath.Join("testdata", "rar5_solid_bench.rar")}
 	serial := decodeAll(t, file, nil)
 	var rd *Reader
-	par := decodeAll(t, file, func(r *Reader) { rd = r; r.SetWorkers(4) })
+	par := decodeAll(t, file, func(r *Reader) {
+		rd = r
+		r.dec50.payloadLimit = testPayloadLimit // blocks in the fixture exceed it
+		r.SetWorkers(4)
+	})
 	if len(par) != len(serial) {
 		t.Fatalf("%d outcomes, serial %d", len(par), len(serial))
 	}
@@ -308,10 +446,6 @@ func TestOversizeBlockIsDecodedInline(t *testing.T) {
 // Mutation check: assign j.payload = d.payloadBuf before the payload read,
 // as the oversize path first did, and the alias assertion fails.
 func TestOversizeReadFailureDoesNotLeaveSlotAliased(t *testing.T) {
-	saved := parallelPayloadLimit
-	t.Cleanup(func() { parallelPayloadLimit = saved })
-	parallelPayloadLimit = 16 << 10
-
 	data := fixtureBytes(t, "rar5_solid_bench.rar")
 	offsets := blockHeaderOffsets(t, data)
 	if len(offsets) < 4 {
@@ -342,6 +476,7 @@ func TestOversizeReadFailureDoesNotLeaveSlotAliased(t *testing.T) {
 
 		r := readerFor(data[:cut])
 		defer r.Close() //nolint:errcheck
+		r.dec50.payloadLimit = testPayloadLimit
 		r.SetWorkers(4)
 		failed := readOutcomes(r)
 		if len(failed) == 0 || failed[0].err == "" {
@@ -369,7 +504,7 @@ func TestOversizeReadFailureDoesNotLeaveSlotAliased(t *testing.T) {
 		target := -1
 		for i := 1; i+1 < len(offsets); i++ {
 			size := offsets[i+1] - offsets[i]
-			if data[offsets[i]]&0x80 != 0 && size > parallelPayloadLimit {
+			if data[offsets[i]]&0x80 != 0 && size > testPayloadLimit {
 				target = offsets[i]
 				break
 			}
@@ -387,6 +522,7 @@ func TestOversizeReadFailureDoesNotLeaveSlotAliased(t *testing.T) {
 
 		r := readerFor(v)
 		defer r.Close() //nolint:errcheck
+		r.dec50.payloadLimit = testPayloadLimit
 		r.SetWorkers(4)
 		got := readOutcomes(r)
 		if len(got) == 0 || got[0].line() != serial[0].line() {
