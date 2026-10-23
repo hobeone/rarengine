@@ -9,6 +9,8 @@ rar4_lz.rar	0	text.txt	0	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991
 rar4_rr.rar	0	hello.txt	15	243a8cb7ba267196050e534d154f41a658b3f5c29d1d9da2a5924e5e795100e3	
 rar4_solid_lz.rar	0	text.txt	0	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	rarengine: unsupported archive format: file "text.txt": RAR 1.5-4.x method 3, unpack version 29; only stored members are decoded
 rar4_solid_lz.rar	1	text2.txt	0	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	rarengine: unsupported archive format: file "text2.txt": RAR 1.5-4.x method 3, unpack version 29; only stored members are decoded
+rar4_solid_mixed.rar	0	text.txt	0	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	rarengine: unsupported archive format: file "text.txt": RAR 1.5-4.x method 3, unpack version 29; only stored members are decoded
+rar4_solid_mixed.rar	1	pic.jpg	2048	e15771a1e823505af082fdfec0b5f999617b2078c961e4b869e2211365f3cc0c	
 rar4_store.rar	0	hello.txt	15	243a8cb7ba267196050e534d154f41a658b3f5c29d1d9da2a5924e5e795100e3	
 rar4_store.rar	1	second.txt	23	c75fb28f09160e418f8b14d2b6431d37cf270467b1d21a00ddaf1a1d96bae4fe	
 rar4_store_multi.rar	0	large.bin	4010	876ede7b9dea2f1ea27487202376495e1b076584f6a587f74fa047ab1cdb770f	rarengine: expected next volume stream from channel, but channel was closed

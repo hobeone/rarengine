@@ -375,3 +375,33 @@ func TestRAR4_OracleAgreement(t *testing.T) {
 		}
 	}
 }
+
+// TestRAR4_StoredAfterRefusedSolidMemberDecodes pins that refusing a RAR4
+// member does not condemn the stored members after it in a solid run. No RAR4
+// member ever writes the window -- only stored ones are decoded, and they
+// bypass it -- so there is no history for a successor to have lost, and
+// refusing pic.jpg as ErrSolidStreamBroken would accuse it of depending on
+// bytes nothing wrote. rar -s -msjpg writes exactly this: a compressed member,
+// then a stored member flagged solid.
+func TestRAR4_StoredAfterRefusedSolidMemberDecodes(t *testing.T) {
+	const fixture = "testdata/rar4_solid_mixed.rar"
+	r := NewReader(fileVolumesOf(t, fixture))
+	assertRefusedByName(t, r, "text.txt", ErrUnsupportedFormat)
+	got, err := readAllRAR4(t, r)
+	if err != io.EOF || len(got) != 1 || got[0].name != "pic.jpg" {
+		t.Fatalf("after the refused member: %+v, %v; want pic.jpg and io.EOF", got, err)
+	}
+	if got[0].readErr != nil || got[0].closeErr != nil || len(got[0].data) != 2048 {
+		t.Fatalf("pic.jpg: %d bytes, read %v, close %v; want 2048 bytes, clean",
+			len(got[0].data), got[0].readErr, got[0].closeErr)
+	}
+	if unrar, err := exec.LookPath("unrar"); err == nil {
+		want, err := exec.Command(unrar, "p", "-inul", fixture, "pic.jpg").Output()
+		if err != nil {
+			t.Fatalf("unrar p: %v", err)
+		}
+		if !bytes.Equal(got[0].data, want) {
+			t.Fatal("pic.jpg differs from unrar's extraction")
+		}
+	}
+}

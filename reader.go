@@ -713,9 +713,16 @@ func (r *Reader) dispatch(h *blockHeader) (*Entry, error) {
 		r.win.MarkIncomplete()
 		return terminalEntry(fh, err, done), nil
 	}
-	if err := r.win.BeginFile(fh.Solid); err != nil {
-		r.win.MarkIncomplete()
-		return terminalEntry(fh, err, done), nil
+	// Not for a RAR 1.5-4.x member: admitFormat admits only stored ones, which
+	// never touch the window, so in that format the window holds no history
+	// for a solid member to depend on. BeginFile(true) would still refuse a
+	// stored member after a refused one as ErrSolidStreamBroken -- an
+	// accusation about bytes nothing was ever going to write.
+	if !h.rar4 {
+		if err := r.win.BeginFile(fh.Solid); err != nil {
+			r.win.MarkIncomplete()
+			return terminalEntry(fh, err, done), nil
+		}
 	}
 	// e is built before the splicer, and the splicer before the decode
 	// chain, because the splicer consults e through lastBlock() while
