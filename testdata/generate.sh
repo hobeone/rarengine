@@ -405,6 +405,9 @@ rar a -ma5 -ep -s -ds -m3 -md32m -msjpg rar5_sweep.rar \
 echo "  rar5_sweep.rar"
 
 echo ""
+./generate_rar4.sh
+
+echo ""
 echo "=== Done. $(ls -1 *.rar | wc -l) archives generated. ==="
 ls -lhS *.rar
 

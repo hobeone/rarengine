@@ -1,3 +1,14 @@
+rar4_comment.rar	0		0		rarengine: unsupported archive format: RAR3
+rar4_dir.rar	0		0		rarengine: unsupported archive format: RAR3
+rar4_encrypted.rar	0		0		rarengine: unsupported archive format: RAR3
+rar4_hdrenc.rar	0		0		rarengine: unsupported archive format: RAR3
+rar4_lz.rar	0		0		rarengine: unsupported archive format: RAR3
+rar4_rr.rar	0		0		rarengine: unsupported archive format: RAR3
+rar4_solid_lz.rar	0		0		rarengine: unsupported archive format: RAR3
+rar4_store.rar	0		0		rarengine: unsupported archive format: RAR3
+rar4_store_multi.rar	0		0		rarengine: unsupported archive format: RAR3
+rar4_symlink.rar	0		0		rarengine: unsupported archive format: RAR3
+rar4_unicode.rar	0		0		rarengine: unsupported archive format: RAR3
 rar5_abandon_large.rar	0	huge.bin	17897472	ff83a2f9fef1d3d586268654554c89615edc85364c8bf8bb07723a81ccf34923	
 rar5_abandon_large.rar	1	after.txt	99999	4aaeb41fb658f1658f64728b491fa0ac34e105b2ab445aed1657a645400e2d15	
 rar5_blake2.rar	0	hello.txt	15	243a8cb7ba267196050e534d154f41a658b3f5c29d1d9da2a5924e5e795100e3	
