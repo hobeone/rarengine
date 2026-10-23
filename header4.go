@@ -278,12 +278,12 @@ func extMtime4(t time.Time, tail []byte) (time.Time, error) {
 func decodeName4(flags uint16, raw []byte) string {
 	s := ""
 	if flags&rar4FileUnicode != 0 {
-		if i := bytes.IndexByte(raw, 0); i < 0 {
+		if before, after, ok := bytes.Cut(raw, []byte{0}); !ok {
 			s = string(raw)
-		} else if w := decodeEncName4(raw, raw[i+1:]); len(w) > 0 {
+		} else if w := decodeEncName4(raw, after); len(w) > 0 {
 			s = string(utf16.Decode(w))
 		} else {
-			s = string(raw[:i])
+			s = string(before)
 		}
 	} else {
 		s = string(raw)
