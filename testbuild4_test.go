@@ -76,8 +76,12 @@ func rar4File(s rar4FileSpec) []byte {
 
 // rar4Archive is one complete volume: the signature, a main header with no
 // flags, blocks in order, and an end header.
-func rar4Archive(blocks ...[]byte) []byte {
-	out := append(append([]byte{}, rar4Sig...), rar4MainHeader(0)...)
+func rar4Archive(blocks ...[]byte) []byte { return rar4Volume(0, blocks...) }
+
+// rar4Volume is rar4Archive with the main header's flags given: solid, or one
+// volume of a set.
+func rar4Volume(mainFlags uint16, blocks ...[]byte) []byte {
+	out := append(append([]byte{}, rar4Sig...), rar4MainHeader(mainFlags)...)
 	for _, b := range blocks {
 		out = append(out, b...)
 	}

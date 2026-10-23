@@ -1,14 +1,22 @@
-rar4_comment.rar	0		0		rarengine: unsupported archive format: RAR3
-rar4_dir.rar	0		0		rarengine: unsupported archive format: RAR3
-rar4_encrypted.rar	0		0		rarengine: unsupported archive format: RAR3
-rar4_hdrenc.rar	0		0		rarengine: unsupported archive format: RAR3
-rar4_lz.rar	0		0		rarengine: unsupported archive format: RAR3
-rar4_rr.rar	0		0		rarengine: unsupported archive format: RAR3
-rar4_solid_lz.rar	0		0		rarengine: unsupported archive format: RAR3
-rar4_store.rar	0		0		rarengine: unsupported archive format: RAR3
-rar4_store_multi.rar	0		0		rarengine: unsupported archive format: RAR3
-rar4_symlink.rar	0		0		rarengine: unsupported archive format: RAR3
-rar4_unicode.rar	0		0		rarengine: unsupported archive format: RAR3
+rar4_comment.rar	0	hello.txt	15	243a8cb7ba267196050e534d154f41a658b3f5c29d1d9da2a5924e5e795100e3	
+rar4_dir.rar	0	subdir/top.txt	9	cfde079781fe5327deed2f9cc4d91c913954e2dec7d17171dfbb958817e3b54e	
+rar4_dir.rar	1	subdir/nested/deep.txt	14	b509163964e822915ea7e822759ecae39dd696626e70b74b96de6ac7396415d0	
+rar4_dir.rar	2	subdir/nested	0	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	
+rar4_dir.rar	3	subdir	0	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	
+rar4_encrypted.rar	0	hello.txt	0	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	rarengine: unsupported archive format: file "hello.txt": RAR 1.5-4.x encryption
+rar4_hdrenc.rar	0		0		rarengine: unsupported archive format: RAR 1.5-4.x archive with encrypted headers
+rar4_lz.rar	0	text.txt	0	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	rarengine: unsupported archive format: file "text.txt": RAR 1.5-4.x method 3, unpack version 29; only stored members are decoded
+rar4_rr.rar	0	hello.txt	15	243a8cb7ba267196050e534d154f41a658b3f5c29d1d9da2a5924e5e795100e3	
+rar4_solid_lz.rar	0	text.txt	0	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	rarengine: unsupported archive format: file "text.txt": RAR 1.5-4.x method 3, unpack version 29; only stored members are decoded
+rar4_solid_lz.rar	1	text2.txt	0	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	rarengine: unsupported archive format: file "text2.txt": RAR 1.5-4.x method 3, unpack version 29; only stored members are decoded
+rar4_store.rar	0	hello.txt	15	243a8cb7ba267196050e534d154f41a658b3f5c29d1d9da2a5924e5e795100e3	
+rar4_store.rar	1	second.txt	23	c75fb28f09160e418f8b14d2b6431d37cf270467b1d21a00ddaf1a1d96bae4fe	
+rar4_store_multi.rar	0	large.bin	4010	876ede7b9dea2f1ea27487202376495e1b076584f6a587f74fa047ab1cdb770f	rarengine: expected next volume stream from channel, but channel was closed
+rar4_symlink.rar	0	hello.txt	15	243a8cb7ba267196050e534d154f41a658b3f5c29d1d9da2a5924e5e795100e3	
+rar4_symlink.rar	1	link_rel	0	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	rarengine: member is a link and has no content to read; check Header.LinkType
+rar4_symlink.rar	2	link_abs	0	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	rarengine: member is a link and has no content to read; check Header.LinkType
+rar4_symlink.rar	3	link_up	0	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855	rarengine: member is a link and has no content to read; check Header.LinkType
+rar4_unicode.rar	0	名前.txt	12	8898cd6a1c9777bbb832388868a66967c501a8ab02291e595816b7b23470c838	
 rar5_abandon_large.rar	0	huge.bin	17897472	ff83a2f9fef1d3d586268654554c89615edc85364c8bf8bb07723a81ccf34923	
 rar5_abandon_large.rar	1	after.txt	99999	4aaeb41fb658f1658f64728b491fa0ac34e105b2ab445aed1657a645400e2d15	
 rar5_blake2.rar	0	hello.txt	15	243a8cb7ba267196050e534d154f41a658b3f5c29d1d9da2a5924e5e795100e3	

@@ -82,13 +82,17 @@ func TestVolumePayloadIsBoundedByDataSize(t *testing.T) {
 	}
 }
 
-// A RAR3 signature is not decodable. openVolume must say so rather than
-// misparsing RAR3 blocks under the RAR5 layout.
-func TestOpenVolumeRefusesRAR3(t *testing.T) {
-	sig := []byte{0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x00}
-	_, err := openVolume(&mockReadCloser{bytes.NewReader(sig)})
-	if !errors.Is(err, ErrUnsupportedFormat) {
-		t.Fatalf("openVolume error = %v, want ErrUnsupportedFormat", err)
+// A RAR 1.5-4.x signature must select the RAR4 block layout: the blocks after
+// it misparse under the RAR5 one.
+func TestOpenVolumeRecognisesRAR4(t *testing.T) {
+	stream := append(append([]byte{}, rar4Sig...), rar4EndHeader()...)
+	v, err := openVolume(&mockReadCloser{bytes.NewReader(stream)})
+	if err != nil || !v.rar4 {
+		t.Fatalf("openVolume = %+v, %v; want a RAR4 volume", v, err)
+	}
+	h, err := v.next()
+	if err != nil || !h.rar4 || h.Type != headerTypeEnd {
+		t.Fatalf("next() = %+v, %v; want the RAR4 end header", h, err)
 	}
 }
 
