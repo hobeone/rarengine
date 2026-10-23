@@ -941,8 +941,9 @@ func (r *Reader) resolveHeaderPassword(ch *cryptHeader) (string, error) {
 	return "", ErrWrongPassword
 }
 
-// unpackVersionRAR5 is the only compression algorithm version this library
-// implements. The field it is compared against is attacker-supplied like every
+// unpackVersionRAR5 is the only RAR5 compression algorithm version this
+// library implements. RAR 1.5-4.x members are admitted by method instead; see
+// admitFormat. The field it is compared against is attacker-supplied like every
 // other, but there is nothing to cross-check it against: a RAR7 member is a
 // well-formed header for a format we do not decode, not a malformed one.
 const unpackVersionRAR5 = 0

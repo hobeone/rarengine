@@ -163,11 +163,11 @@ type FileHeader struct {
 	// Close still reports nil.
 	LinkType LinkType
 
-	// Encrypted reports that the member's content is encrypted, from RAR5's
-	// encryption extra record. It reports that the member carries such a
-	// record, not that the record is usable: it is set even when that
-	// record fails to parse, in which case the parse error refuses the
-	// member.
+	// Encrypted reports that the member's content is encrypted: for RAR5,
+	// from its encryption extra record, and for RAR 1.5-4.x from LHD_PASSWORD.
+	// For RAR5 it reports that the member carries such a record, not that the
+	// record is usable: it is set even when that record fails to parse, in
+	// which case the parse error refuses the member.
 	Encrypted bool
 
 	// UseMac reports that the digest recorded for an encrypted member is a
@@ -177,11 +177,13 @@ type FileHeader struct {
 	Method int // compression method: 0 = store, 1..5 = compress
 
 	// UnpackVersion is the compression algorithm version this member's header
-	// declares: 0 is RAR 5.0, and it is the only value this library can
-	// decode. RAR 7.0 raised it, and nothing outside a file header
+	// declares. For RAR5, 0 is RAR 5.0, and it is the only value this library
+	// can decode. RAR 7.0 raised it, and nothing outside a file header
 	// distinguishes the two formats -- same signature, same block framing,
 	// same vint encoding -- so this field is the only place the difference is
-	// visible. Reader.dispatch refuses anything else; see unpackVersionRAR5.
+	// visible. admitFormat refuses anything else; see unpackVersionRAR5. For
+	// RAR 1.5-4.x it is the header's UNP_VER byte as written (20 on a stored
+	// member from rar 6.x, 29 on a compressed one), and is not checked.
 	UnpackVersion int
 
 	// DictSize is the dictionary size, in bytes, this member's header

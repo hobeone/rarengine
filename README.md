@@ -11,7 +11,7 @@ Designed specifically for high-throughput Usenet downloaders (like `gonzbd`), `r
 - **Zero-Allocation Pipeline**: Reuses a single `Reader` instance and its sliding window across streams via `Reset`, keeping steady-state allocations minimal. The window is sized from each archive's declared dictionary (up to the format's 4 GiB, or a cap set with `SetMaxWindow`) as an anonymous mapping on Linux, so resident memory follows the history actually produced rather than the dictionary declared.
 - **Process In-Process**: Runs entirely within Go—no slow C++ `unrar` binary subprocess forks or shell pipeline parsing.
 - **Spec Conformance**: Fully audited and tested for strict conformance to the official RAR 5.0 technote specifications.
-- **Differential Oracle Tested**: Verified byte-for-byte against the system-installed canonical `unrar` binary for standard, compressed, solid, and password-encrypted RAR5 archives.
+- **Differential Oracle Tested**: Verified byte-for-byte against the system-installed canonical `unrar` binary for standard, compressed, solid, and password-encrypted RAR5 archives, and for stored RAR 1.5-4.x archives.
 - **Robust Security Boundaries**:
   - **Path Sanitization**: Dynamic, OS-independent path sanitization neutralizes directory traversal exploits (strips relative upward `..` and absolute paths safely).
   - **Rar-Bomb Protection**: Aborts decompression instantly when file expansion ratios exceed `65536x` for files larger than `1MB`.
@@ -215,12 +215,24 @@ encoding are identical to RAR5. A member declaring any version other than 0
 That refusal is per-member, not archive-level: it arrives through the `Entry`,
 and `NextEntry` is still safe to call again for the members behind it.
 
-### RAR3 archives
+### RAR 1.5–4.x archives
 
-`rarengine` is RAR5 only. A RAR3 signature is recognised so it can be refused
-by name — `ErrUnsupportedFormat`, before any per-member parsing runs — and
-nothing past the signature is parsed. A caller that needs to inspect a RAR3
-archive should hand it to `unrar`.
+Archives written by RAR 1.5 through 4.x (`rar -ma4`, which rar 7 no longer
+accepts) are read for their **stored** members: a member packed with `-m0`
+is extracted, CRC-checked and spliced across volumes exactly as a RAR5 one is,
+including old-style `.rar`/`.r00`/`.r01` sets. Directories, Unicode names and
+Unix symlinks (as link entries, target in `LinkTarget`) come through too.
+
+Everything else is refused with `ErrUnsupportedFormat`, naming why:
+
+- a compressed or encrypted member is refused by name, per member — the
+  `Entry` carries the verdict and `NextEntry` goes on past it;
+- an archive with encrypted headers (`-hp`), or a RAR 2.x block, ends the
+  traversal;
+- `VerifyPassword` and `VolumeNumber` do not read RAR 1.5–4.x at all.
+
+A caller that needs those members should hand the archive to `unrar`. A set is
+one format: a RAR5 volume after a RAR 1.5–4.x one is `ErrCorruptArchiveHeader`.
 
 ---
 
