@@ -110,13 +110,18 @@ const (
 	LinkFileCopy        LinkType = 5
 )
 
-// blockHeader represents a generic RAR5 block header.
+// blockHeader represents a generic RAR5 block header, or a RAR 1.5-4.x one
+// read into the same shape by readBlockHeader4.
 type blockHeader struct {
 	Type     uint64
 	Flags    uint64
 	DataSize int64
 	Payload  []byte
 	Extra    []extraRecord
+
+	// rar4 marks a header readBlockHeader4 produced: Flags and Payload are
+	// then in the RAR 1.5-4.x layout.
+	rar4 bool
 }
 
 // extraRecord represents metadata parsed from header extra area.
