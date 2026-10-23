@@ -30,6 +30,7 @@ dd if=/dev/urandom of="$SRC/large.bin" bs=1024 count=8 2>/dev/null
 echo -n "unicode name" >"$SRC/名前.txt"
 for i in $(seq 1 60); do echo "line $i of a compressible text file"; done >"$SRC/text.txt"
 for i in $(seq 1 60); do echo "row $i of a second compressible text file"; done >"$SRC/text2.txt"
+dd if=/dev/urandom of="$SRC/pic.jpg" bs=1024 count=2 2>/dev/null
 ln -s hello.txt "$SRC/link_rel"
 ln -s /etc/passwd "$SRC/link_abs"
 ln -s ../../x "$SRC/link_up"
@@ -55,6 +56,9 @@ rar4 rar4_rr.rar -m0 -rr3% "$OUT/rar4_rr.rar" hello.txt
 # stored one: a solid set exists only compressed.
 rar4 rar4_lz.rar -m3 "$OUT/rar4_lz.rar" text.txt
 rar4 rar4_solid_lz.rar -m3 -s "$OUT/rar4_solid_lz.rar" text.txt text2.txt
+# -msjpg stores pic.jpg inside a compressed solid run: a stored member rar
+# flags solid, after a member this library refuses.
+rar4 rar4_solid_mixed.rar -m3 -s -msjpg "$OUT/rar4_solid_mixed.rar" text.txt pic.jpg
 rar4 rar4_encrypted.rar -m0 -ptest "$OUT/rar4_encrypted.rar" hello.txt
 rar4 rar4_hdrenc.rar -m0 -hptest "$OUT/rar4_hdrenc.rar" hello.txt
 rar4 rar4_symlink.rar -m0 -ol "$OUT/rar4_symlink.rar" hello.txt link_rel link_abs link_up
