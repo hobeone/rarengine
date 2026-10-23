@@ -61,19 +61,24 @@ var (
 	// -- should expect this rather than treat it as corruption.
 	ErrReaderClosed = errors.New("rarengine: reader is closed")
 
-	// ErrUnsupportedFormat reports content this library cannot decode. Two
-	// things reach it, at different scopes:
+	// ErrUnsupportedFormat reports content this library cannot decode, at one
+	// of two scopes.
 	//
-	//   - A RAR3 signature, which ends the traversal: it is recognised so it
-	//     can be refused by name, and nothing beyond the signature is parsed.
-	//   - A member whose file header declares an unpack version other than 0
-	//     (RAR 5.0) -- RAR 7.0 raised it. That is a per-member verdict
-	//     delivered by the Entry, and the archive stays readable past it,
-	//     because the field is per-member and other members may be decodable.
+	// Ending the traversal, from NextEntry: a stream whose signature is not
+	// RAR; a RAR 1.5-4.x archive with encrypted headers; a RAR 2.x block or
+	// a RAR 2.x comment embedded in a header.
 	//
-	// One sentinel for both because a caller can do nothing different about
-	// them: the content is in a format this library does not implement. The
-	// message names which.
+	// One member, delivered by its Entry, with the archive readable past it:
+	// a RAR5 member declaring an unpack version other than 0 (RAR 7.0 raised
+	// it); a RAR5 link of a redirection kind outside 1-5; a RAR 1.5-4.x
+	// member that is encrypted or compressed -- only stored ones are decoded.
+	//
+	// VerifyPassword and VolumeNumber also return it for any RAR 1.5-4.x
+	// archive.
+	//
+	// One sentinel for all of them because a caller can do nothing different
+	// about them: the content is in a format this library does not implement.
+	// The message names which.
 	ErrUnsupportedFormat = errors.New("rarengine: unsupported archive format")
 
 	// ErrTruncatedFile is returned when the archive stream ends before a file's
@@ -126,6 +131,9 @@ var (
 	// back a member fabricated from attacker-chosen content. Reset clears
 	// the latch. The underlying parse failure -- typically ErrTruncatedVint
 	// -- is still reachable through errors.Is via the wrap.
+	//
+	// It also reports a later volume contradicting the first: a different
+	// solid flag, or a different format (RAR5 and RAR 1.5-4.x).
 	ErrCorruptArchiveHeader = errors.New("rarengine: archive header is corrupt, traversal ended")
 
 	// ErrUnsupportedEncryptionVersion is returned when the archive's

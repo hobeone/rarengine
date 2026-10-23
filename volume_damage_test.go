@@ -222,7 +222,7 @@ func TestVolumeCutInsideAnEncryptedHeaderIsNotACleanEnd(t *testing.T) {
 	// The encryption header itself is plaintext; the first encrypted header
 	// begins where it ends.
 	br := bytes.NewReader(arc)
-	if err := readSignature(br); err != nil {
+	if _, err := readSignature(br); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := readBlockHeader(br); err != nil {
