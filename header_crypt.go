@@ -119,7 +119,9 @@ func (hd *headerDecrypter) readEncryptedBlockHeader(r io.Reader) (*blockHeader, 
 	for declaredTotal < 0 || len(plain) < declaredTotal {
 		ct := make([]byte, 16)
 		if _, err := io.ReadFull(r, ct); err != nil {
-			return nil, err
+			// The IV is already consumed, so this header has begun: running
+			// out now is truncation, not a volume ending on a block boundary.
+			return nil, unexpectedEOF(err)
 		}
 		pt := make([]byte, 16)
 		dec.CryptBlocks(pt, ct)

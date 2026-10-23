@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"os"
 	"testing"
 )
 
@@ -163,5 +164,61 @@ func TestUnsupportedVolumeStaysFatal(t *testing.T) {
 	r := NewReader(volumes)
 	if _, err := r.NextEntry(); !errors.Is(err, ErrUnsupportedFormat) {
 		t.Fatalf("NextEntry = %v, want ErrUnsupportedFormat", err)
+	}
+}
+
+// TestVolumeCutInsideABlockHeaderIsNotACleanEnd pins that a volume ending
+// partway through a block header is truncation at every offset. io.ReadFull
+// reports a read that got no bytes at all as io.EOF, and the traversal reads
+// io.EOF from volume.next() as "this volume is spent" -- so a cut landing
+// exactly where the header read is split into two calls ended the archive
+// cleanly, with the member it was announcing silently gone.
+func TestVolumeCutInsideABlockHeaderIsNotACleanEnd(t *testing.T) {
+	member := rar5Member(t, memberSpec{name: "a.bin", content: "here", withCRC: true})
+	headerLen := len(member) - len("here")
+	opening := rar5ArchiveHeaderFlags(0)
+
+	for k := 1; k < headerLen; k++ {
+		vol := append(append([]byte{}, opening...), member[:k]...)
+		volumes := make(chan io.ReadCloser, 1)
+		volumes <- io.NopCloser(bytes.NewReader(vol))
+		close(volumes)
+		if _, err := NewReader(volumes).NextEntry(); !errors.Is(err, io.ErrUnexpectedEOF) {
+			t.Errorf("cut %d bytes into a %d-byte header: NextEntry = %v, want io.ErrUnexpectedEOF",
+				k, headerLen, err)
+		}
+	}
+}
+
+// TestVolumeCutInsideAnEncryptedHeaderIsNotACleanEnd is the same rule for
+// the header-encryption path, which reads each header as a 16-byte IV and
+// then whole 16-byte ciphertext blocks: a cut right after the IV leaves the
+// first ciphertext read with no bytes at all.
+func TestVolumeCutInsideAnEncryptedHeaderIsNotACleanEnd(t *testing.T) {
+	arc, err := os.ReadFile("testdata/rar5_encrypted_header.rar")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The encryption header itself is plaintext; the first encrypted header
+	// begins where it ends.
+	br := bytes.NewReader(arc)
+	if err := readSignature(br); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readBlockHeader(br); err != nil {
+		t.Fatal(err)
+	}
+	encStart := len(arc) - br.Len()
+
+	for _, cut := range []int{encStart + 8, encStart + 16} {
+		volumes := make(chan io.ReadCloser, 1)
+		volumes <- io.NopCloser(bytes.NewReader(arc[:cut]))
+		close(volumes)
+		r := NewReader(volumes)
+		r.SetPasswords([]string{"test"})
+		if _, err := r.NextEntry(); !errors.Is(err, io.ErrUnexpectedEOF) {
+			t.Errorf("cut %d bytes into the first encrypted header: NextEntry = %v, want io.ErrUnexpectedEOF",
+				cut-encStart, err)
+		}
 	}
 }
