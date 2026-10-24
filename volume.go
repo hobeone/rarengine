@@ -31,8 +31,9 @@ type volume struct {
 
 	// body is what remains of the current block's declared payload. It is the
 	// bound on payload() as well as the amount next() skips, and those are the
-	// same number by construction: a RAR5 file header's PackedSize is set from
-	// the block's DataSize (header.go), so no second count can disagree.
+	// same number by construction: a file header's PackedSize is set from the
+	// block's DataSize (parseFileHeader in header.go, parseFileHeader4 in
+	// header4.go), so no second count can disagree.
 	body io.LimitedReader
 
 	// hd decrypts subsequent block headers once an encryption header has
@@ -70,7 +71,14 @@ type volume struct {
 	// These two fields cost 32 bytes per volume, measured: one volume per
 	// advance, never per byte, with the allocation count unchanged.
 	closeOnce sync.Once
-	closeErr  error
+
+	// rar4 reports a RAR 1.5-4.x signature: next() reads headers with
+	// readBlockHeader4. Set once, by openVolume. It sits after closeOnce
+	// because it fits in the padding there: anywhere else it moved volume
+	// from the 96-byte allocator size class to 112, measured.
+	rar4 bool
+
+	closeErr error
 }
 
 var rar5Signature = []byte{0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x01, 0x00}
@@ -90,15 +98,14 @@ func signatureReadError(err error) error {
 	return err
 }
 
-// openVolume reads and validates the RAR5 signature, leaving v positioned on
-// the first block boundary. A RAR3 signature is recognised only so it can be
-// reported as ErrUnsupportedFormat by name; nothing past the signature is
-// parsed.
+// openVolume reads and validates the RAR5 or RAR 1.5-4.x signature, leaving
+// v positioned on the first block boundary and recording which it was.
 func openVolume(rc io.ReadCloser) (*volume, error) {
-	if err := readSignature(rc); err != nil {
+	rar4, err := readSignature(rc)
+	if err != nil {
 		return nil, err
 	}
-	return &volume{rc: rc}, nil
+	return &volume{rc: rc, rar4: rar4}, nil
 }
 
 // readSignature consumes the RAR signature from r, leaving it positioned on
@@ -109,28 +116,30 @@ func openVolume(rc io.ReadCloser) (*volume, error) {
 // the signature itself: its length depends on which format the bytes turn out
 // to be -- 7 for RAR3, 8 for RAR5 -- so "skip 8 and start parsing" silently
 // mis-frames every RAR3 archive it is handed.
-func readSignature(r io.Reader) error {
+//
+// rar4 reports a RAR 1.5-4.x signature.
+func readSignature(r io.Reader) (rar4 bool, err error) {
 	var sig [8]byte
 	if _, err := io.ReadFull(r, sig[:7]); err != nil {
-		return signatureReadError(err)
+		return false, signatureReadError(err)
 	}
 	if !bytes.Equal(sig[:6], rar5Signature[:6]) {
-		return fmt.Errorf("%w: bad signature", ErrUnsupportedFormat)
+		return false, fmt.Errorf("%w: bad signature", ErrUnsupportedFormat)
 	}
 	switch sig[6] {
 	case 0x00:
-		return fmt.Errorf("%w: RAR3", ErrUnsupportedFormat)
+		return true, nil
 	case 0x01:
 		if _, err := io.ReadFull(r, sig[7:]); err != nil {
-			return signatureReadError(err)
+			return false, signatureReadError(err)
 		}
 		if sig[7] != 0x00 {
-			return fmt.Errorf("%w: bad signature", ErrUnsupportedFormat)
+			return false, fmt.Errorf("%w: bad signature", ErrUnsupportedFormat)
 		}
 	default:
-		return fmt.Errorf("%w: bad signature", ErrUnsupportedFormat)
+		return false, fmt.Errorf("%w: bad signature", ErrUnsupportedFormat)
 	}
-	return nil
+	return false, nil
 }
 
 // next skips whatever remains of the current block's payload, then reads the
@@ -166,9 +175,12 @@ func (v *volume) next() (*blockHeader, error) {
 		h   *blockHeader
 		err error
 	)
-	if v.hd != nil {
+	switch {
+	case v.rar4:
+		h, err = readBlockHeader4(v.rc)
+	case v.hd != nil:
 		h, err = v.hd.readEncryptedBlockHeader(v.rc)
-	} else {
+	default:
 		h, err = readBlockHeader(v.rc)
 	}
 	if err != nil {
