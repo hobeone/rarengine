@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"os"
+	"slices"
 	"testing"
 )
 
@@ -163,5 +165,79 @@ func TestUnsupportedVolumeStaysFatal(t *testing.T) {
 	r := NewReader(volumes)
 	if _, err := r.NextEntry(); !errors.Is(err, ErrUnsupportedFormat) {
 		t.Fatalf("NextEntry = %v, want ErrUnsupportedFormat", err)
+	}
+}
+
+// TestVolumeCutInsideABlockHeaderIsNotACleanEnd pins that a volume ending
+// partway through a block header is truncation at every offset. io.ReadFull
+// reports a read that got no bytes at all as io.EOF, and the traversal reads
+// io.EOF from volume.next() as "this volume is spent" -- so a cut landing
+// exactly where the header read is split into two calls ended the archive
+// cleanly, with the member it was announcing silently gone.
+func TestVolumeCutInsideABlockHeaderIsNotACleanEnd(t *testing.T) {
+	member := rar5Member(t, memberSpec{name: "a.bin", content: "here", withCRC: true})
+	headerLen := len(member) - len("here")
+	opening := rar5ArchiveHeaderFlags(0)
+
+	for _, feed := range volumeEnds {
+		for k := 1; k < headerLen; k++ {
+			vol := feed.open(slices.Concat(opening, member[:k]))
+			if _, err := NewReader(oneVolume(vol)).NextEntry(); !errors.Is(err, io.ErrUnexpectedEOF) {
+				t.Errorf("%s: cut %d bytes into a %d-byte header: NextEntry = %v, want io.ErrUnexpectedEOF",
+					feed.name, k, headerLen, err)
+			}
+		}
+	}
+}
+
+// volumeEnds are the two ways a volume reports its end: io.EOF itself, and
+// io.EOF wrapped, which io.Reader permits. A wrapped io.EOF fails an identity
+// comparison, and io.ReadFull converts a partial read to io.ErrUnexpectedEOF
+// only when the reader returned io.EOF itself.
+var volumeEnds = []struct {
+	name string
+	open func([]byte) io.ReadCloser
+}{
+	{"bare EOF", func(b []byte) io.ReadCloser { return &mockReadCloser{bytes.NewReader(b)} }},
+	{"wrapped EOF", func(b []byte) io.ReadCloser { return &wrappedEOFReadCloser{bytes.NewReader(b)} }},
+}
+
+// oneVolume returns a closed channel carrying rc as the only volume.
+func oneVolume(rc io.ReadCloser) <-chan io.ReadCloser {
+	ch := make(chan io.ReadCloser, 1)
+	ch <- rc
+	close(ch)
+	return ch
+}
+
+// TestVolumeCutInsideAnEncryptedHeaderIsNotACleanEnd is the same rule for
+// the header-encryption path, which reads each header as a 16-byte IV and
+// then whole 16-byte ciphertext blocks: a cut right after the IV leaves the
+// first ciphertext read with no bytes at all.
+func TestVolumeCutInsideAnEncryptedHeaderIsNotACleanEnd(t *testing.T) {
+	arc, err := os.ReadFile("testdata/rar5_encrypted_header.rar")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The encryption header itself is plaintext; the first encrypted header
+	// begins where it ends.
+	br := bytes.NewReader(arc)
+	if err := readSignature(br); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readBlockHeader(br); err != nil {
+		t.Fatal(err)
+	}
+	encStart := len(arc) - br.Len()
+
+	for _, feed := range volumeEnds {
+		for _, cut := range []int{encStart + 8, encStart + 16} {
+			r := NewReader(oneVolume(feed.open(arc[:cut])))
+			r.SetPasswords([]string{"test"})
+			if _, err := r.NextEntry(); !errors.Is(err, io.ErrUnexpectedEOF) {
+				t.Errorf("%s: cut %d bytes into the first encrypted header: NextEntry = %v, want io.ErrUnexpectedEOF",
+					feed.name, cut-encStart, err)
+			}
+		}
 	}
 }
