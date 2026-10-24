@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"slices"
 	"testing"
 )
 
@@ -178,16 +179,35 @@ func TestVolumeCutInsideABlockHeaderIsNotACleanEnd(t *testing.T) {
 	headerLen := len(member) - len("here")
 	opening := rar5ArchiveHeaderFlags(0)
 
-	for k := 1; k < headerLen; k++ {
-		vol := append(append([]byte{}, opening...), member[:k]...)
-		volumes := make(chan io.ReadCloser, 1)
-		volumes <- io.NopCloser(bytes.NewReader(vol))
-		close(volumes)
-		if _, err := NewReader(volumes).NextEntry(); !errors.Is(err, io.ErrUnexpectedEOF) {
-			t.Errorf("cut %d bytes into a %d-byte header: NextEntry = %v, want io.ErrUnexpectedEOF",
-				k, headerLen, err)
+	for _, feed := range volumeEnds {
+		for k := 1; k < headerLen; k++ {
+			vol := feed.open(slices.Concat(opening, member[:k]))
+			if _, err := NewReader(oneVolume(vol)).NextEntry(); !errors.Is(err, io.ErrUnexpectedEOF) {
+				t.Errorf("%s: cut %d bytes into a %d-byte header: NextEntry = %v, want io.ErrUnexpectedEOF",
+					feed.name, k, headerLen, err)
+			}
 		}
 	}
+}
+
+// volumeEnds are the two ways a volume reports its end: io.EOF itself, and
+// io.EOF wrapped, which io.Reader permits. A wrapped io.EOF fails an identity
+// comparison, and io.ReadFull converts a partial read to io.ErrUnexpectedEOF
+// only when the reader returned io.EOF itself.
+var volumeEnds = []struct {
+	name string
+	open func([]byte) io.ReadCloser
+}{
+	{"bare EOF", func(b []byte) io.ReadCloser { return &mockReadCloser{bytes.NewReader(b)} }},
+	{"wrapped EOF", func(b []byte) io.ReadCloser { return &wrappedEOFReadCloser{bytes.NewReader(b)} }},
+}
+
+// oneVolume returns a closed channel carrying rc as the only volume.
+func oneVolume(rc io.ReadCloser) <-chan io.ReadCloser {
+	ch := make(chan io.ReadCloser, 1)
+	ch <- rc
+	close(ch)
+	return ch
 }
 
 // TestVolumeCutInsideAnEncryptedHeaderIsNotACleanEnd is the same rule for
@@ -210,15 +230,14 @@ func TestVolumeCutInsideAnEncryptedHeaderIsNotACleanEnd(t *testing.T) {
 	}
 	encStart := len(arc) - br.Len()
 
-	for _, cut := range []int{encStart + 8, encStart + 16} {
-		volumes := make(chan io.ReadCloser, 1)
-		volumes <- io.NopCloser(bytes.NewReader(arc[:cut]))
-		close(volumes)
-		r := NewReader(volumes)
-		r.SetPasswords([]string{"test"})
-		if _, err := r.NextEntry(); !errors.Is(err, io.ErrUnexpectedEOF) {
-			t.Errorf("cut %d bytes into the first encrypted header: NextEntry = %v, want io.ErrUnexpectedEOF",
-				cut-encStart, err)
+	for _, feed := range volumeEnds {
+		for _, cut := range []int{encStart + 8, encStart + 16} {
+			r := NewReader(oneVolume(feed.open(arc[:cut])))
+			r.SetPasswords([]string{"test"})
+			if _, err := r.NextEntry(); !errors.Is(err, io.ErrUnexpectedEOF) {
+				t.Errorf("%s: cut %d bytes into the first encrypted header: NextEntry = %v, want io.ErrUnexpectedEOF",
+					feed.name, cut-encStart, err)
+			}
 		}
 	}
 }

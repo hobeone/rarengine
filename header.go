@@ -255,19 +255,32 @@ func (fh *FileHeader) Mode() fs.FileMode {
 // unexpectedEOF converts io.EOF to io.ErrUnexpectedEOF for a read made after
 // a header's first byte was consumed. Only a read that starts a header may
 // report io.EOF: that is the volume ending on a block boundary, and the
-// traversal treats it as the volume being spent.
+// traversal treats it as the volume being spent. errors.Is, not ==, because
+// a volume reader may wrap its io.EOF.
 func unexpectedEOF(err error) error {
-	if err == io.EOF {
+	if errors.Is(err, io.EOF) {
 		return io.ErrUnexpectedEOF
 	}
 	return err
 }
 
+// readHeaderStart fills buf with the first bytes of a header. Running out
+// before any byte arrives is the volume ending on a block boundary; running
+// out after one is truncation. io.ReadFull already reports a partial read as
+// io.ErrUnexpectedEOF, but only when the reader returned io.EOF itself rather
+// than a wrapped one.
+func readHeaderStart(r io.Reader, buf []byte) error {
+	n, err := io.ReadFull(r, buf)
+	if n == 0 {
+		return err
+	}
+	return unexpectedEOF(err)
+}
+
 // readBlockHeader reads and validates a RAR5 block header from the stream.
 func readBlockHeader(r io.Reader) (*blockHeader, error) {
 	var sizeBuf [7]byte
-	_, err := io.ReadFull(r, sizeBuf[:])
-	if err != nil {
+	if err := readHeaderStart(r, sizeBuf[:]); err != nil {
 		return nil, err
 	}
 

@@ -104,7 +104,7 @@ type headerDecrypter struct {
 // the same field-parsing logic readBlockHeader uses once decrypted.
 func (hd *headerDecrypter) readEncryptedBlockHeader(r io.Reader) (*blockHeader, error) {
 	iv := make([]byte, 16)
-	if _, err := io.ReadFull(r, iv); err != nil {
+	if err := readHeaderStart(r, iv); err != nil {
 		return nil, err
 	}
 	block, err := aes.NewCipher(hd.key)
