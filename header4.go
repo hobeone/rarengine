@@ -56,7 +56,7 @@ const rar4LargeEnd = 25 + 8
 // two fields again.
 func readBlockHeader4(r io.Reader) (*blockHeader, error) {
 	var base [7]byte
-	if _, err := io.ReadFull(r, base[:]); err != nil {
+	if err := readHeaderStart(r, base[:]); err != nil {
 		return nil, err // io.EOF only when the volume ends on a block boundary
 	}
 	le := binary.LittleEndian

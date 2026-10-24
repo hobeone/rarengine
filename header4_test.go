@@ -147,9 +147,12 @@ func TestReadBlockHeader4_CutHeaderIsUnexpectedEOF(t *testing.T) {
 	if _, err := readBlockHeader4(bytes.NewReader(nil)); err != io.EOF {
 		t.Fatalf("empty: err = %v, want io.EOF", err)
 	}
-	for k := 1; k < len(block); k++ {
-		if _, err := readBlockHeader4(bytes.NewReader(block[:k])); !errors.Is(err, io.ErrUnexpectedEOF) {
-			t.Errorf("cut %d bytes into a %d-byte header: err = %v, want io.ErrUnexpectedEOF", k, len(block), err)
+	for _, feed := range volumeEnds {
+		for k := 1; k < len(block); k++ {
+			if _, err := readBlockHeader4(feed.open(block[:k])); !errors.Is(err, io.ErrUnexpectedEOF) {
+				t.Errorf("%s: cut %d bytes into a %d-byte header: err = %v, want io.ErrUnexpectedEOF",
+					feed.name, k, len(block), err)
+			}
 		}
 	}
 }
