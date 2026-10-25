@@ -6,8 +6,14 @@ import (
 	"io"
 )
 
+var errInspectRAR4 = fmt.Errorf("%w: RAR 1.5-4.x archive", ErrUnsupportedFormat)
+
 // Inspection entry points: read-only questions about an archive that
 // traversal cannot answer.
+//
+// Neither reads RAR 1.5-4.x: such an archive carries no password check value,
+// and its volume number lives in the end header rather than the archive
+// header, so both report errInspectRAR4.
 //
 // Both take a reader positioned at the START of the archive and consume the
 // signature themselves. Neither decompresses anything, neither decrypts
@@ -45,8 +51,12 @@ import (
 // to its end header before reporting there is nothing to verify -- paying a
 // walk over block headers to avoid answering from the first member alone.
 func VerifyPassword(r io.Reader, password string) (verified, hasCheckValue bool, err error) {
-	if err := readSignature(r); err != nil {
+	rar4, err := readSignature(r)
+	if err != nil {
 		return false, false, err
+	}
+	if rar4 {
+		return false, false, errInspectRAR4
 	}
 	for {
 		h, err := readBlockHeader(r)
@@ -125,8 +135,12 @@ func VerifyPassword(r io.Reader, password string) (verified, hasCheckValue bool,
 // downloaded parts routinely arrive with the numbering stripped -- and the
 // archive header is the only place the number survives.
 func VolumeNumber(r io.Reader) (index int, multiVolume bool, err error) {
-	if err := readSignature(r); err != nil {
+	rar4, err := readSignature(r)
+	if err != nil {
 		return 0, false, err
+	}
+	if rar4 {
+		return 0, false, errInspectRAR4
 	}
 	for {
 		h, err := readBlockHeader(r)

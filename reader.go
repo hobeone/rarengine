@@ -25,7 +25,7 @@ type Reader struct {
 	// is nothing for a failure to leave behind -- a lifetime, not a rule
 	// anyone has to maintain. A volume reachable here has passed its
 	// signature; openVolume returns one only on success, so this field never
-	// points at a stream that is not a RAR5 volume.
+	// points at a stream that is not a RAR volume.
 	//
 	// Assigned in exactly two places, takeVolume and publishVolume, both on
 	// the traversal goroutine and both under volMu -- so the field has ONE
@@ -164,6 +164,12 @@ type Reader struct {
 	// volume's header is compared against it instead of overwriting it.
 	solidSeen bool
 
+	// rar4 is the format of the first volume opened -- RAR 1.5-4.x when true,
+	// RAR5 otherwise -- and formatSeen says one has been. nextVolume refuses
+	// a later volume of the other format: a set is one archive.
+	rar4       bool
+	formatSeen bool
+
 	// fatal is sticky once set: NextEntry checks it first and, if non-nil,
 	// returns it again without touching r.vol. It is set by NextEntry itself
 	// -- never by dispatch or any other helper -- for exactly the errors
@@ -265,6 +271,7 @@ func (r *Reader) Reset(volumes <-chan io.ReadCloser) {
 	r.damaged = nil
 	r.resolved, r.hasResolved = "", false
 	r.solid, r.solidSeen = false, false
+	r.rar4, r.formatSeen = false, false
 	r.capLatched = false
 	r.fatal = nil
 	// BeginFile(false) is the window's one entrance for discarding history: it
@@ -631,24 +638,9 @@ func (r *Reader) dispatch(h *blockHeader) (*Entry, error) {
 	// compression algorithm this library does not implement cannot be
 	// reasoned about at all, so nothing downstream should touch the
 	// window on its behalf.
-	//
-	// RAR 7.0 raised this field and changed nothing a traversal can see
-	// from outside a file header -- the signature, block framing and vint
-	// encoding are identical -- so detectVersion cannot separate them and
-	// every member with a nonzero method was handed to the RAR5 decoder.
-	// That produced garbage rather than an error, and the CRC32 caught it
-	// only after the whole member had been decompressed and delivered.
-	//
-	// ErrUnsupportedFormat rather than a new sentinel: it already means
-	// "an archive this library cannot decode", which is exactly this, and
-	// a caller can do nothing different for a RAR7 member than for a RAR3
-	// signature. The version is named in the message.
-	if fh.UnpackVersion != unpackVersionRAR5 {
+	if err := admitFormat(h, fh); err != nil {
 		r.win.MarkIncomplete()
-		return terminalEntry(fh, fmt.Errorf(
-			"%w: file %q declares unpack version %d, this library decodes "+
-				"version %d (RAR 5.0)", ErrUnsupportedFormat, fh.Name,
-			fh.UnpackVersion, unpackVersionRAR5), done), nil
+		return terminalEntry(fh, err, done), nil
 	}
 	// Solid is an archive-level property that rar records twice: on the
 	// archive header and on every member of a solid run. A member claiming
@@ -685,6 +677,24 @@ func (r *Reader) dispatch(h *blockHeader) (*Entry, error) {
 	// the members after it, in a solid archive, depend on; MarkIncomplete
 	// would refuse every solid successor for damage that did not happen.
 	// r.entry is not set either: there is no chain to abandon or sever.
+	//
+	// A RAR4 symlink is a stored member whose payload is its target, so it
+	// becomes a link only once that payload is read, here. admitFormat has
+	// already refused it if encrypted or compressed. A refusal does not mark
+	// the window incomplete, for the reason above: a link contributes nothing
+	// to solid history. This is the one read of the caller's stream dispatch
+	// makes before returning (the splicer built below is read later, through
+	// the Entry), so a Close landing during it is returned to NextEntry, whose
+	// exit translation reports it as ErrReaderClosed, rather than becoming
+	// this member's verdict.
+	if h.rar4 && isSymlink4(fh) {
+		if err := readLinkTarget4(fh, r.vol.payload()); err != nil {
+			if r.isClosed() {
+				return nil, err
+			}
+			return terminalEntry(fh, err, done), nil
+		}
+	}
 	if fh.LinkType != LinkNone {
 		return linkEntry(fh, done), nil
 	}
@@ -710,9 +720,16 @@ func (r *Reader) dispatch(h *blockHeader) (*Entry, error) {
 		r.win.MarkIncomplete()
 		return terminalEntry(fh, err, done), nil
 	}
-	if err := r.win.BeginFile(fh.Solid); err != nil {
-		r.win.MarkIncomplete()
-		return terminalEntry(fh, err, done), nil
+	// Not for a RAR 1.5-4.x member: admitFormat admits only stored ones, which
+	// never touch the window, so in that format the window holds no history
+	// for a solid member to depend on. BeginFile(true) would still refuse a
+	// stored member after a refused one as ErrSolidStreamBroken -- an
+	// accusation about bytes nothing was ever going to write.
+	if !h.rar4 {
+		if err := r.win.BeginFile(fh.Solid); err != nil {
+			r.win.MarkIncomplete()
+			return terminalEntry(fh, err, done), nil
+		}
 	}
 	// e is built before the splicer, and the splicer before the decode
 	// chain, because the splicer consults e through lastBlock() while
@@ -728,6 +745,41 @@ func (r *Reader) dispatch(h *blockHeader) (*Entry, error) {
 	e.setSource(src)
 	r.entry = e
 	return e, nil
+}
+
+// admitFormat refuses a member whose format this library cannot decode.
+//
+// RAR5: any unpack version but 0. RAR 7.0 raised this field and changed
+// nothing a traversal can see from outside a file header -- the signature,
+// block framing and vint encoding are identical -- so detectVersion cannot
+// separate them and every member with a nonzero method was handed to the RAR5
+// decoder. That produced garbage rather than an error, and the CRC32 caught it
+// only after the whole member had been decompressed and delivered.
+//
+// RAR 1.5-4.x: an encrypted member, then any method but store. There is no
+// version check: rar writes unpack version 20 on stored members (29 on
+// compressed ones), and storing is the same at every version.
+//
+// ErrUnsupportedFormat rather than a new sentinel: it already means "an
+// archive this library cannot decode", which is exactly this. The method and
+// version are named in the message.
+func admitFormat(h *blockHeader, fh *FileHeader) error {
+	if !h.rar4 {
+		if fh.UnpackVersion != unpackVersionRAR5 {
+			return fmt.Errorf("%w: file %q declares unpack version %d, this library decodes "+
+				"version %d (RAR 5.0)", ErrUnsupportedFormat, fh.Name,
+				fh.UnpackVersion, unpackVersionRAR5)
+		}
+		return nil
+	}
+	if fh.Encrypted {
+		return fmt.Errorf("%w: file %q: RAR 1.5-4.x encryption", ErrUnsupportedFormat, fh.Name)
+	}
+	if fh.Method != 0 {
+		return fmt.Errorf("%w: file %q: RAR 1.5-4.x method %d, unpack version %d; "+
+			"only stored members are decoded", ErrUnsupportedFormat, fh.Name, fh.Method, fh.UnpackVersion)
+	}
+	return nil
 }
 
 // handleNonFileBlock applies the archive-wide effect of a block that is not a
@@ -769,6 +821,12 @@ func (r *Reader) handleNonFileBlock(h *blockHeader) error {
 			// errors.Is still reaches the underlying parse failure -- see
 			// ErrCorruptArchiveHeader's doc comment. Both call sites latch
 			// this (see Reader.fatal) so a second call cannot resume past it.
+			//
+			// Except ErrUnsupportedFormat, a RAR 1.5-4.x archive with
+			// encrypted headers: still fatal, but not corrupt.
+			if errors.Is(err, ErrUnsupportedFormat) {
+				return err
+			}
 			return fmt.Errorf("%w: %w", ErrCorruptArchiveHeader, err)
 		}
 		// The first archive header seen sets the flag; a later one (each
@@ -897,8 +955,9 @@ func (r *Reader) resolveHeaderPassword(ch *cryptHeader) (string, error) {
 	return "", ErrWrongPassword
 }
 
-// unpackVersionRAR5 is the only compression algorithm version this library
-// implements. The field it is compared against is attacker-supplied like every
+// unpackVersionRAR5 is the only RAR5 compression algorithm version this
+// library implements. RAR 1.5-4.x members are admitted by method instead; see
+// admitFormat. The field it is compared against is attacker-supplied like every
 // other, but there is nothing to cross-check it against: a RAR7 member is a
 // well-formed header for a format we do not decode, not a malformed one.
 const unpackVersionRAR5 = 0
@@ -1341,8 +1400,8 @@ func (r *Reader) nextVolume() error {
 	// traversal goroutine with nothing able to rescue it. staging is what
 	// closes that window, and it stays open only for the length of one call.
 	//
-	// The volume is NOT published here. r.vol means "a validated RAR5 volume
-	// is open", and openVolume returns one only once the signature has been
+	// The volume is NOT published here. r.vol means "a validated volume is
+	// open", and openVolume returns one only once the signature has been
 	// read, so nothing that is not an archive is ever reachable there and a
 	// failed advance still has nothing to leave behind.
 	if !r.stage(rc) {
@@ -1377,6 +1436,13 @@ func (r *Reader) nextVolume() error {
 		_ = rc.Close()
 		return err
 	}
+	// Not io.ErrUnexpectedEOF, so openNextVolume does not skip it as a damaged
+	// part: a volume of the other format is not a missing piece of this set.
+	if r.formatSeen && v.rar4 != r.rar4 {
+		_ = v.Close()
+		return fmt.Errorf("%w: volume format differs from the first volume's", ErrCorruptArchiveHeader)
+	}
+	r.rar4, r.formatSeen = v.rar4, true
 	if !r.publishVolume(v) {
 		return ErrReaderClosed
 	}

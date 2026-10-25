@@ -110,13 +110,18 @@ const (
 	LinkFileCopy        LinkType = 5
 )
 
-// blockHeader represents a generic RAR5 block header.
+// blockHeader represents a generic RAR5 block header, or a RAR 1.5-4.x one
+// read into the same shape by readBlockHeader4.
 type blockHeader struct {
 	Type     uint64
 	Flags    uint64
 	DataSize int64
 	Payload  []byte
 	Extra    []extraRecord
+
+	// rar4 marks a header readBlockHeader4 produced: Flags and Payload are
+	// then in the RAR 1.5-4.x layout.
+	rar4 bool
 }
 
 // extraRecord represents metadata parsed from header extra area.
@@ -158,11 +163,11 @@ type FileHeader struct {
 	// Close still reports nil.
 	LinkType LinkType
 
-	// Encrypted reports that the member's content is encrypted, from RAR5's
-	// encryption extra record. It reports that the member carries such a
-	// record, not that the record is usable: it is set even when that
-	// record fails to parse, in which case the parse error refuses the
-	// member.
+	// Encrypted reports that the member's content is encrypted: for RAR5,
+	// from its encryption extra record, and for RAR 1.5-4.x from LHD_PASSWORD.
+	// For RAR5 it reports that the member carries such a record, not that the
+	// record is usable: it is set even when that record fails to parse, in
+	// which case the parse error refuses the member.
 	Encrypted bool
 
 	// UseMac reports that the digest recorded for an encrypted member is a
@@ -172,11 +177,13 @@ type FileHeader struct {
 	Method int // compression method: 0 = store, 1..5 = compress
 
 	// UnpackVersion is the compression algorithm version this member's header
-	// declares: 0 is RAR 5.0, and it is the only value this library can
-	// decode. RAR 7.0 raised it, and nothing outside a file header
+	// declares. For RAR5, 0 is RAR 5.0, and it is the only value this library
+	// can decode. RAR 7.0 raised it, and nothing outside a file header
 	// distinguishes the two formats -- same signature, same block framing,
 	// same vint encoding -- so this field is the only place the difference is
-	// visible. Reader.dispatch refuses anything else; see unpackVersionRAR5.
+	// visible. admitFormat refuses anything else; see unpackVersionRAR5. For
+	// RAR 1.5-4.x it is the header's UNP_VER byte as written (20 on a stored
+	// member from rar 6.x, 29 on a compressed one), and is not checked.
 	UnpackVersion int
 
 	// DictSize is the dictionary size, in bytes, this member's header
@@ -417,6 +424,9 @@ func parseBlockHeaderFields(buf []byte, n int) (*blockHeader, error) {
 
 // parseArchiveHeader decodes the main archive header details.
 func parseArchiveHeader(h *blockHeader) (*archiveHeader, error) {
+	if h.rar4 {
+		return parseArchiveHeader4(h)
+	}
 	if h.Type != headerTypeArchive {
 		return nil, ErrBadBlockHeader
 	}
@@ -730,13 +740,19 @@ func parseExtraRecords(fh *FileHeader, extra []extraRecord) error {
 
 // parseFileHeader decodes the file header details from a block header.
 //
-// It is the ONLY function in this package permitted to return a non-nil
-// *FileHeader alongside a non-nil error. Every failure up through the name
-// field means there is no identity to report, so those paths return a nil
-// header like any other parse failure. Three later failures return the
-// header they built anyway, because by then the member's name and sizes are
-// decoded and the caller (Reader.dispatch) can refuse the member BY NAME
-// instead of dropping it from the listing with no trace:
+// It and parseFileHeader4, which it hands RAR 1.5-4.x headers to, are the
+// only functions in this package that return a *FileHeader and an error --
+// `git grep -n 'func .*) (\*FileHeader, error)' -- ':!*_test.go'` finds those
+// two -- and they are the only ones permitted to return a non-nil header
+// alongside a non-nil error; parseFileHeader4 states its own late failures.
+// The rest of this comment describes the RAR5 path.
+//
+// Every failure up through the name field means there is no identity to
+// report, so those paths return a nil header like any other parse failure.
+// Three later failures return the header they built anyway, because by then
+// the member's name and sizes are decoded and the caller (Reader.dispatch)
+// can refuse the member BY NAME instead of dropping it from the listing with
+// no trace:
 //
 //   - ErrUnpSizeUnknown, from the declared-size check
 //   - ErrCorruptFileHeader, from a negative decoded UnpackedSize
@@ -761,6 +777,9 @@ func parseExtraRecords(fh *FileHeader, extra []extraRecord) error {
 // that never parsed. It had no callers outside tests once the traversal
 // started using this form directly, and it is gone.
 func parseFileHeader(h *blockHeader) (*FileHeader, error) {
+	if h.rar4 {
+		return parseFileHeader4(h)
+	}
 	if h.Type != headerTypeFile && h.Type != headerTypeService {
 		return nil, ErrBadBlockHeader
 	}
