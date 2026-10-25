@@ -249,6 +249,16 @@ func (r *Reader) nextVolumePayload(e *Entry) (io.Reader, error) {
 				"%d-byte dictionary, first block declared %d",
 				ErrCorruptFileHeader, e.Header.Name, fh.DictSize, e.Header.DictSize)
 		}
+		// And the total: every part declares the whole file's unpacked size,
+		// and the entry's byte budget is the first part's. A continuation
+		// declaring another is the archive contradicting itself, which the
+		// final CRC32 does not see, since it covers the bytes and not the
+		// header.
+		if fh.UnpackedSize != e.Header.UnpackedSize {
+			return nil, fmt.Errorf("%w: file %q: continuation declares "+
+				"unpacked size %d, first block declared %d",
+				ErrCorruptFileHeader, e.Header.Name, fh.UnpackedSize, e.Header.UnpackedSize)
+		}
 		// Captures the whole-file CRC32, LastBlock and UseMac, all of which
 		// RAR records on the LAST part rather than the first.
 		e.advanceVolume(fh)

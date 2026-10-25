@@ -355,7 +355,7 @@ func TestContinuationChangingDictSizeIsRefused(t *testing.T) {
 	if !errors.Is(err, ErrCorruptFileHeader) {
 		t.Fatalf("ReadAll = %v, want ErrCorruptFileHeader", err)
 	}
-	// Four identity checks share the sentinel; the message says which fired.
+	// Five identity checks share the sentinel; the message says which fired.
 	if !strings.Contains(err.Error(), "dictionary") {
 		t.Fatalf("refusal did not come from the dictionary check: %v", err)
 	}

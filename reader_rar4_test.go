@@ -323,6 +323,43 @@ func TestRAR4_ContinuationMustMatch(t *testing.T) {
 	}
 }
 
+// TestContinuationChangingUnpackedSizeIsRefused pins that every part of a
+// split member must declare the same total, in both formats. rar writes the
+// same UnpackedSize in every part of every split member in testdata. A part
+// that disagrees is the archive contradicting itself, and the entry, which
+// sizes itself from the first part, would otherwise complete without noticing.
+func TestContinuationChangingUnpackedSizeIsRefused(t *testing.T) {
+	part4 := func(flags uint16, unp uint32, content string) []byte {
+		return append(rar4File(rar4FileSpec{
+			Name: []byte("a.bin"), Flags: rar4LongBlock | 0x20 | flags, PackLow: uint32(len(content)), UnpLow: unp,
+			HostOS: 3, CRC: crc32.ChecksumIEEE([]byte("abcd")), UnpVer: 20, Method: 0x30, Attr: 0x81a4,
+		}), content...)
+	}
+	part5 := func(unp int64, content string, notFirst bool) []byte {
+		return rar5Archive(t, false, rar5Member(t, memberSpec{
+			name: "a.bin", content: content, unpackedSz: new(unp), packedSz: new(int64(len(content))),
+			notFirst: notFirst, notLast: !notFirst, withCRC: notFirst, crcOf: "abcd",
+		}))
+	}
+	for _, tc := range []struct {
+		format string
+		v1, v2 []byte
+	}{
+		{"RAR4", rar4Volume(rar4MainVolume, part4(rar4FileSplitAfter, 4, "ab")),
+			rar4Volume(rar4MainVolume, part4(rar4FileSplitBefore, 8, "cd"))},
+		{"RAR5", part5(4, "ab", false), part5(8, "cd", true)},
+	} {
+		e, err := NewReader(volumesOf(tc.v1, tc.v2)).NextEntry()
+		if err != nil {
+			t.Fatalf("%s: NextEntry: %v", tc.format, err)
+		}
+		_, readErr := io.ReadAll(e)
+		if !errors.Is(readErr, ErrCorruptFileHeader) || !strings.Contains(readErr.Error(), "unpacked size") {
+			t.Errorf("%s: Read = %v; want ErrCorruptFileHeader from the unpacked-size check", tc.format, readErr)
+		}
+	}
+}
+
 func TestRAR4_TruncatedVolumesAreNotACleanEnd(t *testing.T) {
 	arc, err := os.ReadFile("testdata/rar4_store.rar")
 	if err != nil {
