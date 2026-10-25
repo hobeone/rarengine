@@ -218,6 +218,51 @@ func TestRAR4_SymlinkWithBadCRCIsRefusedByName(t *testing.T) {
 	}
 }
 
+// closeAtOffset serves src until offset at, then closes the Reader from inside
+// the Read that reaches it and reports what a closed *os.File reports -- a
+// Close landing at a chosen byte, as closeOnScanVolume lands one at a chosen
+// call. Single-goroutine, so it needs no synchronisation.
+type closeAtOffset struct {
+	r   *Reader
+	src *bytes.Reader
+	at  int
+}
+
+func (v *closeAtOffset) Read(p []byte) (int, error) {
+	pos := int(v.src.Size()) - v.src.Len()
+	if pos >= v.at {
+		_ = v.r.Close()
+		return 0, os.ErrClosed
+	}
+	return v.src.Read(p[:min(len(p), v.at-pos)])
+}
+
+func (v *closeAtOffset) Close() error { return nil }
+
+// TestRAR4_CloseDuringSymlinkTargetReadIsCancellation pins that a Close
+// landing while dispatch reads a RAR4 symlink's target is reported as the
+// caller's cancellation, as a Close landing anywhere else in the scan is, and
+// not as a member truncated by the archive.
+func TestRAR4_CloseDuringSymlinkTargetReadIsCancellation(t *testing.T) {
+	link := rar4File(rar4FileSpec{
+		Name: []byte("lnk"), Flags: rar4LongBlock | 0x20, PackLow: 4, UnpLow: 4,
+		HostOS: 3, CRC: crc32.ChecksumIEEE([]byte("targ")), UnpVer: 20, Method: 0x30, Attr: 0xa1ff,
+	})
+	arc := rar4Archive(append(link, "targ"...))
+	vol := &closeAtOffset{src: bytes.NewReader(arc), at: len(arc) - len(rar4EndHeader()) - len("targ")}
+	r := NewReader(oneVolume(vol))
+	vol.r = r
+
+	e, err := r.NextEntry()
+	if !errors.Is(err, ErrReaderClosed) || errors.Is(err, ErrTruncatedFile) {
+		var verdict error
+		if e != nil {
+			_, verdict = e.Read(nil)
+		}
+		t.Fatalf("NextEntry = %v (entry verdict %v); want ErrReaderClosed, not a truncated member", err, verdict)
+	}
+}
+
 func TestRAR4_HeaderEncryptedIsUnsupportedNotCorrupt(t *testing.T) {
 	_, err := NewReader(fileVolumesOf(t, "testdata/rar4_hdrenc.rar")).NextEntry()
 	if !errors.Is(err, ErrUnsupportedFormat) || errors.Is(err, ErrCorruptArchiveHeader) {

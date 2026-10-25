@@ -682,9 +682,16 @@ func (r *Reader) dispatch(h *blockHeader) (*Entry, error) {
 	// becomes a link only once that payload is read, here. admitFormat has
 	// already refused it if encrypted or compressed. A refusal does not mark
 	// the window incomplete, for the reason above: a link contributes nothing
-	// to solid history.
+	// to solid history. This is the one read of the caller's stream dispatch
+	// makes before returning (the splicer built below is read later, through
+	// the Entry), so a Close landing during it is returned to NextEntry, whose
+	// exit translation reports it as ErrReaderClosed, rather than becoming
+	// this member's verdict.
 	if h.rar4 && isSymlink4(fh) {
 		if err := readLinkTarget4(fh, r.vol.payload()); err != nil {
+			if r.isClosed() {
+				return nil, err
+			}
 			return terminalEntry(fh, err, done), nil
 		}
 	}
