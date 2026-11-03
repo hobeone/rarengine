@@ -1,10 +1,8 @@
 package rarengine
 
 import (
-	"encoding/binary"
 	"errors"
 	"fmt"
-	"hash/crc32"
 	"io"
 	"math"
 	"path/filepath"
@@ -18,15 +16,18 @@ import (
 // and reporting a clean io.EOF after no members -- which a caller looping until
 // io.EOF reads as "the set extracted, and held nothing".
 //
-// Two pieces of evidence reach the verdict. S1 is a RAR5 first-received
-// archive header declaring a volume number above 0; it is the only signal for
-// a RAR5 middle volume that opens on a member boundary. S2 is a first file
+// Three pieces of evidence reach the verdict. S1 is a RAR5 first-received
+// archive header declaring a volume number above 0; it is the only RAR5 signal
+// for a middle volume that opens on a member boundary. S2 is a first file
 // block that continues a member from an earlier volume, read from the block's
-// own flags, so it covers RAR4 and a header that fails to parse.
+// own flags, so it covers RAR4 and a header that fails to parse. S3 is the
+// first numbered RAR 1.5-4.x end header the main scan reads, the only RAR4
+// signal for a later volume that opens on a member boundary.
 
 const (
 	s1Evidence = "the stream starts at volume"
 	s2Evidence = "its first file block continues a file from an earlier volume"
+	s3Evidence = "its end headers number it from volume"
 )
 
 // testdataVolumes feeds the named testdata fixtures in order.
@@ -322,38 +323,6 @@ func TestLaterVolumeOnAMemberBoundaryIsRefused(t *testing.T) {
 	assertRefusedBeforeAnyMember(t, volumesOf(stream), s1Evidence+" 2")
 }
 
-const s3Evidence = "its end headers number it from volume"
-
-// rar4NumberedVolume is one RAR 1.5-4.x volume of a set, as RAR 3.0 and later
-// write it: blocks between a main header flagged as a volume and an end header
-// declaring volNum. withCRC also writes the end header's data CRC ahead of the
-// number, which moves where the number sits.
-func rar4NumberedVolume(volNum uint16, withCRC bool, blocks ...[]byte) []byte {
-	endFlags := uint16(0x4000 | rar4EndVolNumber)
-	var body []byte
-	if withCRC {
-		endFlags |= rar4EndDataCRC
-		body = append(body, 0xde, 0xad, 0xbe, 0xef)
-	}
-	body = binary.LittleEndian.AppendUint16(body, volNum)
-	out := append(append([]byte{}, rar4Sig...), rar4MainHeader(rar4MainVolume)...)
-	for _, b := range blocks {
-		out = append(out, b...)
-	}
-	return append(out, rar4Block(0x7b, endFlags, body)...)
-}
-
-// rar4StoredPart is a stored member, or one part of a split one: content is
-// this part's payload and whole is the member's full content, whose CRC and
-// size every part declares.
-func rar4StoredPart(name string, splitFlags uint16, content, whole string) []byte {
-	return append(rar4File(rar4FileSpec{
-		Name: []byte(name), Flags: rar4LongBlock | 0x20 | splitFlags,
-		PackLow: uint32(len(content)), UnpLow: uint32(len(whole)),
-		HostOS: 3, CRC: crc32.ChecksumIEEE([]byte(whole)), UnpVer: 20, Method: 0x30, Attr: 0x81a4,
-	}), content...)
-}
-
 // A RAR 1.5-4.x later volume that opens on a member boundary has no
 // continuation and no volume number in its main header, so nothing refuses it
 // before its members are read. Its end header does number it, and that is
@@ -468,7 +437,7 @@ func TestFirstVolumeHeadersAreNotRefused(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			r := NewReader(volumesOf(append(append([]byte{}, tc.header...), member...)))
+			r := NewReader(volumesOf(slices.Concat(tc.header, member)))
 			defer r.Close() //nolint:errcheck
 			names, err := traverse(t, r)
 			if len(names) != 1 || names[0] != "a.bin" || !errors.Is(err, io.EOF) {

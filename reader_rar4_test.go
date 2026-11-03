@@ -47,11 +47,7 @@ func readAllRAR4(t *testing.T, r *Reader) ([]rar4Member, error) {
 
 // storedMember4 is a complete stored member: header and payload.
 func storedMember4(name string, flags uint16, content string) []byte {
-	n := uint32(len(content))
-	return append(rar4File(rar4FileSpec{
-		Name: []byte(name), Flags: rar4LongBlock | 0x20 | flags, PackLow: n, UnpLow: n,
-		HostOS: 3, CRC: crc32.ChecksumIEEE([]byte(content)), UnpVer: 20, Method: 0x30, Attr: 0x81a4,
-	}), content...)
+	return rar4StoredPart(name, flags, content, content)
 }
 
 func TestRAR4_StoredAtVersion20Decodes(t *testing.T) {

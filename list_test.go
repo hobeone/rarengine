@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"errors"
 	"io"
-	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -31,19 +30,7 @@ func listNames(t *testing.T, data []byte) []string {
 // would pass against them -- these are built so that it cannot.
 func TestListVolumeReportsWhatALaterVolumeStarts(t *testing.T) {
 	cont := []byte("tail of a member begun earlier")
-	rar4Cont := rar4File(rar4FileSpec{
-		Name:    []byte("old.bin"),
-		Flags:   0x8000 | rar4FileSplitBefore,
-		PackLow: uint32(len(cont)), UnpLow: uint32(len(cont)),
-		UnpVer: 29, Method: 0x30,
-	})
 	newContent := []byte("starts here")
-	rar4New := rar4File(rar4FileSpec{
-		Name:    []byte("new.bin"),
-		Flags:   0x8000,
-		PackLow: uint32(len(newContent)), UnpLow: uint32(len(newContent)),
-		UnpVer: 29, Method: 0x30,
-	})
 
 	cases := []struct {
 		name   string
@@ -56,7 +43,9 @@ func TestListVolumeReportsWhatALaterVolumeStarts(t *testing.T) {
 			rar5Member(t, memberSpec{name: "new.bin", content: string(newContent), withCRC: true}),
 		)...)},
 		// RAR4 has no S1: S2 alone would refuse it.
-		{"rar4", rar4Volume(rar4MainVolume, rar4Cont, cont, rar4New, newContent)},
+		{"rar4", rar4Volume(rar4MainVolume,
+			rar4StoredPart("old.bin", rar4FileSplitBefore, string(cont), string(cont)),
+			rar4StoredPart("new.bin", 0, string(newContent), string(newContent)))},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -182,7 +171,7 @@ func TestListVolumeYieldsTraversalErrors(t *testing.T) {
 func TestListingReservesNoWindow(t *testing.T) {
 	for _, fixture := range []string{"rar5_dict_64m.rar", "rar5_solid_multi_qo.part1.rar"} {
 		t.Run(fixture, func(t *testing.T) {
-			r := NewReader(fileVolumesOf(t, filepath.Join("testdata", fixture)))
+			r := NewReader(testdataVolumes(t, fixture))
 			defer r.Close() //nolint:errcheck
 			r.listing = true
 			var names []string
