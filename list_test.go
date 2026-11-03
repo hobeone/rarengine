@@ -163,6 +163,21 @@ func TestListVolumeYieldsTraversalErrors(t *testing.T) {
 	}
 }
 
+// A nil reader is reported as a listing error, as a nil volume stream is by
+// a traversal, rather than dereferenced.
+func TestListVolumeReportsANilReader(t *testing.T) {
+	var errs []error
+	for fh, err := range ListVolume(nil) {
+		if fh != nil {
+			t.Fatalf("yielded header %q from a nil reader", fh.Name)
+		}
+		errs = append(errs, err)
+	}
+	if len(errs) != 1 || errs[0] == nil {
+		t.Fatalf("ListVolume(nil) yielded %v, want one error", errs)
+	}
+}
+
 // Listing decodes nothing, so it reserves no window: a member declaring a
 // 64 MiB dictionary, and a solid volume whose members extraction would have
 // to decode to abandon, both leave the window at its minimum with no backing.

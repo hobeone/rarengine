@@ -35,7 +35,13 @@ var errListedOnly = errors.New("rarengine: member listed, not extracted")
 func ListVolume(r io.Reader) iter.Seq2[*FileHeader, error] {
 	return func(yield func(*FileHeader, error) bool) {
 		volumes := make(chan io.ReadCloser, 1)
-		volumes <- io.NopCloser(r)
+		// A nil r goes on the channel as nil, which nextVolume reports;
+		// io.NopCloser(nil) is a non-nil interface it would dereference.
+		var rc io.ReadCloser
+		if r != nil {
+			rc = io.NopCloser(r)
+		}
+		volumes <- rc
 		close(volumes)
 		rd := NewReader(volumes)
 		rd.listing = true
