@@ -170,6 +170,33 @@ type Reader struct {
 	rar4       bool
 	formatSeen bool
 
+	// volIndex counts the streams received from the volumes channel in this
+	// traversal, damaged ones included; 1 means the first volume is the one
+	// being read. fileSeen says a file block has reached dispatch. Together
+	// they are the evidence for ErrNotFirstVolume: see startsMidSet.
+	volIndex int
+	fileSeen bool
+
+	// lateNotFirst holds ErrNotFirstVolume found from the first numbered
+	// RAR 1.5-4.x end header, which endNumberSeen records was read. The
+	// members before it were already delivered, so it is reported in io.EOF's
+	// place, after damaged.
+	lateNotFirst  error
+	endNumberSeen bool
+	// memberFailed records that a member finished without a clean verified
+	// verdict: it failed, its checksum could not be checked, or it was
+	// abandoned unread in a non-solid archive (Entry.Close, and a solid
+	// archive's finishActive, drain and verify one). Past the first stream it withholds
+	// the end-header evidence: a missing or misordered volume inside a
+	// spliced member fails that member, and is then indistinguishable from a
+	// stream that started late.
+	memberFailed bool
+
+	// listing makes the traversal report each member's header without
+	// admitting it for extraction, and suppresses ErrNotFirstVolume.
+	// ListVolume sets it on a Reader of its own.
+	listing bool
+
 	// fatal is sticky once set: NextEntry checks it first and, if non-nil,
 	// returns it again without touching r.vol. It is set by NextEntry itself
 	// -- never by dispatch or any other helper -- for exactly the errors
@@ -272,6 +299,8 @@ func (r *Reader) Reset(volumes <-chan io.ReadCloser) {
 	r.resolved, r.hasResolved = "", false
 	r.solid, r.solidSeen = false, false
 	r.rar4, r.formatSeen = false, false
+	r.volIndex, r.fileSeen = 0, false
+	r.lateNotFirst, r.endNumberSeen, r.memberFailed = nil, false, false
 	r.capLatched = false
 	r.fatal = nil
 	// BeginFile(false) is the window's one entrance for discarding history: it
@@ -301,6 +330,31 @@ func (r *Reader) SetPasswords(candidates []string) { r.passwords = candidates }
 // this Reader, which is a statement about the caller rather than the archive.
 // Every per-member outcome is delivered by the Entry, including refusals,
 // which arrive as an Entry that is already terminal.
+//
+// A stream that does not start at the first volume of its set is refused with
+// ErrNotFirstVolume on any of three pieces of evidence:
+//   - a RAR5 first volume whose archive header declares a later volume number;
+//   - a first file block that continues a member from an earlier volume, which
+//     stands down once a cut has been recorded, so a damaged first volume
+//     reports its damage;
+//   - the first numbered RAR 1.5-4.x end header, read from the k-th stream,
+//     declaring a volume number above k-1. Past the first stream it counts
+//     only if every member before it was read to a verified end, since a
+//     volume missing or misordered inside a spliced member would raise the
+//     number too.
+//     Members before it are delivered first, and the refusal is reported in
+//     io.EOF's place.
+//
+// A RAR 1.5-4.x later volume that opens on a member boundary, written by
+// RAR 2.x (which numbers no volume), carries none of them and ends with
+// io.EOF, as does one whose first numbered end header, past the first stream,
+// follows a member that failed or was abandoned unread in a non-solid archive,
+// and one whose every volume ends inside a member continued into the next
+// (that member reports the missing volume). A first volume cut cleanly on a
+// block boundary before its first file header makes the next volume's
+// continuation report ErrNotFirstVolume rather than truncation.
+//
+// ListVolume lists a later volume without the refusal.
 func (r *Reader) NextEntry() (*Entry, error) {
 	// Checked before r.fatal and before any read, so a sequential
 	// Close-then-NextEntry performs no read on the caller's stream at all.
@@ -495,6 +549,9 @@ func (r *Reader) nextEntry() (*Entry, error) {
 						if r.damaged != nil {
 							return nil, r.damaged
 						}
+						if r.lateNotFirst != nil {
+							return nil, r.lateNotFirst
+						}
 						return nil, io.EOF
 					}
 					return nil, err
@@ -540,14 +597,21 @@ func (r *Reader) finishActive() {
 		return
 	}
 	if r.solid {
-		r.entry = nil
+		// Cleared after the drain: the splice it runs is still mid-member,
+		// which is what handleNonFileBlock reads r.entry for.
 		_ = e.Close()
+		r.entry = nil
 	} else {
 		r.severActive()
 	}
 	if e.short() || (e.done != nil && !errors.Is(e.done, io.EOF) &&
 		!errors.Is(e.done, ErrChecksumUnsupported)) {
 		r.win.MarkIncomplete()
+	}
+	// Wider than the window's test: an unverifiable checksum leaves the
+	// window sound but does not show that no volume was missing.
+	if e.short() || !errors.Is(e.done, io.EOF) {
+		r.memberFailed = true
 	}
 }
 
@@ -605,34 +669,49 @@ func (r *Reader) dispatch(h *blockHeader) (*Entry, error) {
 	// read, rather than leaving it to be re-derived from the mutual
 	// exclusivity of six returns.
 	done := r.doneChan()
+	// Decided from the block's flags, before parsing: a leading continuation
+	// whose header then failed to parse would otherwise take the skip below
+	// and pass unnoticed. A damaged first volume is reported as damage.
+	firstFile := !r.fileSeen
+	r.fileSeen = true
+	if firstFile && r.damaged == nil && h.continuesPrevious() {
+		if err := r.startsMidSet("its first file block continues a file from an earlier volume"); err != nil {
+			return nil, err
+		}
+	}
 	fh, err := parseFileHeader(h)
 	if err != nil {
 		// A member whose identity survived the failure is refused by NAME,
 		// so the caller learns the archive held something it could not
-		// read. One that failed before its name was decoded has nothing to
-		// report and is skipped as before. Either way volume.next() drops
-		// the block's declared payload on the way to the next header.
+		// read. One that failed before its name was decoded, or a
+		// continuation, has nothing to report and is skipped. Either way
+		// volume.next() drops the block's declared payload on the way to
+		// the next header.
 		if fh != nil && fh.FirstBlock {
 			r.win.MarkIncomplete()
 			return terminalEntry(fh, err, done), nil
 		}
 		// Damage is recorded from what happened to the file, never from
-		// what the caller is told about it. A member skipped here is one
-		// whose name was never decoded, so nothing can be reported -- but
-		// it still contributed no bytes, and a solid successor's
-		// back-references assume otherwise. Marking only the named path
-		// left exactly the unreportable failures decoding a successor
-		// against history nobody wrote.
-		if fh == nil {
-			r.win.MarkIncomplete()
-		}
+		// what the caller is told about it. A block skipped here -- one
+		// whose name was never decoded, or a continuation -- reports
+		// nothing, but its member contributed no bytes, and a solid
+		// successor's back-references assume otherwise.
+		r.win.MarkIncomplete()
 		return nil, nil
 	}
-	// A continuation block belongs to a member already announced. Reaching
-	// one here means that member was abandoned, so it is skipped like any
-	// other unclaimed block.
+	// A continuation block reaching here is skipped like any other unclaimed
+	// block. After the first file block it belongs to a member already
+	// announced and abandoned. As the first file block it gets here only when
+	// startsMidSet let it through: after recorded damage, or when listing.
+	// Either way nothing vouches that its bytes reached the window.
 	if !fh.FirstBlock {
+		r.win.MarkIncomplete()
 		return nil, nil
+	}
+	// Listing admits nothing: a terminal entry is never r.entry, so nothing
+	// below it, and nothing in finishActive, runs for it.
+	if r.listing {
+		return terminalEntry(fh, errListedOnly, done), nil
 	}
 	// Refused before the bomb ratio and before BeginFile: a member whose
 	// compression algorithm this library does not implement cannot be
@@ -829,6 +908,15 @@ func (r *Reader) handleNonFileBlock(h *blockHeader) error {
 			}
 			return fmt.Errorf("%w: %w", ErrCorruptArchiveHeader, err)
 		}
+		// The splice opens only volume 2 onward, so this cannot fire from it.
+		// A RAR 1.5-4.x header always parses VolumeNumber as -1.
+		if r.volIndex == 1 && ah.MultiVolume && ah.VolumeNumber > 0 {
+			// uint64: VolumeNumber can be MaxInt, and +1 must not wrap.
+			if err := r.startsMidSet(fmt.Sprintf("the stream starts at volume %d",
+				uint64(ah.VolumeNumber)+1)); err != nil {
+				return err
+			}
+		}
 		// The first archive header seen sets the flag; a later one (each
 		// volume repeats its own) must agree. A sticky OR let a second
 		// volume turn solidity on mid-member, so that finishActive would
@@ -856,6 +944,28 @@ func (r *Reader) handleNonFileBlock(h *blockHeader) error {
 		// trailing padding or sector alignment failed its CRC and ended the
 		// archive with ErrBadHeaderCRC after every member had been delivered
 		// intact.
+		//
+		// A RAR 1.5-4.x first volume that opens on a member boundary carries
+		// no earlier evidence that it is a later one, but RAR 3.0 and later
+		// number every volume here. The first numbered end header decides:
+		// volume n read as the volIndex-th stream means the stream started at
+		// volume n-volIndex+1. It is not always the first volume's own: a
+		// member continuing into the next volume is spliced there, and the
+		// end header behind it is never read. Past the first stream the
+		// count also assumes no volume was missing or misordered, which only
+		// a clean verdict on every member before it shows (memberFailed).
+		// So only the main scan judges it, with r.entry nil after
+		// finishActive: an end header the splice reaches mid-member comes
+		// before that member's verdict. Recorded, not returned, since the
+		// members before it were delivered.
+		if h.rar4 && !r.endNumberSeen && r.entry == nil {
+			if n := endVolumeNumber4(h); n >= 0 {
+				r.endNumberSeen = true
+				if start := n - (r.volIndex - 1); start > 0 && (r.volIndex == 1 || !r.memberFailed) {
+					r.lateNotFirst = r.startsMidSet(fmt.Sprintf("its end headers number it from volume %d", start+1))
+				}
+			}
+		}
 		r.closeCurrentVolume()
 
 	default:
@@ -866,6 +976,19 @@ func (r *Reader) handleNonFileBlock(h *blockHeader) error {
 		// content.
 	}
 	return nil
+}
+
+// startsMidSet is the one place ErrNotFirstVolume is made: it returns the
+// error for a stream that evidence says did not start at its set's first
+// volume, or nil while listing, which accepts any volume. Its three callers
+// (`grep -n 'r.startsMidSet(' reader.go`) are where that evidence arrives: the
+// first volume's archive header and its RAR 1.5-4.x end header, both in
+// handleNonFileBlock, and the first file block in dispatch.
+func (r *Reader) startsMidSet(evidence string) error {
+	if r.listing {
+		return nil
+	}
+	return fmt.Errorf("%w: %s", ErrNotFirstVolume, evidence)
 }
 
 // resolvePassword picks the candidate that matches the member's password check
@@ -1387,6 +1510,9 @@ func (r *Reader) nextVolume() error {
 		// Close exists.
 		return ErrReaderClosed
 	}
+	// Counted at the receive, before anything can fail, so a volume that
+	// openNextVolume then skips as damaged still moves the count past 1.
+	r.volIndex++
 	if rc == nil {
 		// A nil element on the channel is the caller's bug, but the library
 		// must report it rather than dereference it: the signature read

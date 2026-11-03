@@ -45,17 +45,25 @@ func rar5Block(payload []byte) []byte {
 }
 
 // rar5ArchiveHeaderFlags returns the signature followed by an archive header
-// carrying flags -- one volume's opening bytes.
-func rar5ArchiveHeaderFlags(flags uint64) []byte {
+// carrying flags, then fields verbatim -- one volume's opening bytes.
+func rar5ArchiveHeaderFlags(flags uint64, fields ...byte) []byte {
 	var p bytes.Buffer
 	p.Write(encodeVint(headerTypeArchive))
 	p.Write(encodeVint(0))
 	p.Write(encodeVint(flags))
+	p.Write(fields)
 
 	var out bytes.Buffer
 	out.Write(rar5Signature)
 	out.Write(rar5Block(p.Bytes()))
 	return out.Bytes()
+}
+
+// rar5VolumeHeader is rar5ArchiveHeaderFlags with arcFlagVolNum set and volNum
+// written after the flags: the opening bytes of volume volNum+1 of a set, as
+// rar writes them for every volume after the first.
+func rar5VolumeHeader(flags, volNum uint64) []byte {
+	return rar5ArchiveHeaderFlags(flags|arcFlagVolNum, encodeVint(volNum)...)
 }
 
 // rar5ArchiveHeader is rar5ArchiveHeaderFlags for a multi-volume set, the

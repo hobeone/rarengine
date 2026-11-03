@@ -149,11 +149,13 @@ func TestTraversalContinuesAfterRefusedExtraRecordMember(t *testing.T) {
 // report.
 func TestRefusedExtraRecordContinuationBlockSkipsSilently(t *testing.T) {
 	stream := rar5Archive(t, false,
+		leadMember(t),
 		memberWithEncVersion(t, "cont.enc", "secret", 1, true),
 		rar5Member(t, memberSpec{name: "after.bin", content: "visible", withCRC: true}),
 	)
 
 	r := NewReader(volumesOf(stream))
+	skipLeadMember(t, r)
 	e, err := r.NextEntry()
 	if err != nil {
 		t.Fatalf("NextEntry error = %v, want the continuation block skipped silently", err)
@@ -433,11 +435,13 @@ func TestSolidMemberAfterRefusedNegativeSizeMemberIsRefused(t *testing.T) {
 // already abandoned and has no identity of its own to report.
 func TestUnpSizeUnknownContinuationBlockSkipsSilently(t *testing.T) {
 	stream := rar5Archive(t, false,
+		leadMember(t),
 		memberWithUnpSizeUnknown(t, "cont.bin", "secret", true),
 		rar5Member(t, memberSpec{name: "after.bin", content: "visible", withCRC: true}),
 	)
 
 	r := NewReader(volumesOf(stream))
+	skipLeadMember(t, r)
 	e, err := r.NextEntry()
 	if err != nil {
 		t.Fatalf("NextEntry error = %v, want the continuation block skipped silently", err)
@@ -451,11 +455,13 @@ func TestUnpSizeUnknownContinuationBlockSkipsSilently(t *testing.T) {
 // (e) Same as above, for a continuation block with a negative declared size.
 func TestNegativeSizeContinuationBlockSkipsSilently(t *testing.T) {
 	stream := rar5Archive(t, false,
+		leadMember(t),
 		memberWithNegativeSize(t, "cont.bin", "secret", true),
 		rar5Member(t, memberSpec{name: "after.bin", content: "visible", withCRC: true}),
 	)
 
 	r := NewReader(volumesOf(stream))
+	skipLeadMember(t, r)
 	e, err := r.NextEntry()
 	if err != nil {
 		t.Fatalf("NextEntry error = %v, want the continuation block skipped silently", err)
@@ -464,6 +470,26 @@ func TestNegativeSizeContinuationBlockSkipsSilently(t *testing.T) {
 		t.Fatalf("NextEntry returned %+v, want after.bin (continuation block must not surface)", e)
 	}
 	_ = e.Close()
+}
+
+// leadMember is a complete member placed ahead of a continuation block, so the
+// continuation follows an announced member. A stream whose first file block is
+// a continuation starts mid-set and is refused with ErrNotFirstVolume instead.
+func leadMember(t testing.TB) []byte {
+	t.Helper()
+	return rar5Member(t, memberSpec{name: "lead.bin", content: "lead", withCRC: true})
+}
+
+// skipLeadMember consumes and closes the entry leadMember produced.
+func skipLeadMember(t testing.TB, r *Reader) {
+	t.Helper()
+	e, err := r.NextEntry()
+	if err != nil || e.Header.Name != "lead.bin" {
+		t.Fatalf("first NextEntry = %+v, %v, want lead.bin", e, err)
+	}
+	if err := e.Close(); err != nil {
+		t.Fatalf("lead.bin Close = %v, want nil", err)
+	}
 }
 
 // TestBombRatioSurvivesAnAbsurdPackedSize pins that the expansion guard

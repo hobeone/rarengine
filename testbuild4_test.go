@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"hash/crc32"
 	"os"
+	"slices"
 	"testing"
 )
 
@@ -86,6 +87,38 @@ func rar4Volume(mainFlags uint16, blocks ...[]byte) []byte {
 		out = append(out, b...)
 	}
 	return append(out, rar4EndHeader()...)
+}
+
+// rar4NumberedVolume is one RAR 1.5-4.x volume of a set, as RAR 3.0 and later
+// write it: blocks between a main header flagged as a volume and an end header
+// declaring volNum. withCRC also writes the end header's data CRC ahead of the
+// number, which moves where the number sits.
+func rar4NumberedVolume(volNum uint16, withCRC bool, blocks ...[]byte) []byte {
+	return rar4NumberedVolumeFlags(rar4MainVolume, volNum, withCRC, blocks...)
+}
+
+// rar4NumberedVolumeFlags is rar4NumberedVolume with the main header's flags
+// given, so a numbered volume can also be solid.
+func rar4NumberedVolumeFlags(mainFlags, volNum uint16, withCRC bool, blocks ...[]byte) []byte {
+	endFlags := uint16(0x4000 | rar4EndVolNumber)
+	var body []byte
+	if withCRC {
+		endFlags |= rar4EndDataCRC
+		body = append(body, 0xde, 0xad, 0xbe, 0xef)
+	}
+	body = binary.LittleEndian.AppendUint16(body, volNum)
+	return slices.Concat(rar4Sig, rar4MainHeader(mainFlags), slices.Concat(blocks...), rar4Block(0x7b, endFlags, body))
+}
+
+// rar4StoredPart is a stored member, or one part of a split one: content is
+// this part's payload and whole is the member's full content, whose CRC and
+// size every part declares.
+func rar4StoredPart(name string, splitFlags uint16, content, whole string) []byte {
+	return append(rar4File(rar4FileSpec{
+		Name: []byte(name), Flags: rar4LongBlock | 0x20 | splitFlags,
+		PackLow: uint32(len(content)), UnpLow: uint32(len(whole)),
+		HostOS: 3, CRC: crc32.ChecksumIEEE([]byte(whole)), UnpVer: 20, Method: 0x30, Attr: 0x81a4,
+	}), content...)
 }
 
 // TestRAR4BuilderMatchesRealHeader pins that the RAR4 builder writes what rar
