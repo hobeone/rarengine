@@ -79,9 +79,9 @@ again to reach the members behind it.
 
 Feed the set from its first volume. A stream that starts at a later volume
 ends with `ErrNotFirstVolume`, not `io.EOF`, so a misnamed middle volume
-cannot pass for an empty or complete archive. One shape is not detected: a
-RAR 2.x later volume that begins exactly on a member boundary (see
-`NextEntry`'s doc). To ask what a single volume starts,
+cannot pass for an empty or complete archive. `NextEntry`'s doc lists the
+shapes that are not detected, such as a RAR 2.x later volume that begins
+exactly on a member boundary. To ask what a single volume starts,
 wherever it sits in its set, range over `ListVolume` instead:
 
 ```go
