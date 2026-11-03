@@ -353,6 +353,44 @@ func TestRAR4NumberedSetFromTheStartEndsCleanly(t *testing.T) {
 	}
 }
 
+// Only the first numbered end header is judged. Here volume 0's decides, and
+// the later one, read after volume 2 of the set went missing on a member
+// boundary, is not evidence of a late start.
+func TestRAR4OnlyTheFirstNumberedEndHeaderIsJudged(t *testing.T) {
+	v1 := rar4NumberedVolume(0, true, rar4StoredPart("a.bin", 0, "ab", "ab"))
+	v3 := rar4NumberedVolume(2, true, rar4StoredPart("b.bin", 0, "cd", "cd"))
+	names, err := traverse(t, NewReader(volumesOf(v1, v3)))
+	if !slices.Equal(names, []string{"a.bin", "b.bin"}) || !errors.Is(err, io.EOF) {
+		t.Fatalf("traversal = %v, %v; want [a.bin b.bin] then io.EOF", names, err)
+	}
+}
+
+// endVolumeNumber4 reads untrusted bytes: a header too short for the number
+// its flags declare reports none rather than reading past its payload.
+func TestEndVolumeNumber4ShortPayload(t *testing.T) {
+	cases := []struct {
+		name    string
+		flags   uint16
+		payload []byte
+		want    int
+	}{
+		{"no number flag", 0, []byte{1, 0}, -1},
+		{"number, empty", rar4EndVolNumber, nil, -1},
+		{"number, 1 byte", rar4EndVolNumber, []byte{1}, -1},
+		{"number, whole", rar4EndVolNumber, []byte{3, 0}, 3},
+		{"CRC and number, 4 bytes", rar4EndVolNumber | rar4EndDataCRC, []byte{1, 2, 3, 4}, -1},
+		{"CRC and number, 5 bytes", rar4EndVolNumber | rar4EndDataCRC, []byte{1, 2, 3, 4, 5}, -1},
+		{"CRC and number, whole", rar4EndVolNumber | rar4EndDataCRC, []byte{1, 2, 3, 4, 7, 0}, 7},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := endVolumeNumber4(&blockHeader{Flags: uint64(tc.flags), Payload: tc.payload, rar4: true}); got != tc.want {
+				t.Fatalf("endVolumeNumber4 = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
 // When the first volume's last member continues into the next volume, the
 // splice opens that volume without reading the end header behind the member.
 // The next volume's end header is then the first numbered one: volume 3 read
@@ -412,6 +450,58 @@ func TestRAR4EndHeaderReachedMidMemberIsNotEvidence(t *testing.T) {
 	verdicts, err := drain(r)
 	if len(verdicts) != 1 || verdicts[0] != nil || !errors.Is(err, io.EOF) {
 		t.Fatalf("traversal = verdicts %v, %v; want a.bin clean then io.EOF", verdicts, err)
+	}
+}
+
+// The same holds when the splice runs inside finishActive: in a solid archive
+// a member the caller moves past unread is drained there, and the end header
+// that drain reaches is still mid-member.
+func TestRAR4EndHeaderReachedBySolidDrainIsNotEvidence(t *testing.T) {
+	const solidVolume = rar4MainVolume | rar4MainSolid
+	v1 := rar4NumberedVolumeFlags(solidVolume, 0, true, rar4StoredPart("a.bin", rar4FileSplitAfter, "ab", "abcd"))
+	empty := rar4NumberedVolumeFlags(solidVolume, 5, true)
+	v2 := rar4NumberedVolumeFlags(solidVolume, 1, true, rar4StoredPart("a.bin", rar4FileSplitBefore, "cd", "abcd"))
+	r := NewReader(volumesOf(v1, empty, v2))
+	defer r.Close() //nolint:errcheck
+	e, err := r.NextEntry()
+	if err != nil {
+		t.Fatalf("NextEntry: %v", err)
+	}
+	if _, err := r.NextEntry(); !errors.Is(err, io.EOF) {
+		t.Fatalf("after leaving a.bin unread, NextEntry = %v, want io.EOF", err)
+	}
+	if verdict := e.Close(); verdict != nil {
+		t.Fatalf("a.bin verdict = %v, want the drain to verify it", verdict)
+	}
+}
+
+// After a damaged first volume the leading continuation is skipped rather than
+// refused, and its member never reached the window. A solid member after it
+// is refused, not decoded against history nobody wrote: both when the
+// continuation parses and when its header fails after its name.
+// RAR5 only: a RAR 1.5-4.x member is stored and never consults the window.
+func TestSkippedContinuationAfterDamageBreaksTheSolidStream(t *testing.T) {
+	head := rar5Member(t, memberSpec{name: "a.bin", content: "ab", notLast: true})
+	cut := slices.Concat(rar5SolidArchiveHeader(), head[:len(head)/2])
+	cases := []struct {
+		name string
+		cont []byte
+	}{
+		{"continuation parses", rar5Member(t, memberSpec{name: "a.bin", content: "cd", notFirst: true})},
+		{"continuation fails to parse", memberWithEncVersion(t, "a.bin", "cd", 1, true)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			v2 := slices.Concat(rar5VolumeHeader(arcFlagMultiVol|arcFlagSolid, 1), tc.cont,
+				rar5Member(t, memberSpec{name: "b.bin", content: "next", solid: true, withCRC: true}),
+				rar5EndHeader())
+			r := NewReader(volumesOf(cut, v2))
+			defer r.Close() //nolint:errcheck
+			verdicts, err := drain(r)
+			if len(verdicts) != 1 || !errors.Is(verdicts[0], ErrSolidStreamBroken) {
+				t.Fatalf("member verdicts = %v (traversal ended with %v), want b.bin refused with ErrSolidStreamBroken", verdicts, err)
+			}
+		})
 	}
 }
 

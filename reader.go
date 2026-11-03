@@ -185,10 +185,11 @@ type Reader struct {
 	endNumberSeen bool
 	// memberFailed records that a member finished without a clean verified
 	// verdict: it failed, its checksum could not be checked, or it was
-	// closed unread. Past the first stream it withholds the end-header
-	// evidence: a missing or misordered volume inside a spliced member fails
-	// that member, and is then indistinguishable from a stream that started
-	// late.
+	// abandoned unread in a non-solid archive (Entry.Close, and a solid
+	// archive's finishActive, drain and verify one). Past the first stream it withholds
+	// the end-header evidence: a missing or misordered volume inside a
+	// spliced member fails that member, and is then indistinguishable from a
+	// stream that started late.
 	memberFailed bool
 
 	// listing makes the traversal report each member's header without
@@ -347,11 +348,11 @@ func (r *Reader) SetPasswords(candidates []string) { r.passwords = candidates }
 // A RAR 1.5-4.x later volume that opens on a member boundary, written by
 // RAR 2.x (which numbers no volume), carries none of them and ends with
 // io.EOF, as does one whose first numbered end header, past the first stream,
-// follows a member that failed or was closed unread, and one whose every
-// volume ends inside a member continued into the next (that member reports
-// the missing volume). A first volume cut
-// cleanly on a block boundary before its first file header makes the next
-// volume's continuation report ErrNotFirstVolume rather than truncation.
+// follows a member that failed or was abandoned unread in a non-solid archive,
+// and one whose every volume ends inside a member continued into the next
+// (that member reports the missing volume). A first volume cut cleanly on a
+// block boundary before its first file header makes the next volume's
+// continuation report ErrNotFirstVolume rather than truncation.
 //
 // ListVolume lists a later volume without the refusal.
 func (r *Reader) NextEntry() (*Entry, error) {
@@ -596,8 +597,10 @@ func (r *Reader) finishActive() {
 		return
 	}
 	if r.solid {
-		r.entry = nil
+		// Cleared after the drain: the splice it runs is still mid-member,
+		// which is what handleNonFileBlock reads r.entry for.
 		_ = e.Close()
+		r.entry = nil
 	} else {
 		r.severActive()
 	}
@@ -680,30 +683,29 @@ func (r *Reader) dispatch(h *blockHeader) (*Entry, error) {
 	if err != nil {
 		// A member whose identity survived the failure is refused by NAME,
 		// so the caller learns the archive held something it could not
-		// read. One that failed before its name was decoded has nothing to
-		// report and is skipped as before. Either way volume.next() drops
-		// the block's declared payload on the way to the next header.
+		// read. One that failed before its name was decoded, or a
+		// continuation, has nothing to report and is skipped. Either way
+		// volume.next() drops the block's declared payload on the way to
+		// the next header.
 		if fh != nil && fh.FirstBlock {
 			r.win.MarkIncomplete()
 			return terminalEntry(fh, err, done), nil
 		}
 		// Damage is recorded from what happened to the file, never from
-		// what the caller is told about it. A member skipped here is one
-		// whose name was never decoded, so nothing can be reported -- but
-		// it still contributed no bytes, and a solid successor's
-		// back-references assume otherwise. Marking only the named path
-		// left exactly the unreportable failures decoding a successor
-		// against history nobody wrote.
-		if fh == nil {
-			r.win.MarkIncomplete()
-		}
+		// what the caller is told about it. A block skipped here -- one
+		// whose name was never decoded, or a continuation -- reports
+		// nothing, but its member contributed no bytes, and a solid
+		// successor's back-references assume otherwise.
+		r.win.MarkIncomplete()
 		return nil, nil
 	}
 	// A continuation block reaching here is skipped like any other unclaimed
 	// block. After the first file block it belongs to a member already
 	// announced and abandoned. As the first file block it gets here only when
 	// startsMidSet let it through: after recorded damage, or when listing.
+	// Either way nothing vouches that its bytes reached the window.
 	if !fh.FirstBlock {
+		r.win.MarkIncomplete()
 		return nil, nil
 	}
 	// Listing admits nothing: a terminal entry is never r.entry, so nothing
