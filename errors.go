@@ -136,6 +136,19 @@ var (
 	// solid flag, or a different format (RAR5 and RAR 1.5-4.x).
 	ErrCorruptArchiveHeader = errors.New("rarengine: archive header is corrupt, traversal ended")
 
+	// ErrNotFirstVolume reports a volume stream that does not start at the
+	// first volume of its set. Without the first volume a set cannot be
+	// extracted, so a stream that starts later must not end with io.EOF: a
+	// caller looping until io.EOF would read that as an archive extracted.
+	//
+	// NextEntry's doc lists the evidence that raises it and the shapes none of
+	// it detects.
+	//
+	// It is archive-level and latched like ErrCorruptArchiveHeader. It wraps
+	// no other sentinel: errors.Is matches neither io.EOF nor ErrNoNextVolume,
+	// which callers treat as a clean end. ListVolume never reports it.
+	ErrNotFirstVolume = errors.New("rarengine: stream does not start at the first volume of its set")
+
 	// ErrUnsupportedEncryptionVersion is returned when the archive's
 	// encryption header (HEAD_CRYPT) declares an encryption version this
 	// library does not implement -- the RAR 5.0 spec fixes the version vint

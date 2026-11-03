@@ -124,6 +124,17 @@ type blockHeader struct {
 	rar4 bool
 }
 
+// continuesPrevious reports that a file block carries the continuation of a
+// file begun in an earlier volume. It reads the block's own flags, so it
+// answers before the file header is parsed and whether or not that parse
+// succeeds. FileHeader.FirstBlock is derived from it in both formats.
+func (h *blockHeader) continuesPrevious() bool {
+	if h.rar4 {
+		return uint16(h.Flags)&rar4FileSplitBefore != 0
+	}
+	return h.Flags&headerFlagDataNotFirst != 0
+}
+
 // extraRecord represents metadata parsed from header extra area.
 type extraRecord struct {
 	Type uint64
@@ -798,7 +809,7 @@ func parseFileHeader(h *blockHeader) (*FileHeader, error) {
 
 	fh := &FileHeader{
 		IsDir:      flags&fileFlagIsDir > 0,
-		FirstBlock: h.Flags&headerFlagDataNotFirst == 0,
+		FirstBlock: !h.continuesPrevious(),
 		LastBlock:  h.Flags&headerFlagDataNotLast == 0,
 		PackedSize: h.DataSize,
 	}

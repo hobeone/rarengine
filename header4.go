@@ -147,6 +147,31 @@ func parseArchiveHeader4(h *blockHeader) (*archiveHeader, error) {
 	}, nil
 }
 
+// End header flags: a data CRC (4 bytes) and then a volume number (2 bytes)
+// follow the base header when their flag is set. RAR 3.0 and later write the
+// volume number on every volume of a set; RAR 2.x writes none.
+const (
+	rar4EndDataCRC   = 0x0002
+	rar4EndVolNumber = 0x0008
+)
+
+// endVolumeNumber4 returns the 0-based volume number a RAR 1.5-4.x end header
+// declares, or -1 when it declares none or is too short to hold it.
+func endVolumeNumber4(h *blockHeader) int {
+	flags := uint16(h.Flags)
+	if flags&rar4EndVolNumber == 0 {
+		return -1
+	}
+	off := 0
+	if flags&rar4EndDataCRC != 0 {
+		off = 4
+	}
+	if len(h.Payload) < off+2 {
+		return -1
+	}
+	return int(binary.LittleEndian.Uint16(h.Payload[off:]))
+}
+
 // parseFileHeader4 decodes a RAR 1.5-4.x file or service header under
 // parseFileHeader's contract: a failure before the name is decoded returns a
 // nil header, and one after returns the header with the error so the member
@@ -191,7 +216,7 @@ func parseFileHeader4(h *blockHeader) (*FileHeader, error) {
 		UnpackedSize:  int64(unpLow) | int64(unpHigh)<<32,
 		IsDir:         flags&rar4FileWindowMask == rar4FileDirectory || (ver < 20 && attr&0x10 != 0),
 		Solid:         flags&rar4FileSolid != 0,
-		FirstBlock:    flags&rar4FileSplitBefore == 0,
+		FirstBlock:    !h.continuesPrevious(),
 		LastBlock:     flags&rar4FileSplitAfter == 0,
 		Encrypted:     flags&rar4FilePassword != 0,
 		UnpackVersion: int(ver),
